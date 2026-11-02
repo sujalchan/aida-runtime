@@ -1,21 +1,21 @@
-use std::cmp::Ordering;
+use std::{borrow::Cow, cmp::Ordering};
 
-use super::ScratchValue;
+use super::{ScratchInput, ScratchValueView};
 
 // convert a scratch value to a number for arithmetic
-fn to_number(value: &ScratchValue) -> f64 {
+fn to_number(value: ScratchValueView<'_>) -> f64 {
     let number = match value {
-        ScratchValue::Number(number) => *number,
+        ScratchValueView::Number(number) => number,
 
-        ScratchValue::Boolean(value) => {
-            if *value {
+        ScratchValueView::Boolean(value) => {
+            if value {
                 1.0
             } else {
                 0.0
             }
         }
 
-        ScratchValue::Text(text) => {
+        ScratchValueView::Text(text) => {
             let text = text.trim();
 
             if text.is_empty() {
@@ -30,8 +30,8 @@ fn to_number(value: &ScratchValue) -> f64 {
 }
 
 /// Convert a Scratch value to a number using Scratch's arithmetic rules.
-pub fn scratch_to_number(value: impl Into<ScratchValue>) -> f64 {
-    to_number(&value.into())
+pub fn scratch_to_number(value: impl ScratchInput) -> f64 {
+    to_number(value.scratch_view())
 }
 
 fn scratch_trig_round(value: f64) -> f64 {
@@ -45,20 +45,20 @@ fn scratch_trig_round(value: f64) -> f64 {
 }
 
 /// Scratch's sine reporter: degrees in, rounded to 10 decimal places.
-pub fn scratch_sin(value: impl Into<ScratchValue>) -> f64 {
+pub fn scratch_sin(value: impl ScratchInput) -> f64 {
     let degrees = scratch_to_number(value);
     scratch_trig_round(((std::f64::consts::PI * degrees) / 180.0).sin())
 }
 
 /// Scratch's cosine reporter: degrees in, rounded to 10 decimal places.
-pub fn scratch_cos(value: impl Into<ScratchValue>) -> f64 {
+pub fn scratch_cos(value: impl ScratchInput) -> f64 {
     let degrees = scratch_to_number(value);
     scratch_trig_round(((std::f64::consts::PI * degrees) / 180.0).cos())
 }
 
 /// Scratch's tangent reporter: degrees in, rounded to 10 decimal places,
 /// with Scratch VM's exact singularity handling.
-pub fn scratch_tan(value: impl Into<ScratchValue>) -> f64 {
+pub fn scratch_tan(value: impl ScratchInput) -> f64 {
     let degrees = scratch_to_number(value) % 360.0;
     match degrees {
         -270.0 | 90.0 => f64::INFINITY,
@@ -68,21 +68,21 @@ pub fn scratch_tan(value: impl Into<ScratchValue>) -> f64 {
 }
 
 /// Scratch's inverse sine in degrees, using a stable atan2 form.
-pub fn scratch_asin_degrees(value: impl Into<ScratchValue>) -> f64 {
+pub fn scratch_asin_degrees(value: impl ScratchInput) -> f64 {
     let number = scratch_to_number(value);
     let radians = scratch_asin_radians(number);
     radians * 180.0 / std::f64::consts::PI
 }
 
 /// Scratch's inverse cosine in degrees, using the half-angle identity.
-pub fn scratch_acos_degrees(value: impl Into<ScratchValue>) -> f64 {
+pub fn scratch_acos_degrees(value: impl ScratchInput) -> f64 {
     let number = scratch_to_number(value);
     let radians = 2.0 * scratch_asin_radians(((1.0 - number) / 2.0).sqrt());
     radians * 180.0 / std::f64::consts::PI
 }
 
 /// Scratch's inverse tangent in degrees.
-pub fn scratch_atan_degrees(value: impl Into<ScratchValue>) -> f64 {
+pub fn scratch_atan_degrees(value: impl ScratchInput) -> f64 {
     let radians = scratch_to_number(value).atan();
     radians * 180.0 / std::f64::consts::PI
 }
@@ -92,73 +92,73 @@ fn scratch_asin_radians(number: f64) -> f64 {
 }
 
 // convert a scratch value to text
-fn to_text(value: &ScratchValue) -> String {
+pub(super) fn to_text(value: ScratchValueView<'_>) -> Cow<'_, str> {
     match value {
-        ScratchValue::Number(number) => {
+        ScratchValueView::Number(number) => {
             if number.is_nan() {
-                "NaN".to_owned()
-            } else if *number == f64::INFINITY {
-                "Infinity".to_owned()
-            } else if *number == f64::NEG_INFINITY {
-                "-Infinity".to_owned()
-            } else if *number == 0.0 {
-                "0".to_owned()
+                Cow::Borrowed("NaN")
+            } else if number == f64::INFINITY {
+                Cow::Borrowed("Infinity")
+            } else if number == f64::NEG_INFINITY {
+                Cow::Borrowed("-Infinity")
+            } else if number == 0.0 {
+                Cow::Borrowed("0")
             } else {
-                number.to_string()
+                Cow::Owned(number.to_string())
             }
         }
 
-        ScratchValue::Text(text) => text.clone(),
+        ScratchValueView::Text(text) => Cow::Borrowed(text),
 
-        ScratchValue::Boolean(value) => value.to_string(),
+        ScratchValueView::Boolean(value) => Cow::Borrowed(if value { "true" } else { "false" }),
     }
 }
 
 // convert a scratch value to a boolean
-pub fn scratch_bool(value: impl Into<ScratchValue>) -> bool {
-    match value.into() {
-        ScratchValue::Boolean(value) => value,
+pub fn scratch_bool(value: impl ScratchInput) -> bool {
+    match value.scratch_view() {
+        ScratchValueView::Boolean(value) => value,
 
-        ScratchValue::Number(number) => number != 0.0 && !number.is_nan(),
+        ScratchValueView::Number(number) => number != 0.0 && !number.is_nan(),
 
-        ScratchValue::Text(text) => {
+        ScratchValueView::Text(text) => {
             !text.is_empty() && text != "0" && !text.eq_ignore_ascii_case("false")
         }
     }
 }
 
-pub fn scratch_add(left: impl Into<ScratchValue>, right: impl Into<ScratchValue>) -> f64 {
-    to_number(&left.into()) + to_number(&right.into())
+pub fn scratch_add(left: impl ScratchInput, right: impl ScratchInput) -> f64 {
+    to_number(left.scratch_view()) + to_number(right.scratch_view())
 }
 
-pub fn scratch_subtract(left: impl Into<ScratchValue>, right: impl Into<ScratchValue>) -> f64 {
-    to_number(&left.into()) - to_number(&right.into())
+pub fn scratch_subtract(left: impl ScratchInput, right: impl ScratchInput) -> f64 {
+    to_number(left.scratch_view()) - to_number(right.scratch_view())
 }
 
-pub fn scratch_multiply(left: impl Into<ScratchValue>, right: impl Into<ScratchValue>) -> f64 {
-    to_number(&left.into()) * to_number(&right.into())
+pub fn scratch_multiply(left: impl ScratchInput, right: impl ScratchInput) -> f64 {
+    to_number(left.scratch_view()) * to_number(right.scratch_view())
 }
 
-pub fn scratch_divide(left: impl Into<ScratchValue>, right: impl Into<ScratchValue>) -> f64 {
-    to_number(&left.into()) / to_number(&right.into())
+pub fn scratch_divide(left: impl ScratchInput, right: impl ScratchInput) -> f64 {
+    to_number(left.scratch_view()) / to_number(right.scratch_view())
 }
 
 // try a numeric conversion for comparisons
 //
 // whitespace is treated as text here, rather than as zero
-fn comparison_number(value: &ScratchValue) -> Option<f64> {
+fn comparison_number(value: ScratchValueView<'_>) -> Option<f64> {
     match value {
-        ScratchValue::Number(number) => {
+        ScratchValueView::Number(number) => {
             if number.is_nan() {
                 None
             } else {
-                Some(*number)
+                Some(number)
             }
         }
 
-        ScratchValue::Boolean(value) => Some(if *value { 1.0 } else { 0.0 }),
+        ScratchValueView::Boolean(value) => Some(if value { 1.0 } else { 0.0 }),
 
-        ScratchValue::Text(text) => {
+        ScratchValueView::Text(text) => {
             let text = text.trim();
 
             if text.is_empty() {
@@ -172,60 +172,62 @@ fn comparison_number(value: &ScratchValue) -> Option<f64> {
 
 // compare numerically when both values can be read as numbers;
 // otherwise compare their lowercase text
-pub fn scratch_compare(left: impl Into<ScratchValue>, right: impl Into<ScratchValue>) -> Ordering {
-    let left = left.into();
-    let right = right.into();
+pub fn scratch_compare(left: impl ScratchInput, right: impl ScratchInput) -> Ordering {
+    let left = left.scratch_view();
+    let right = right.scratch_view();
 
     if let (Some(left_number), Some(right_number)) =
-        (comparison_number(&left), comparison_number(&right))
+        (comparison_number(left), comparison_number(right))
     {
         return left_number
             .partial_cmp(&right_number)
             .unwrap_or(Ordering::Equal);
     }
 
-    let left_text = to_text(&left).to_lowercase();
-    let right_text = to_text(&right).to_lowercase();
+    let left_text = to_text(left).to_lowercase();
+    let right_text = to_text(right).to_lowercase();
 
     // javascript compares strings by utf-16 code units
     left_text.encode_utf16().cmp(right_text.encode_utf16())
 }
 
-pub fn scratch_equals(left: impl Into<ScratchValue>, right: impl Into<ScratchValue>) -> bool {
+pub fn scratch_equals(left: impl ScratchInput, right: impl ScratchInput) -> bool {
     scratch_compare(left, right) == Ordering::Equal
 }
 
-pub fn scratch_greater_than(left: impl Into<ScratchValue>, right: impl Into<ScratchValue>) -> bool {
+pub fn scratch_greater_than(left: impl ScratchInput, right: impl ScratchInput) -> bool {
     scratch_compare(left, right) == Ordering::Greater
 }
 
-pub fn scratch_less_than(left: impl Into<ScratchValue>, right: impl Into<ScratchValue>) -> bool {
+pub fn scratch_less_than(left: impl ScratchInput, right: impl ScratchInput) -> bool {
     scratch_compare(left, right) == Ordering::Less
 }
 
-pub fn scratch_and(left: impl Into<ScratchValue>, right: impl Into<ScratchValue>) -> bool {
+pub fn scratch_and(left: impl ScratchInput, right: impl ScratchInput) -> bool {
     scratch_bool(left) && scratch_bool(right)
 }
 
-pub fn scratch_or(left: impl Into<ScratchValue>, right: impl Into<ScratchValue>) -> bool {
+pub fn scratch_or(left: impl ScratchInput, right: impl ScratchInput) -> bool {
     scratch_bool(left) || scratch_bool(right)
 }
 
-pub fn scratch_not(value: impl Into<ScratchValue>) -> bool {
+pub fn scratch_not(value: impl ScratchInput) -> bool {
     !scratch_bool(value)
 }
 
-pub fn scratch_join(left: impl Into<ScratchValue>, right: impl Into<ScratchValue>) -> String {
-    let left = to_text(&left.into());
-    let right = to_text(&right.into());
-
-    format!("{left}{right}")
+pub fn scratch_join(left: impl ScratchInput, right: impl ScratchInput) -> String {
+    let left = to_text(left.scratch_view());
+    let right = to_text(right.scratch_view());
+    let mut result = String::with_capacity(left.len() + right.len());
+    result.push_str(&left);
+    result.push_str(&right);
+    result
 }
 
 // scratch counts letters starting at 1
-pub fn scratch_letter(index: impl Into<ScratchValue>, text: impl Into<ScratchValue>) -> String {
-    let index = to_number(&index.into());
-    let text = to_text(&text.into());
+pub fn scratch_letter(index: impl ScratchInput, text: impl ScratchInput) -> String {
+    let index = to_number(index.scratch_view());
+    let text = to_text(text.scratch_view());
 
     if !index.is_finite() || index < 1.0 {
         return String::new();
@@ -239,22 +241,22 @@ pub fn scratch_letter(index: impl Into<ScratchValue>, text: impl Into<ScratchVal
     }
 }
 
-pub fn scratch_length(value: impl Into<ScratchValue>) -> f64 {
-    let text = to_text(&value.into());
+pub fn scratch_length(value: impl ScratchInput) -> f64 {
+    let text = to_text(value.scratch_view());
     text.encode_utf16().count() as f64
 }
 
-pub fn scratch_contains(text: impl Into<ScratchValue>, search: impl Into<ScratchValue>) -> bool {
-    let text = to_text(&text.into()).to_lowercase();
-    let search = to_text(&search.into()).to_lowercase();
+pub fn scratch_contains(text: impl ScratchInput, search: impl ScratchInput) -> bool {
+    let text = to_text(text.scratch_view()).to_lowercase();
+    let search = to_text(search.scratch_view()).to_lowercase();
 
     text.contains(&search)
 }
 
 // scratch modulo follows the sign of the divisor
-pub fn scratch_mod(left: impl Into<ScratchValue>, right: impl Into<ScratchValue>) -> f64 {
-    let left = to_number(&left.into());
-    let right = to_number(&right.into());
+pub fn scratch_mod(left: impl ScratchInput, right: impl ScratchInput) -> f64 {
+    let left = to_number(left.scratch_view());
+    let right = to_number(right.scratch_view());
 
     let remainder = left % right;
 
@@ -266,8 +268,8 @@ pub fn scratch_mod(left: impl Into<ScratchValue>, right: impl Into<ScratchValue>
 }
 
 // halfway values round toward positive infinity
-pub fn scratch_round(value: impl Into<ScratchValue>) -> f64 {
-    let number = to_number(&value.into());
+pub fn scratch_round(value: impl ScratchInput) -> f64 {
+    let number = to_number(value.scratch_view());
 
     if !number.is_finite() || number == 0.0 {
         return number;
@@ -291,6 +293,7 @@ pub fn scratch_round(value: impl Into<ScratchValue>) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::ScratchValue;
 
     #[test]
     fn compares_numbers_and_text() {
@@ -332,6 +335,37 @@ mod tests {
         assert_eq!(scratch_to_number(" 5.5 "), 5.5);
         assert_eq!(scratch_to_number(true), 1.0);
         assert_eq!(scratch_to_number("not a number"), 0.0);
+    }
+
+    #[test]
+    fn operators_borrow_dynamic_values_across_type_changes() {
+        let mut value = ScratchValue::Number(2.0);
+        assert_eq!(scratch_add(&value, 3.0), 5.0);
+
+        value = ScratchValue::Text(" 4.5 ".to_owned());
+        assert_eq!(scratch_multiply(&value, 2.0), 9.0);
+        assert_eq!(scratch_join(&value, "!"), " 4.5 !");
+
+        value = ScratchValue::Boolean(true);
+        assert_eq!(scratch_add(&value, 2.0), 3.0);
+        assert_eq!(scratch_join(&value, "!"), "true!");
+    }
+
+    #[test]
+    fn loop_style_conversions_keep_text_and_mutated_variable_values_dynamic() {
+        let mut value = ScratchValue::Text("3".to_owned());
+        let mut iterations = 0;
+        while scratch_to_number(&value) > 0.0 {
+            iterations += 1;
+            value = ScratchValue::Number(scratch_to_number(&value) - 1.0);
+        }
+        assert_eq!(iterations, 3);
+        assert_eq!(value, ScratchValue::Number(0.0));
+
+        value = ScratchValue::Text("false".to_owned());
+        assert!(!scratch_bool(&value));
+        value = ScratchValue::Boolean(true);
+        assert!(scratch_bool(&value));
     }
 
     #[test]

@@ -4,7 +4,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use super::{ScratchValue, scratch_to_number};
+use super::{ScratchInput, ScratchValueView, scratch_to_number};
 
 /// Small per-thread PRNG used by Scratch's random reporter.
 pub struct ScratchRandom {
@@ -72,10 +72,9 @@ thread_local! {
 
 /// Return a random Scratch number between the two inputs, inclusive when both
 /// converted endpoints are integers.
-pub fn scratch_random(from: impl Into<ScratchValue>, to: impl Into<ScratchValue>) -> f64 {
-    let from = from.into();
-    let to = to.into();
-    let integer_bounds = is_scratch_integer(&from) && is_scratch_integer(&to);
+pub fn scratch_random(from: impl ScratchInput, to: impl ScratchInput) -> f64 {
+    let integer_bounds =
+        is_scratch_integer(from.scratch_view()) && is_scratch_integer(to.scratch_view());
     let from = scratch_to_number(from);
     let to = scratch_to_number(to);
     THREAD_RANDOM.with(|random| {
@@ -85,11 +84,11 @@ pub fn scratch_random(from: impl Into<ScratchValue>, to: impl Into<ScratchValue>
     })
 }
 
-fn is_scratch_integer(value: &ScratchValue) -> bool {
+fn is_scratch_integer(value: ScratchValueView<'_>) -> bool {
     match value {
-        ScratchValue::Number(number) => number.is_nan() || number.fract() == 0.0,
-        ScratchValue::Boolean(_) => true,
-        ScratchValue::Text(text) => !text.contains('.'),
+        ScratchValueView::Number(number) => number.is_nan() || number.fract() == 0.0,
+        ScratchValueView::Boolean(_) => true,
+        ScratchValueView::Text(text) => !text.contains('.'),
     }
 }
 

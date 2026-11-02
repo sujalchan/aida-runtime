@@ -1,0 +1,987 @@
+// Copyright (c) 2026 AIDA AST contributers (see AUTHORS.md)
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use super::ScratchState;
+use std::time::Instant;
+
+pub trait Clock {
+    fn now_millis(&self) -> u64;
+}
+
+pub struct WarpBudget {
+    started_at: Option<u64>,
+    limit_millis: u64,
+}
+
+impl WarpBudget {
+    pub fn new(limit_millis: u64) -> Self {
+        Self {
+            started_at: None,
+            limit_millis,
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.started_at = None;
+    }
+
+    pub fn expired(&mut self, clock: &dyn Clock) -> bool {
+        let now = clock.now_millis();
+        let started = *self.started_at.get_or_insert(now);
+        if now.saturating_sub(started) > self.limit_millis {
+            self.reset();
+            true
+        } else {
+            false
+        }
+    }
+}
+
+struct MonotonicClock {
+    start: Instant,
+}
+
+impl MonotonicClock {
+    fn new() -> Self {
+        Self {
+            start: Instant::now(),
+        }
+    }
+}
+
+impl Clock for MonotonicClock {
+    fn now_millis(&self) -> u64 {
+        self.start.elapsed().as_millis().min(u64::MAX as u128) as u64
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScriptStatus {
+    Yield,
+    WaitUntil(u64),
+    Complete,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SchedulerStatus {
+    /// one script advanced and another host turn may run immediately.
+    Progressed,
+    /// all active scripts are waiting until the given clock time.
+    WaitingUntil(u64),
+    /// no active scripts remain.
+    Complete,
+}
+
+pub trait ResumableScript {
+    fn step(&mut self, state: &mut ScratchState, clock: &dyn Clock) -> ScriptStatus;
+}
+
+pub struct ScriptScheduler<S> {
+    scripts: Vec<S>,
+    wake_at: Vec<Option<u64>>,
+    next: usize,
+    clock: Box<dyn Clock>,
+}
+
+impl<S: ResumableScript> ScriptScheduler<S> {
+    pub fn new(scripts: Vec<S>) -> Self {
+        Self::with_clock(scripts, Box::new(MonotonicClock::new()))
+    }
+
+    pub fn with_clock(scripts: Vec<S>, clock: Box<dyn Clock>) -> Self {
+        Self {
+            wake_at: vec![None; scripts.len()],
+            scripts,
+            next: 0,
+            clock,
+        }
+    }
+
+    pub fn run_until_complete(&mut self, state: &mut ScratchState) {
+        loop {
+            match self.advance(state) {
+                SchedulerStatus::Progressed => {}
+                SchedulerStatus::WaitingUntil(deadline) => {
+                    let now = self.clock.now_millis();
+                    if deadline > now {
+                        std::thread::sleep(std::time::Duration::from_millis(deadline - now));
+                    }
+                }
+                SchedulerStatus::Complete => return,
+            }
+        }
+    }
+
+    /// run one runnable script until it yields, waits, or completes.
+    pub fn step(&mut self, state: &mut ScratchState) -> bool {
+        matches!(self.advance(state), SchedulerStatus::Progressed)
+    }
+
+    /// advance one runnable script, or report when the host should wake again.
+    pub fn advance(&mut self, state: &mut ScratchState) -> SchedulerStatus {
+        if self.scripts.is_empty() {
+            return SchedulerStatus::Complete;
+        }
+        let now = self.clock.now_millis();
+        for offset in 0..self.scripts.len() {
+            let index = (self.next + offset) % self.scripts.len();
+            if self.wake_at[index].is_none_or(|deadline| deadline <= now) {
+                self.next = index;
+                let status = self.scripts[index].step(state, self.clock.as_ref());
+                match status {
+                    ScriptStatus::Yield => {
+                        self.wake_at[index] = None;
+                        self.next = (index + 1) % self.scripts.len();
+                    }
+                    ScriptStatus::WaitUntil(deadline) => {
+                        self.wake_at[index] = Some(deadline);
+                        self.next = (index + 1) % self.scripts.len();
+                    }
+                    ScriptStatus::Complete => {
+                        self.scripts.remove(index);
+                        self.wake_at.remove(index);
+                        self.next = if self.scripts.is_empty() {
+                            0
+                        } else {
+                            index % self.scripts.len()
+                        };
+                    }
+                }
+                return SchedulerStatus::Progressed;
+            }
+        }
+        SchedulerStatus::WaitingUntil(self.wake_at.iter().flatten().copied().min().unwrap())
+    }
+
+    /// stop active scripts and start a fresh matching event set.
+    pub fn restart(&mut self, scripts: Vec<S>) {
+        self.scripts = scripts;
+        self.wake_at = vec![None; self.scripts.len()];
+        self.next = 0;
+    }
+
+    pub fn active_scripts(&self) -> usize {
+        self.scripts.len()
+    }
+
+    pub fn duration_until(&self, deadline: u64) -> std::time::Duration {
+        std::time::Duration::from_millis(deadline.saturating_sub(self.clock.now_millis()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Clock, ResumableScript, ScriptScheduler, ScriptStatus, WarpBudget};
+    use crate::runtime::{
+        ScratchState, ScratchValue, scratch_bool, scratch_round, scratch_to_number,
+    };
+
+    struct FirstScript {
+        pc: u8,
+    }
+
+    impl ResumableScript for FirstScript {
+        fn step(&mut self, state: &mut ScratchState, _clock: &dyn super::Clock) -> ScriptStatus {
+            match self.pc {
+                0 => {
+                    let starts = state.get(1).clone();
+                    state.set(1, crate::runtime::scratch_add(&starts, 1.0_f64).into());
+                    state.set(0, 1.0_f64.into());
+                    self.pc = 1;
+                    ScriptStatus::Yield
+                }
+                1 => {
+                    assert_eq!(state.get(0), &ScratchValue::Text("2".to_owned()));
+                    state.set(0, ScratchValue::Boolean(false));
+                    self.pc = 2;
+                    ScriptStatus::Complete
+                }
+                _ => panic!("completed script was stepped again"),
+            }
+        }
+    }
+
+    struct SecondScript {
+        pc: u8,
+    }
+
+    impl ResumableScript for SecondScript {
+        fn step(&mut self, state: &mut ScratchState, _clock: &dyn super::Clock) -> ScriptStatus {
+            match self.pc {
+                0 => {
+                    let starts = state.get(2).clone();
+                    state.set(2, crate::runtime::scratch_add(&starts, 1.0_f64).into());
+                    assert_eq!(state.get(0), &ScratchValue::Number(1.0));
+                    state.set(0, ScratchValue::Text("2".to_owned()));
+                    self.pc = 1;
+                    ScriptStatus::Yield
+                }
+                1 => {
+                    assert_eq!(state.get(0), &ScratchValue::Boolean(false));
+                    let resumes = state.get(3).clone();
+                    state.set(3, crate::runtime::scratch_add(&resumes, 1.0_f64).into());
+                    self.pc = 2;
+                    ScriptStatus::Complete
+                }
+                _ => panic!("completed script was stepped again"),
+            }
+        }
+    }
+
+    enum FixtureScript {
+        First(FirstScript),
+        Second(SecondScript),
+    }
+
+    impl ResumableScript for FixtureScript {
+        fn step(&mut self, state: &mut ScratchState, clock: &dyn super::Clock) -> ScriptStatus {
+            match self {
+                Self::First(script) => script.step(state, clock),
+                Self::Second(script) => script.step(state, clock),
+            }
+        }
+    }
+
+    #[test]
+    fn resumes_green_flag_scripts_with_live_shared_variables() {
+        let mut state = ScratchState::new(vec![
+            ScratchValue::Number(0.0),
+            ScratchValue::Number(0.0),
+            ScratchValue::Number(0.0),
+            ScratchValue::Number(0.0),
+        ]);
+        let scripts = vec![
+            FixtureScript::First(FirstScript { pc: 0 }),
+            FixtureScript::Second(SecondScript { pc: 0 }),
+        ];
+        let mut scheduler = ScriptScheduler::new(scripts);
+
+        assert_eq!(scheduler.active_scripts(), 2);
+        scheduler.run_until_complete(&mut state);
+
+        assert_eq!(scheduler.active_scripts(), 0);
+        assert_eq!(state.get(0), &ScratchValue::Boolean(false));
+        assert_eq!(state.get(1), &ScratchValue::Number(1.0));
+        assert_eq!(state.get(2), &ScratchValue::Number(1.0));
+        assert_eq!(state.get(3), &ScratchValue::Number(1.0));
+        scheduler.run_until_complete(&mut state);
+        assert_eq!(state.get(1), &ScratchValue::Number(1.0));
+        assert_eq!(state.get(2), &ScratchValue::Number(1.0));
+        assert_eq!(state.get(3), &ScratchValue::Number(1.0));
+    }
+
+    enum LoopRole {
+        Repeat {
+            count: RepeatCount,
+            remaining: Option<usize>,
+            hits_slot: usize,
+        },
+        Write {
+            slot: usize,
+            value: ScratchValue,
+        },
+        RepeatUntil {
+            condition_slot: usize,
+            hits_slot: usize,
+        },
+        NestedRepeat {
+            outer_remaining: usize,
+            inner_remaining: usize,
+            outer_hits_slot: usize,
+            inner_hits_slot: usize,
+            done: bool,
+        },
+        Forever {
+            hits_slot: usize,
+        },
+        Observe {
+            source_slot: usize,
+            observed_slot: usize,
+        },
+    }
+
+    enum RepeatCount {
+        Fixed(usize),
+        Variable(usize),
+    }
+
+    struct LoopScript {
+        role: LoopRole,
+    }
+
+    impl ResumableScript for LoopScript {
+        fn step(&mut self, state: &mut ScratchState, _clock: &dyn super::Clock) -> ScriptStatus {
+            match &mut self.role {
+                LoopRole::Repeat {
+                    count,
+                    remaining,
+                    hits_slot,
+                } => {
+                    let remaining = remaining.get_or_insert_with(|| match count {
+                        RepeatCount::Fixed(count) => *count,
+                        RepeatCount::Variable(slot) => {
+                            scratch_round(state.get(*slot)).max(0.0) as usize
+                        }
+                    });
+                    if *remaining == 0 {
+                        return ScriptStatus::Complete;
+                    }
+                    increment(state, *hits_slot);
+                    *remaining -= 1;
+                    ScriptStatus::Yield
+                }
+                LoopRole::Write { slot, value } => {
+                    state.set(*slot, value.clone());
+                    ScriptStatus::Complete
+                }
+                LoopRole::RepeatUntil {
+                    condition_slot,
+                    hits_slot,
+                } => {
+                    if scratch_bool(state.get(*condition_slot)) {
+                        ScriptStatus::Complete
+                    } else {
+                        increment(state, *hits_slot);
+                        ScriptStatus::Yield
+                    }
+                }
+                LoopRole::NestedRepeat {
+                    outer_remaining,
+                    inner_remaining,
+                    outer_hits_slot,
+                    inner_hits_slot,
+                    done,
+                } => {
+                    if *done {
+                        return ScriptStatus::Complete;
+                    }
+                    if *inner_remaining > 0 {
+                        increment(state, *inner_hits_slot);
+                        *inner_remaining -= 1;
+                    } else {
+                        increment(state, *outer_hits_slot);
+                        *outer_remaining -= 1;
+                        if *outer_remaining == 0 {
+                            *done = true;
+                        } else {
+                            *inner_remaining = 3;
+                        }
+                    }
+                    ScriptStatus::Yield
+                }
+                LoopRole::Forever { hits_slot } => {
+                    increment(state, *hits_slot);
+                    ScriptStatus::Yield
+                }
+                LoopRole::Observe {
+                    source_slot,
+                    observed_slot,
+                } => {
+                    if scratch_to_number(state.get(*source_slot)) > 0.0 {
+                        state.set(*observed_slot, true.into());
+                        ScriptStatus::Complete
+                    } else {
+                        ScriptStatus::Yield
+                    }
+                }
+            }
+        }
+    }
+
+    fn increment(state: &mut ScratchState, slot: usize) {
+        let value = scratch_to_number(state.get(slot)) + 1.0;
+        state.set(slot, value.into());
+    }
+
+    fn number_state(values: &[f64]) -> ScratchState {
+        ScratchState::new(values.iter().copied().map(ScratchValue::Number).collect())
+    }
+
+    #[test]
+    fn repeat_zero_and_positive_counts_yield_once_per_body_iteration() {
+        let mut state = number_state(&[0.0, 0.0]);
+        let scripts = vec![
+            LoopScript {
+                role: LoopRole::Repeat {
+                    count: RepeatCount::Fixed(0),
+                    remaining: None,
+                    hits_slot: 0,
+                },
+            },
+            LoopScript {
+                role: LoopRole::Repeat {
+                    count: RepeatCount::Fixed(2),
+                    remaining: None,
+                    hits_slot: 1,
+                },
+            },
+        ];
+        let mut scheduler = ScriptScheduler::new(scripts);
+
+        scheduler.run_until_complete(&mut state);
+
+        assert_eq!(state.get(0), &ScratchValue::Number(0.0));
+        assert_eq!(state.get(1), &ScratchValue::Number(2.0));
+    }
+
+    #[test]
+    fn repeat_keeps_its_entry_count_when_the_source_variable_changes() {
+        let mut state = ScratchState::new(vec![
+            ScratchValue::Text("3".to_owned()),
+            ScratchValue::Number(0.0),
+        ]);
+        let scripts = vec![
+            LoopScript {
+                role: LoopRole::Repeat {
+                    count: RepeatCount::Variable(0),
+                    remaining: None,
+                    hits_slot: 1,
+                },
+            },
+            LoopScript {
+                role: LoopRole::Write {
+                    slot: 0,
+                    value: ScratchValue::Boolean(false),
+                },
+            },
+        ];
+        let mut scheduler = ScriptScheduler::new(scripts);
+
+        scheduler.run_until_complete(&mut state);
+
+        assert_eq!(state.get(0), &ScratchValue::Boolean(false));
+        assert_eq!(state.get(1), &ScratchValue::Number(3.0));
+    }
+
+    #[test]
+    fn repeat_until_rechecks_a_condition_changed_by_another_script() {
+        let mut state = ScratchState::new(vec![
+            ScratchValue::Boolean(false),
+            ScratchValue::Number(0.0),
+        ]);
+        let scripts = vec![
+            LoopScript {
+                role: LoopRole::RepeatUntil {
+                    condition_slot: 0,
+                    hits_slot: 1,
+                },
+            },
+            LoopScript {
+                role: LoopRole::Write {
+                    slot: 0,
+                    value: ScratchValue::Boolean(true),
+                },
+            },
+        ];
+        let mut scheduler = ScriptScheduler::new(scripts);
+
+        scheduler.run_until_complete(&mut state);
+
+        assert_eq!(state.get(1), &ScratchValue::Number(1.0));
+        assert_eq!(state.get(0), &ScratchValue::Boolean(true));
+    }
+
+    #[test]
+    fn nested_repeat_progress_survives_each_yield() {
+        let mut state = number_state(&[0.0, 0.0]);
+        let scripts = vec![LoopScript {
+            role: LoopRole::NestedRepeat {
+                outer_remaining: 2,
+                inner_remaining: 3,
+                outer_hits_slot: 0,
+                inner_hits_slot: 1,
+                done: false,
+            },
+        }];
+        let mut scheduler = ScriptScheduler::new(scripts);
+
+        scheduler.run_until_complete(&mut state);
+
+        assert_eq!(state.get(0), &ScratchValue::Number(2.0));
+        assert_eq!(state.get(1), &ScratchValue::Number(6.0));
+    }
+
+    #[test]
+    fn forever_yields_so_another_green_flag_script_can_finish() {
+        let mut state = ScratchState::new(vec![
+            ScratchValue::Number(0.0),
+            ScratchValue::Boolean(false),
+        ]);
+        let scripts = vec![
+            LoopScript {
+                role: LoopRole::Forever { hits_slot: 0 },
+            },
+            LoopScript {
+                role: LoopRole::Observe {
+                    source_slot: 0,
+                    observed_slot: 1,
+                },
+            },
+        ];
+        let mut scheduler = ScriptScheduler::new(scripts);
+
+        assert!(scheduler.step(&mut state));
+        assert_eq!(state.get(0), &ScratchValue::Number(1.0));
+        assert!(scheduler.step(&mut state));
+        assert_eq!(state.get(1), &ScratchValue::Boolean(true));
+        assert_eq!(scheduler.active_scripts(), 1);
+    }
+
+    #[derive(Clone)]
+    struct ManualClock(std::rc::Rc<std::cell::Cell<u64>>);
+
+    impl ManualClock {
+        fn new() -> Self {
+            Self(std::rc::Rc::new(std::cell::Cell::new(0)))
+        }
+
+        fn set(&self, milliseconds: u64) {
+            self.0.set(milliseconds);
+        }
+    }
+
+    impl Clock for ManualClock {
+        fn now_millis(&self) -> u64 {
+            self.0.get()
+        }
+    }
+
+    struct WaitScript {
+        slot: usize,
+        duration: u64,
+        phase: u8,
+    }
+
+    impl ResumableScript for WaitScript {
+        fn step(&mut self, state: &mut ScratchState, clock: &dyn Clock) -> ScriptStatus {
+            match self.phase {
+                0 => {
+                    increment(state, self.slot);
+                    self.phase = 1;
+                    ScriptStatus::WaitUntil(clock.now_millis().saturating_add(self.duration))
+                }
+                1 => {
+                    state.set(
+                        self.slot,
+                        (scratch_to_number(state.get(self.slot)) + 10.0).into(),
+                    );
+                    self.phase = 2;
+                    ScriptStatus::Complete
+                }
+                _ => panic!("completed wait script was stepped again"),
+            }
+        }
+    }
+
+    #[test]
+    fn zero_duration_wait_yields_once_to_the_next_script() {
+        let clock = ManualClock::new();
+        let mut state = number_state(&[0.0, 0.0]);
+        let scripts = vec![
+            WaitScript {
+                slot: 0,
+                duration: 0,
+                phase: 0,
+            },
+            WaitScript {
+                slot: 1,
+                duration: 0,
+                phase: 1,
+            },
+        ];
+        let mut scheduler = ScriptScheduler::with_clock(scripts, Box::new(clock));
+
+        assert_eq!(
+            scheduler.advance(&mut state),
+            super::SchedulerStatus::Progressed
+        );
+        assert_eq!(state.get(0), &ScratchValue::Number(1.0));
+        assert_eq!(state.get(1), &ScratchValue::Number(0.0));
+        assert_eq!(
+            scheduler.advance(&mut state),
+            super::SchedulerStatus::Progressed
+        );
+        assert_eq!(state.get(0), &ScratchValue::Number(1.0));
+        assert_eq!(state.get(1), &ScratchValue::Number(10.0));
+        assert_eq!(
+            scheduler.advance(&mut state),
+            super::SchedulerStatus::Progressed
+        );
+        assert_eq!(state.get(0), &ScratchValue::Number(11.0));
+    }
+
+    #[test]
+    fn positive_wait_reports_a_deadline_without_polling() {
+        let clock = ManualClock::new();
+        let mut state = number_state(&[0.0]);
+        let mut scheduler = ScriptScheduler::with_clock(
+            vec![WaitScript {
+                slot: 0,
+                duration: 250,
+                phase: 0,
+            }],
+            Box::new(clock.clone()),
+        );
+
+        assert_eq!(
+            scheduler.advance(&mut state),
+            super::SchedulerStatus::Progressed
+        );
+        assert_eq!(
+            scheduler.advance(&mut state),
+            super::SchedulerStatus::WaitingUntil(250)
+        );
+        clock.set(249);
+        assert_eq!(
+            scheduler.advance(&mut state),
+            super::SchedulerStatus::WaitingUntil(250)
+        );
+        assert_eq!(state.get(0), &ScratchValue::Number(1.0));
+        clock.set(250);
+        assert_eq!(
+            scheduler.advance(&mut state),
+            super::SchedulerStatus::Progressed
+        );
+        assert_eq!(state.get(0), &ScratchValue::Number(11.0));
+        assert_eq!(scheduler.active_scripts(), 0);
+    }
+
+    #[test]
+    fn multiple_waits_report_the_earliest_wake_time() {
+        let clock = ManualClock::new();
+        let mut state = number_state(&[0.0, 0.0]);
+        let mut scheduler = ScriptScheduler::with_clock(
+            vec![
+                WaitScript {
+                    slot: 0,
+                    duration: 80,
+                    phase: 0,
+                },
+                WaitScript {
+                    slot: 1,
+                    duration: 160,
+                    phase: 0,
+                },
+            ],
+            Box::new(clock.clone()),
+        );
+
+        assert_eq!(
+            scheduler.advance(&mut state),
+            super::SchedulerStatus::Progressed
+        );
+        assert_eq!(
+            scheduler.advance(&mut state),
+            super::SchedulerStatus::Progressed
+        );
+        assert_eq!(
+            scheduler.advance(&mut state),
+            super::SchedulerStatus::WaitingUntil(80)
+        );
+        clock.set(80);
+        assert_eq!(
+            scheduler.advance(&mut state),
+            super::SchedulerStatus::Progressed
+        );
+        assert_eq!(state.get(0), &ScratchValue::Number(11.0));
+        assert_eq!(state.get(1), &ScratchValue::Number(1.0));
+    }
+
+    struct RestartScript {
+        finish: bool,
+    }
+
+    impl ResumableScript for RestartScript {
+        fn step(&mut self, state: &mut ScratchState, _clock: &dyn Clock) -> ScriptStatus {
+            if self.finish {
+                let next = scratch_to_number(state.get(0)) + 1.0;
+                state.set(0, next.into());
+                ScriptStatus::Complete
+            } else {
+                state.set(0, 100.0.into());
+                self.finish = true;
+                ScriptStatus::Yield
+            }
+        }
+    }
+
+    #[test]
+    fn restart_drops_active_frames_and_starts_fresh_scripts_with_live_state() {
+        let mut state = number_state(&[4.0]);
+        let mut scheduler = ScriptScheduler::new(vec![RestartScript { finish: false }]);
+        assert_eq!(
+            scheduler.advance(&mut state),
+            super::SchedulerStatus::Progressed
+        );
+        assert_eq!(state.get(0), &ScratchValue::Number(100.0));
+
+        scheduler.restart(vec![RestartScript { finish: true }]);
+        assert_eq!(scheduler.active_scripts(), 1);
+        assert_eq!(
+            scheduler.advance(&mut state),
+            super::SchedulerStatus::Progressed
+        );
+        assert_eq!(state.get(0), &ScratchValue::Number(101.0));
+        assert_eq!(scheduler.active_scripts(), 0);
+    }
+
+    use std::cell::Cell;
+
+    struct TestClock {
+        now: Cell<u64>,
+        advance_per_read: u64,
+    }
+
+    impl TestClock {
+        fn advancing_by(milliseconds: u64) -> Self {
+            Self {
+                now: Cell::new(0),
+                advance_per_read: milliseconds,
+            }
+        }
+    }
+
+    impl Clock for TestClock {
+        fn now_millis(&self) -> u64 {
+            let now = self.now.get();
+            self.now.set(now.saturating_add(self.advance_per_read));
+            now
+        }
+    }
+
+    enum WarpRole {
+        Finite {
+            iterations: usize,
+            budget: WarpBudget,
+        },
+        Infinite {
+            iterations: usize,
+            budget: WarpBudget,
+        },
+        Observer {
+            seen: usize,
+        },
+    }
+
+    struct WarpScript(WarpRole);
+
+    impl ResumableScript for WarpScript {
+        fn step(&mut self, state: &mut ScratchState, clock: &dyn Clock) -> ScriptStatus {
+            match &mut self.0 {
+                WarpRole::Finite { iterations, budget } => {
+                    while *iterations > 0 {
+                        increment(state, 0);
+                        *iterations -= 1;
+                        if budget.expired(clock) {
+                            return ScriptStatus::Yield;
+                        }
+                    }
+                    ScriptStatus::Complete
+                }
+                WarpRole::Infinite { iterations, budget } => loop {
+                    increment(state, 0);
+                    *iterations += 1;
+                    if budget.expired(clock) {
+                        return ScriptStatus::Yield;
+                    }
+                },
+                WarpRole::Observer { seen } => {
+                    *seen += 1;
+                    state.set(1, (*seen as f64).into());
+                    ScriptStatus::Complete
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn finite_warp_work_finishes_before_another_script_runs() {
+        let state = &mut number_state(&[0.0, 0.0]);
+        let scripts = vec![
+            WarpScript(WarpRole::Finite {
+                iterations: 4,
+                budget: WarpBudget::new(500),
+            }),
+            WarpScript(WarpRole::Observer { seen: 0 }),
+        ];
+        let mut scheduler =
+            ScriptScheduler::with_clock(scripts, Box::new(TestClock::advancing_by(100)));
+
+        assert!(scheduler.step(state));
+        assert_eq!(state.get(0), &ScratchValue::Number(4.0));
+        assert_eq!(state.get(1), &ScratchValue::Number(0.0));
+        assert!(scheduler.step(state));
+        assert_eq!(state.get(1), &ScratchValue::Number(1.0));
+    }
+
+    #[test]
+    fn warp_budget_yields_an_infinite_loop_and_keeps_its_progress() {
+        let state = &mut number_state(&[0.0, 0.0]);
+        let scripts = vec![
+            WarpScript(WarpRole::Infinite {
+                iterations: 0,
+                budget: WarpBudget::new(500),
+            }),
+            WarpScript(WarpRole::Observer { seen: 0 }),
+        ];
+        let mut scheduler =
+            ScriptScheduler::with_clock(scripts, Box::new(TestClock::advancing_by(501)));
+
+        assert!(scheduler.step(state));
+        assert_eq!(state.get(0), &ScratchValue::Number(2.0));
+        assert!(scheduler.step(state));
+        assert_eq!(state.get(1), &ScratchValue::Number(1.0));
+        assert_eq!(scheduler.active_scripts(), 1);
+        assert!(scheduler.step(state));
+        assert_eq!(state.get(0), &ScratchValue::Number(4.0));
+    }
+
+    #[derive(Clone, Copy)]
+    enum CallKind {
+        Root,
+        Warp,
+        Normal,
+    }
+
+    struct CallFrame {
+        kind: CallKind,
+        pc: usize,
+        remaining: usize,
+        warp_mode: bool,
+    }
+
+    struct CallFixture {
+        enter_warp: bool,
+        frames: Vec<CallFrame>,
+    }
+
+    enum CallRunner {
+        Call(CallFixture),
+        Observer(WarpScript),
+    }
+
+    impl ResumableScript for CallRunner {
+        fn step(&mut self, state: &mut ScratchState, clock: &dyn Clock) -> ScriptStatus {
+            match self {
+                Self::Call(script) => script.step(state, clock),
+                Self::Observer(script) => script.step(state, clock),
+            }
+        }
+    }
+
+    impl ResumableScript for CallFixture {
+        fn step(&mut self, state: &mut ScratchState, _clock: &dyn Clock) -> ScriptStatus {
+            loop {
+                let Some(frame) = self.frames.last_mut() else {
+                    return ScriptStatus::Complete;
+                };
+                match frame.kind {
+                    CallKind::Root if frame.pc == 0 => {
+                        frame.pc = 1;
+                        self.frames.push(CallFrame {
+                            kind: if self.enter_warp {
+                                CallKind::Warp
+                            } else {
+                                CallKind::Normal
+                            },
+                            pc: 0,
+                            remaining: 2,
+                            warp_mode: self.enter_warp,
+                        });
+                    }
+                    CallKind::Root => {
+                        state.set(2, true.into());
+                        return ScriptStatus::Complete;
+                    }
+                    CallKind::Warp if frame.pc == 0 => {
+                        frame.pc = 1;
+                        let inherited_warp = frame.warp_mode;
+                        self.frames.push(CallFrame {
+                            kind: CallKind::Normal,
+                            pc: 0,
+                            remaining: 2,
+                            warp_mode: inherited_warp,
+                        });
+                    }
+                    CallKind::Warp => {
+                        self.frames.pop();
+                    }
+                    CallKind::Normal if frame.pc == 0 => {
+                        increment(state, 0);
+                        frame.remaining -= 1;
+                        if frame.remaining == 0 {
+                            frame.pc = 1;
+                        } else if !frame.warp_mode {
+                            return ScriptStatus::Yield;
+                        }
+                    }
+                    CallKind::Normal => {
+                        self.frames.pop();
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn nested_procedures_inherit_warp_and_normal_calls_resume_after_yield() {
+        let state = &mut number_state(&[0.0, 0.0, 0.0]);
+        let scripts = vec![
+            CallRunner::Call(CallFixture {
+                enter_warp: true,
+                frames: vec![CallFrame {
+                    kind: CallKind::Root,
+                    pc: 0,
+                    remaining: 0,
+                    warp_mode: false,
+                }],
+            }),
+            CallRunner::Observer(WarpScript(WarpRole::Observer { seen: 0 })),
+        ];
+        let mut scheduler =
+            ScriptScheduler::with_clock(scripts, Box::new(TestClock::advancing_by(100)));
+
+        assert!(scheduler.step(state));
+        assert_eq!(state.get(0), &ScratchValue::Number(2.0));
+        assert_eq!(state.get(1), &ScratchValue::Number(0.0));
+        assert_eq!(state.get(2), &ScratchValue::Boolean(true));
+        assert!(scheduler.step(state));
+        assert_eq!(state.get(1), &ScratchValue::Number(1.0));
+
+        let state = &mut number_state(&[0.0, 0.0, 0.0]);
+        let scripts = vec![
+            CallRunner::Call(CallFixture {
+                enter_warp: false,
+                frames: vec![CallFrame {
+                    kind: CallKind::Root,
+                    pc: 0,
+                    remaining: 0,
+                    warp_mode: false,
+                }],
+            }),
+            CallRunner::Observer(WarpScript(WarpRole::Observer { seen: 0 })),
+        ];
+        let mut scheduler =
+            ScriptScheduler::with_clock(scripts, Box::new(TestClock::advancing_by(100)));
+
+        assert!(scheduler.step(state));
+        assert_eq!(state.get(0), &ScratchValue::Number(1.0));
+        assert_eq!(state.get(2), &ScratchValue::Number(0.0));
+        assert!(scheduler.step(state));
+        assert_eq!(state.get(1), &ScratchValue::Number(1.0));
+        assert!(scheduler.step(state));
+        assert_eq!(state.get(0), &ScratchValue::Number(2.0));
+        assert_eq!(state.get(2), &ScratchValue::Boolean(true));
+    }
+}
