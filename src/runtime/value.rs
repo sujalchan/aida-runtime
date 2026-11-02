@@ -21,6 +21,7 @@ pub trait ScratchInput {
 }
 
 impl ScratchInput for ScratchValue {
+    #[inline]
     fn scratch_view(&self) -> ScratchValueView<'_> {
         match self {
             Self::Number(number) => ScratchValueView::Number(*number),
@@ -31,30 +32,35 @@ impl ScratchInput for ScratchValue {
 }
 
 impl<T: ScratchInput + ?Sized> ScratchInput for &T {
+    #[inline]
     fn scratch_view(&self) -> ScratchValueView<'_> {
         T::scratch_view(self)
     }
 }
 
 impl ScratchInput for f64 {
+    #[inline]
     fn scratch_view(&self) -> ScratchValueView<'_> {
         ScratchValueView::Number(*self)
     }
 }
 
 impl ScratchInput for bool {
+    #[inline]
     fn scratch_view(&self) -> ScratchValueView<'_> {
         ScratchValueView::Boolean(*self)
     }
 }
 
 impl ScratchInput for str {
+    #[inline]
     fn scratch_view(&self) -> ScratchValueView<'_> {
         ScratchValueView::Text(self)
     }
 }
 
 impl ScratchInput for String {
+    #[inline]
     fn scratch_view(&self) -> ScratchValueView<'_> {
         ScratchValueView::Text(self)
     }
@@ -191,10 +197,12 @@ impl ScratchState {
         }
     }
 
+    #[inline]
     pub fn get(&self, slot: usize) -> &ScratchValue {
         &self.values[slot]
     }
 
+    #[inline]
     pub fn set(&mut self, slot: usize, value: ScratchValue) {
         self.values[slot] = value;
     }

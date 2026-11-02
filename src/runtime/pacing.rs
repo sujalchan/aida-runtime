@@ -50,24 +50,56 @@ impl PacingMechanism for SystemPacingMechanism {
 pub struct TickPacer<M> {
     mode: PacingMode,
     mechanism: M,
+    next_deadline: Option<Duration>,
 }
 
 impl<M: PacingMechanism> TickPacer<M> {
     pub fn new(mode: PacingMode, mechanism: M) -> Self {
-        Self { mode, mechanism }
-    }
-
-    pub fn now(&self) -> Duration {
-        self.mechanism.now()
-    }
-
-    pub fn finish_tick(&mut self, tick_started: Duration) {
-        if let PacingMode::Paced(target) = self.mode {
-            let elapsed = self.mechanism.now().saturating_sub(tick_started);
-            if elapsed < target {
-                self.mechanism.sleep(target - elapsed);
-            }
+        Self {
+            mode,
+            mechanism,
+            next_deadline: None,
         }
+    }
+
+    /// start timing a tick when frame pacing is enabled.
+    pub fn begin_tick(&self) -> Option<Duration> {
+        match self.mode {
+            PacingMode::Paced(_) => Some(self.mechanism.now()),
+            PacingMode::Turbo => None,
+        }
+    }
+
+    pub fn finish_tick(&mut self, tick_started: Option<Duration>) {
+        if let (PacingMode::Paced(target), Some(tick_started)) = (self.mode, tick_started) {
+            let now = self.mechanism.now();
+            let deadline = *self
+                .next_deadline
+                .get_or_insert_with(|| tick_started.saturating_add(target));
+            if now.saturating_sub(tick_started) >= target {
+                // skip missed frames instead of trying to catch up.
+                self.next_deadline = Some(now.saturating_add(target));
+                return;
+            }
+
+            if now < deadline {
+                self.mechanism.sleep(deadline - now);
+            }
+
+            let after_sleep = self.mechanism.now();
+            let next_deadline = deadline.saturating_add(target);
+            self.next_deadline = Some(if after_sleep.saturating_sub(next_deadline) >= target {
+                // recover from a long host stall without keeping a backlog.
+                after_sleep.saturating_add(target)
+            } else {
+                next_deadline
+            });
+        }
+    }
+
+    /// discard frame phase when a scheduler wait suspends host ticks.
+    pub fn reset_schedule(&mut self) {
+        self.next_deadline = None;
     }
 
     /// wait for a scheduler deadline in both normal and turbo modes.
@@ -127,10 +159,10 @@ mod tests {
             PacingMode::Paced(std::time::Duration::from_millis(20)),
             mechanism,
         );
-        let started = pacer.now();
+        let started = pacer.begin_tick();
         view.work(std::time::Duration::from_millis(7));
         pacer.finish_tick(started);
-        assert_eq!(pacer.now(), std::time::Duration::from_millis(20));
+        assert_eq!(view.now.get(), std::time::Duration::from_millis(20));
         assert_eq!(view.sleeps.get(), 1);
     }
 
@@ -142,13 +174,19 @@ mod tests {
             PacingMode::Paced(std::time::Duration::from_millis(20)),
             mechanism,
         );
-        let started = pacer.now();
+        let started = pacer.begin_tick();
         view.work(std::time::Duration::from_millis(50));
         pacer.finish_tick(started);
-        assert_eq!(pacer.now(), std::time::Duration::from_millis(50));
-        let next_tick = pacer.now();
+        assert_eq!(
+            pacer.begin_tick(),
+            Some(std::time::Duration::from_millis(50))
+        );
+        let next_tick = pacer.begin_tick();
         pacer.finish_tick(next_tick);
-        assert_eq!(pacer.now(), std::time::Duration::from_millis(70));
+        assert_eq!(
+            pacer.begin_tick(),
+            Some(std::time::Duration::from_millis(70))
+        );
     }
 
     #[test]
@@ -160,7 +198,7 @@ mod tests {
             let mechanism = MockMechanism::default();
             let view = mechanism.clone();
             let mut pacer = TickPacer::new(mode, mechanism);
-            let started = pacer.now();
+            let started = pacer.begin_tick();
             view.work(std::time::Duration::from_millis(3));
             pacer.finish_tick(started);
             let after_tick = if mode == PacingMode::Turbo {
@@ -168,10 +206,10 @@ mod tests {
             } else {
                 std::time::Duration::from_millis(20)
             };
-            assert_eq!(pacer.now(), after_tick);
+            assert_eq!(view.now.get(), after_tick);
             pacer.wait_for_scheduler(std::time::Duration::from_millis(25));
             assert_eq!(
-                pacer.now(),
+                view.now.get(),
                 after_tick + std::time::Duration::from_millis(25)
             );
         }
@@ -183,10 +221,90 @@ mod tests {
         let view = mechanism.clone();
         let mut pacer = TickPacer::new(PacingMode::Turbo, mechanism);
         for _ in 0..4 {
-            let start = pacer.now();
+            let start = pacer.begin_tick();
             view.work(std::time::Duration::from_millis(1));
             pacer.finish_tick(start);
         }
         assert_eq!(view.sleeps.get(), 0);
+    }
+
+    #[test]
+    fn pacing_compensates_for_small_sleep_overshoot_without_catch_up_bursts() {
+        #[derive(Clone, Default)]
+        struct OversleepMechanism {
+            now: Rc<Cell<std::time::Duration>>,
+            sleeps: Rc<Cell<usize>>,
+        }
+
+        impl PacingMechanism for OversleepMechanism {
+            fn now(&self) -> std::time::Duration {
+                self.now.get()
+            }
+
+            fn sleep(&mut self, duration: std::time::Duration) {
+                self.sleeps.set(self.sleeps.get() + 1);
+                self.now
+                    .set(self.now.get() + duration + std::time::Duration::from_millis(2));
+            }
+        }
+
+        let mechanism = OversleepMechanism::default();
+        let view = mechanism.clone();
+        let mut pacer = TickPacer::new(
+            PacingMode::Paced(std::time::Duration::from_millis(20)),
+            mechanism,
+        );
+        for _ in 0..5 {
+            let started = pacer.begin_tick();
+            pacer.finish_tick(started);
+        }
+        assert_eq!(view.now.get(), std::time::Duration::from_millis(102));
+        assert_eq!(view.sleeps.get(), 5);
+    }
+
+    #[test]
+    fn turbo_does_not_read_the_frame_clock() {
+        let mechanism = MockMechanism::default();
+        let view = mechanism.clone();
+        let mut pacer = TickPacer::new(PacingMode::Turbo, mechanism);
+        for _ in 0..5 {
+            let started = pacer.begin_tick();
+            pacer.finish_tick(started);
+        }
+        assert_eq!(view.sleeps.get(), 0);
+        assert_eq!(view.now.get(), std::time::Duration::ZERO);
+    }
+
+    #[test]
+    #[ignore = "manual wall-clock pacing measurement"]
+    fn measure_system_pacing_jitter() {
+        let target = PacingMode::from_fps(30.0).unwrap();
+        let mut pacer = TickPacer::new(target, super::SystemPacingMechanism::new());
+        let mut previous = None;
+        let mut intervals = Vec::with_capacity(60);
+        for _ in 0..=60 {
+            let started = pacer.begin_tick().unwrap();
+            if let Some(previous) = previous {
+                intervals.push(started.saturating_sub(previous).as_nanos() as f64);
+            }
+            previous = Some(started);
+            pacer.finish_tick(Some(started));
+        }
+
+        intervals.sort_by(f64::total_cmp);
+        let mean = intervals.iter().sum::<f64>() / intervals.len() as f64;
+        let variance = intervals
+            .iter()
+            .map(|interval| (interval - mean).powi(2))
+            .sum::<f64>()
+            / intervals.len() as f64;
+        println!(
+            "30 fps tick intervals: mean={:.3} ms, p50={:.3} ms, min={:.3} ms, max={:.3} ms, sd={:.3} ms",
+            mean / 1_000_000.0,
+            intervals[intervals.len() / 2] / 1_000_000.0,
+            intervals[0] / 1_000_000.0,
+            intervals[intervals.len() - 1] / 1_000_000.0,
+            variance.sqrt() / 1_000_000.0,
+        );
     }
 }

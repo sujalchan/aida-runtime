@@ -3,6 +3,7 @@ use std::{borrow::Cow, cmp::Ordering};
 use super::{ScratchInput, ScratchValueView};
 
 // convert a scratch value to a number for arithmetic
+#[inline]
 fn to_number(value: ScratchValueView<'_>) -> f64 {
     let number = match value {
         ScratchValueView::Number(number) => number,
@@ -30,6 +31,7 @@ fn to_number(value: ScratchValueView<'_>) -> f64 {
 }
 
 /// Convert a Scratch value to a number using Scratch's arithmetic rules.
+#[inline]
 pub fn scratch_to_number(value: impl ScratchInput) -> f64 {
     to_number(value.scratch_view())
 }
@@ -41,7 +43,23 @@ fn scratch_trig_round(value: f64) -> f64 {
     if !value.is_finite() || value.abs() >= 1.0e21 {
         return value;
     }
-    format!("{value:.10}").parse().unwrap_or(value)
+
+    const SCALE: f64 = 10_000_000_000.0;
+    const SAFE_LIMIT: f64 = 450_359.0;
+    if value.abs() >= SAFE_LIMIT {
+        return format!("{value:.10}").parse().unwrap_or(value);
+    }
+
+    let scaled = value * SCALE;
+    let scaled_abs = scaled.abs();
+    let fraction = scaled_abs.fract();
+    let tie_distance = (fraction - 0.5).abs();
+    let multiplication_error_bound = 2.0 * f64::EPSILON * scaled_abs.max(1.0);
+    if tie_distance <= multiplication_error_bound {
+        return format!("{value:.10}").parse().unwrap_or(value);
+    }
+
+    scaled.round_ties_even() / SCALE
 }
 
 /// Scratch's sine reporter: degrees in, rounded to 10 decimal places.
@@ -127,18 +145,22 @@ pub fn scratch_bool(value: impl ScratchInput) -> bool {
     }
 }
 
+#[inline]
 pub fn scratch_add(left: impl ScratchInput, right: impl ScratchInput) -> f64 {
     to_number(left.scratch_view()) + to_number(right.scratch_view())
 }
 
+#[inline]
 pub fn scratch_subtract(left: impl ScratchInput, right: impl ScratchInput) -> f64 {
     to_number(left.scratch_view()) - to_number(right.scratch_view())
 }
 
+#[inline]
 pub fn scratch_multiply(left: impl ScratchInput, right: impl ScratchInput) -> f64 {
     to_number(left.scratch_view()) * to_number(right.scratch_view())
 }
 
+#[inline]
 pub fn scratch_divide(left: impl ScratchInput, right: impl ScratchInput) -> f64 {
     to_number(left.scratch_view()) / to_number(right.scratch_view())
 }
@@ -335,6 +357,8 @@ mod tests {
         assert_eq!(scratch_to_number(" 5.5 "), 5.5);
         assert_eq!(scratch_to_number(true), 1.0);
         assert_eq!(scratch_to_number("not a number"), 0.0);
+        assert_eq!(scratch_to_number(f64::NAN), 0.0);
+        assert_eq!(scratch_add(f64::NAN, 1.0), 1.0);
     }
 
     #[test]
@@ -372,10 +396,55 @@ mod tests {
     fn matches_scratch_trigonometry_precision_and_tangent_singularities() {
         assert_eq!(scratch_sin(30.0), 0.5);
         assert_eq!(scratch_cos(60.0), 0.5);
+        assert_eq!(scratch_sin("30"), 0.5);
+        assert_eq!(scratch_cos("60"), 0.5);
         assert_eq!(scratch_tan(45.0), 1.0);
         assert_eq!(scratch_tan(90.0), f64::INFINITY);
         assert_eq!(scratch_tan(-270.0), f64::INFINITY);
         assert_eq!(scratch_tan(-90.0), f64::NEG_INFINITY);
         assert_eq!(scratch_tan(270.0), f64::NEG_INFINITY);
+    }
+
+    #[test]
+    fn fast_trig_rounding_matches_the_decimal_reference() {
+        let reference = |value: f64| {
+            if value == 0.0 || !value.is_finite() || value.abs() >= 1.0e21 {
+                value
+            } else {
+                format!("{value:.10}").parse().unwrap_or(value)
+            }
+        };
+
+        for value in [
+            -1.0,
+            -0.999_999_999_95,
+            -0.500_000_000_05,
+            -0.000_000_000_05,
+            0.000_000_000_05,
+            0.123_456_789_05,
+            0.500_000_000_05,
+            0.999_999_999_95,
+            1.0,
+            89_999.999_999_999_9,
+            450_358.999_999_999_94,
+            450_359.0,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NAN,
+        ] {
+            let actual = scratch_trig_round(value);
+            let expected = reference(value);
+            assert!(
+                actual == expected || (actual.is_nan() && expected.is_nan()),
+                "rounding mismatch for {value:?}: {actual:?} != {expected:?}"
+            );
+        }
+
+        let mut seed = 0x9e37_79b9_u64;
+        for _ in 0..100_000 {
+            seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            let value = (seed as i64 as f64 / i64::MAX as f64) * 450_358.0;
+            assert_eq!(scratch_trig_round(value), reference(value));
+        }
     }
 }

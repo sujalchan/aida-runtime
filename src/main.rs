@@ -1,6 +1,7 @@
 mod program;
 mod runtime;
 
+#[derive(Debug)]
 struct RunOptions {
     pacing: runtime::PacingMode,
     max_ticks: Option<usize>,
@@ -10,7 +11,9 @@ fn main() {
     let options = match parse_run_options(std::env::args().skip(1)) {
         Ok(options) => options,
         Err(message) => {
-            eprintln!("error: {message}\nusage: aida-runtime [--fps <number> | --turbo] [--max-ticks <count>]");
+            eprintln!(
+                "error: {message}\nusage: aida-runtime [--fps <number> | --turbo] [--max-ticks <count>]"
+            );
             std::process::exit(2);
         }
     };
@@ -21,7 +24,7 @@ fn main() {
         if options.max_ticks.is_some_and(|limit| ticks >= limit) {
             break;
         }
-        let tick_started = pacer.now();
+        let tick_started = pacer.begin_tick();
         let status = program.advance();
         ticks += 1;
         if options.max_ticks == Some(ticks) && !program.is_complete() {
@@ -30,6 +33,7 @@ fn main() {
         match status {
             runtime::SchedulerStatus::Progressed => pacer.finish_tick(tick_started),
             runtime::SchedulerStatus::WaitingUntil(deadline) => {
+                pacer.reset_schedule();
                 let delay = program.duration_until(deadline);
                 pacer.wait_for_scheduler(delay);
             }
@@ -41,9 +45,7 @@ fn main() {
     }
 }
 
-fn parse_run_options(
-    args: impl IntoIterator<Item = String>,
-) -> Result<RunOptions, String> {
+fn parse_run_options(args: impl IntoIterator<Item = String>) -> Result<RunOptions, String> {
     let mut fps = None;
     let mut turbo = false;
     let mut max_ticks = None;
@@ -164,7 +166,12 @@ mod generated_program_tests {
 
     #[test]
     fn cli_accepts_a_positive_scheduler_tick_limit() {
-        let options = parse_run_options(["--turbo".to_owned(), "--max-ticks".to_owned(), "100".to_owned()]).unwrap();
+        let options = parse_run_options([
+            "--turbo".to_owned(),
+            "--max-ticks".to_owned(),
+            "100".to_owned(),
+        ])
+        .unwrap();
         assert_eq!(options.max_ticks, Some(100));
         assert!(parse_run_options(["--max-ticks".to_owned(), "0".to_owned()]).is_err());
     }
@@ -175,10 +182,11 @@ mod generated_program_tests {
         let mut program = GeneratedProgram::new_with_clock(Box::new(clock.clone()));
         let mut pacer = TickPacer::new(PacingMode::Turbo, clock.clone());
         for _ in 0..100 {
-            let tick_started = pacer.now();
+            let tick_started = pacer.begin_tick();
             match program.advance() {
                 SchedulerStatus::Progressed => pacer.finish_tick(tick_started),
                 SchedulerStatus::WaitingUntil(deadline) => {
+                    pacer.reset_schedule();
                     let delay = program.duration_until(deadline);
                     pacer.wait_for_scheduler(delay);
                 }

@@ -22,21 +22,34 @@ pub trait Clock {
 pub struct WarpBudget {
     started_at: Option<u64>,
     limit_millis: u64,
+    safe_points_until_check: u16,
 }
+
+// clock reads dominate very small native loops; 1024 safe points are still
+// only a few microseconds of unchecked work in the measured numeric hot path.
+const WARP_CLOCK_CHECK_INTERVAL: u16 = 1024;
 
 impl WarpBudget {
     pub fn new(limit_millis: u64) -> Self {
         Self {
             started_at: None,
             limit_millis,
+            safe_points_until_check: 0,
         }
     }
 
     pub fn reset(&mut self) {
         self.started_at = None;
+        self.safe_points_until_check = 0;
     }
 
     pub fn expired(&mut self, clock: &dyn Clock) -> bool {
+        if self.safe_points_until_check > 0 {
+            self.safe_points_until_check -= 1;
+            return false;
+        }
+        self.safe_points_until_check = WARP_CLOCK_CHECK_INTERVAL - 1;
+
         let now = clock.now_millis();
         let started = *self.started_at.get_or_insert(now);
         if now.saturating_sub(started) > self.limit_millis {
@@ -133,10 +146,14 @@ impl<S: ResumableScript> ScriptScheduler<S> {
         if self.scripts.is_empty() {
             return SchedulerStatus::Complete;
         }
-        let now = self.clock.now_millis();
+        let mut now = None;
         for offset in 0..self.scripts.len() {
             let index = (self.next + offset) % self.scripts.len();
-            if self.wake_at[index].is_none_or(|deadline| deadline <= now) {
+            let is_runnable = match self.wake_at[index] {
+                None => true,
+                Some(deadline) => deadline <= *now.get_or_insert_with(|| self.clock.now_millis()),
+            };
+            if is_runnable {
                 self.next = index;
                 let status = self.scripts[index].step(state, self.clock.as_ref());
                 match status {
@@ -251,6 +268,36 @@ mod tests {
                 Self::Second(script) => script.step(state, clock),
             }
         }
+    }
+
+    #[derive(Clone)]
+    struct CountingClock(std::rc::Rc<std::cell::Cell<usize>>);
+
+    impl Clock for CountingClock {
+        fn now_millis(&self) -> u64 {
+            self.0.set(self.0.get() + 1);
+            0
+        }
+    }
+
+    #[test]
+    fn runnable_scripts_do_not_read_the_clock_when_no_script_is_waiting() {
+        let clock = CountingClock(std::rc::Rc::new(std::cell::Cell::new(0)));
+        let clock_view = clock.clone();
+        let scripts = vec![FixtureScript::First(FirstScript { pc: 0 })];
+        let mut scheduler = ScriptScheduler::with_clock(scripts, Box::new(clock));
+        let mut state = ScratchState::new(vec![
+            ScratchValue::Number(0.0),
+            ScratchValue::Number(0.0),
+            ScratchValue::Number(0.0),
+            ScratchValue::Number(0.0),
+        ]);
+
+        assert_eq!(
+            scheduler.advance(&mut state),
+            super::SchedulerStatus::Progressed
+        );
+        assert_eq!(clock_view.0.get(), 0);
     }
 
     #[test]
@@ -839,12 +886,13 @@ mod tests {
             ScriptScheduler::with_clock(scripts, Box::new(TestClock::advancing_by(501)));
 
         assert!(scheduler.step(state));
-        assert_eq!(state.get(0), &ScratchValue::Number(2.0));
+        // the clock is checked at the first safe point and then every 1024.
+        assert_eq!(state.get(0), &ScratchValue::Number(1025.0));
         assert!(scheduler.step(state));
         assert_eq!(state.get(1), &ScratchValue::Number(1.0));
         assert_eq!(scheduler.active_scripts(), 1);
         assert!(scheduler.step(state));
-        assert_eq!(state.get(0), &ScratchValue::Number(4.0));
+        assert_eq!(state.get(0), &ScratchValue::Number(2050.0));
     }
 
     #[derive(Clone, Copy)]
