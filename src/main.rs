@@ -177,7 +177,7 @@ mod generated_program_tests {
     }
 
     #[test]
-    fn generated_list_fixture_runs_through_scheduler_and_preserves_scopes() {
+    fn clone_with_variables_fixture_runs_and_updates_shared_stage_list() {
         let clock = TestClock(Rc::new(Cell::new(0)));
         let mut program = GeneratedProgram::new_with_clock(Box::new(clock.clone()));
         let mut pacer = TickPacer::new(PacingMode::Turbo, clock.clone());
@@ -196,50 +196,19 @@ mod generated_program_tests {
 
         assert!(program.is_complete());
         assert_eq!(
-            program.state().list_by_id("stage-list").unwrap().contents(),
-            "BX"
-        );
-        assert_eq!(
-            program.state().list_by_id("sprite-list").unwrap().length(),
-            4
-        );
-        assert_eq!(
             program
                 .state()
-                .list_by_name("Stage", "items")
+                .list_by_id(":YULw@c(j{pVxkwY@MM$")
                 .unwrap()
                 .contents(),
-            "BX"
+            "1 -4 -1 6"
         );
         assert_eq!(
             program
                 .state()
-                .list_by_name("Sprite1", "items")
-                .unwrap()
-                .length(),
-            4
+                .get_by_id("`jEk@4|i[#Fk?(8x)AV.-my variable"),
+            Some(&ScratchValue::Number(6.0))
         );
-        assert!(program.state().list_visible(1));
-        assert!(!program.state().list_visible(0));
-        assert_eq!(
-            program.state().get_by_id("observed-id"),
-            Some(&ScratchValue::Boolean(true))
-        );
-        assert_eq!(
-            program.state().get_by_id("contents-id"),
-            Some(&ScratchValue::Text("BX".into()))
-        );
-        assert_eq!(
-            program.state().get_by_id("length-id"),
-            Some(&ScratchValue::Number(2.0))
-        );
-        assert_eq!(
-            program.state().get_by_id("item-id"),
-            Some(&ScratchValue::Text("seed".into()))
-        );
-        assert_eq!(
-            program.state().get_by_id("number-id"),
-            Some(&ScratchValue::Number(1.0))
-        );
+        assert_eq!(program.state().clone_count(), 1);
     }
 }

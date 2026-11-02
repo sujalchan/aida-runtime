@@ -98,6 +98,9 @@ pub enum SchedulerStatus {
 
 pub trait ResumableScript {
     fn step(&mut self, state: &mut ScratchState, clock: &dyn Clock) -> ScriptStatus;
+    fn target_instance(&self) -> usize {
+        0
+    }
 }
 
 pub struct ScriptScheduler<S> {
@@ -155,6 +158,7 @@ impl<S: ResumableScript> ScriptScheduler<S> {
             };
             if is_runnable {
                 self.next = index;
+                state.set_current_instance(self.scripts[index].target_instance());
                 let status = self.scripts[index].step(state, self.clock.as_ref());
                 match status {
                     ScriptStatus::Yield => {
@@ -190,6 +194,33 @@ impl<S: ResumableScript> ScriptScheduler<S> {
 
     pub fn active_scripts(&self) -> usize {
         self.scripts.len()
+    }
+
+    pub fn add_scripts(&mut self, scripts: impl IntoIterator<Item = S>) {
+        for script in scripts {
+            self.scripts.push(script);
+            self.wake_at.push(None);
+        }
+    }
+
+    pub fn remove_target_scripts(&mut self, target_instance: usize) {
+        let mut index = 0;
+        while index < self.scripts.len() {
+            if self.scripts[index].target_instance() == target_instance {
+                self.scripts.remove(index);
+                self.wake_at.remove(index);
+                if index < self.next {
+                    self.next -= 1;
+                }
+            } else {
+                index += 1;
+            }
+        }
+        if self.scripts.is_empty() {
+            self.next = 0;
+        } else {
+            self.next %= self.scripts.len();
+        }
     }
 
     pub fn duration_until(&self, deadline: u64) -> std::time::Duration {
@@ -1031,5 +1062,30 @@ mod tests {
         assert!(scheduler.step(state));
         assert_eq!(state.get(0), &ScratchValue::Number(2.0));
         assert_eq!(state.get(2), &ScratchValue::Boolean(true));
+    }
+
+    struct TargetScript(usize);
+
+    impl ResumableScript for TargetScript {
+        fn step(&mut self, _state: &mut ScratchState, _clock: &dyn Clock) -> ScriptStatus {
+            ScriptStatus::Complete
+        }
+
+        fn target_instance(&self) -> usize {
+            self.0
+        }
+    }
+
+    #[test]
+    fn deleting_a_clone_removes_its_other_active_scripts() {
+        let mut scheduler =
+            ScriptScheduler::new(vec![TargetScript(1), TargetScript(2), TargetScript(2)]);
+        scheduler.remove_target_scripts(2);
+        assert_eq!(scheduler.active_scripts(), 1);
+        assert_eq!(
+            scheduler.advance(&mut ScratchState::new(Vec::new())),
+            super::SchedulerStatus::Progressed
+        );
+        assert_eq!(scheduler.active_scripts(), 0);
     }
 }
