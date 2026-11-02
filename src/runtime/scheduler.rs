@@ -232,7 +232,8 @@ impl<S: ResumableScript> ScriptScheduler<S> {
 mod tests {
     use super::{Clock, ResumableScript, ScriptScheduler, ScriptStatus, WarpBudget};
     use crate::runtime::{
-        ScratchState, ScratchValue, scratch_bool, scratch_round, scratch_to_number,
+        ScratchState, ScratchValue, ScratchVariableMetadata, scratch_bool, scratch_round,
+        scratch_to_number,
     };
 
     struct FirstScript {
@@ -1087,5 +1088,148 @@ mod tests {
             super::SchedulerStatus::Progressed
         );
         assert_eq!(scheduler.active_scripts(), 0);
+    }
+
+    struct CloneWaitFrame {
+        pc: usize,
+        warp_mode: bool,
+        arguments: Vec<ScratchValue>,
+    }
+
+    struct CloneWaitScript {
+        instance: usize,
+        phase: u8,
+        frames: Vec<CloneWaitFrame>,
+    }
+
+    enum CloneWaitRunner {
+        Clone(CloneWaitScript),
+        StageWriter,
+    }
+
+    impl ResumableScript for CloneWaitRunner {
+        fn step(&mut self, state: &mut ScratchState, clock: &dyn Clock) -> ScriptStatus {
+            match self {
+                Self::StageWriter => {
+                    state.set(0, 100.0.into());
+                    ScriptStatus::Complete
+                }
+                Self::Clone(script) => {
+                    state.set_current_instance(script.instance);
+                    match script.phase {
+                        0 => {
+                            increment(state, 0);
+                            increment(state, 1);
+                            script.frames[0].pc = 1;
+                            script.frames.push(CloneWaitFrame {
+                                pc: 0,
+                                warp_mode: true,
+                                arguments: vec![3.0.into()],
+                            });
+                            script.phase = 1;
+                            ScriptStatus::WaitUntil(clock.now_millis().saturating_add(20))
+                        }
+                        1 => {
+                            let procedure = script.frames.last().unwrap();
+                            assert!(procedure.warp_mode);
+                            assert_eq!(procedure.pc, 0);
+                            let argument = scratch_to_number(&procedure.arguments[0]);
+                            let local = scratch_to_number(state.get(1));
+                            let shared = scratch_to_number(state.get(0));
+                            state.set(1, (local + argument + shared).into());
+                            script.frames.pop();
+                            assert_eq!(script.frames.last().unwrap().pc, 1);
+                            increment(state, 0);
+                            script.phase = 2;
+                            ScriptStatus::Complete
+                        }
+                        _ => panic!("completed clone script was stepped again"),
+                    }
+                }
+            }
+        }
+
+        fn target_instance(&self) -> usize {
+            match self {
+                Self::Clone(script) => script.instance,
+                Self::StageWriter => 0,
+            }
+        }
+    }
+
+    #[test]
+    fn clone_warp_custom_call_waits_without_losing_instance_or_frames() {
+        let mut state = ScratchState::with_metadata(
+            vec![0.0.into(), 10.0.into()],
+            vec![
+                ScratchVariableMetadata::for_target("stage", "shared", "Stage", 0, true),
+                ScratchVariableMetadata::for_target("local", "local", "Sprite1", 1, false),
+            ],
+        );
+        state.register_target(0, "Stage", true);
+        state.register_target(1, "Sprite1", false);
+        let original = state.original_instance(1).unwrap();
+        let first = state.create_clone(original, 1, 300).unwrap();
+        let second = state.create_clone(original, 1, 300).unwrap();
+        let clock = ManualClock::new();
+        let mut scheduler = ScriptScheduler::with_clock(
+            vec![
+                CloneWaitRunner::Clone(CloneWaitScript {
+                    instance: first,
+                    phase: 0,
+                    frames: vec![CloneWaitFrame {
+                        pc: 0,
+                        warp_mode: false,
+                        arguments: Vec::new(),
+                    }],
+                }),
+                CloneWaitRunner::Clone(CloneWaitScript {
+                    instance: second,
+                    phase: 0,
+                    frames: vec![CloneWaitFrame {
+                        pc: 0,
+                        warp_mode: false,
+                        arguments: Vec::new(),
+                    }],
+                }),
+                CloneWaitRunner::StageWriter,
+            ],
+            Box::new(clock.clone()),
+        );
+
+        assert_eq!(
+            scheduler.advance(&mut state),
+            super::SchedulerStatus::Progressed
+        );
+        assert_eq!(
+            scheduler.advance(&mut state),
+            super::SchedulerStatus::Progressed
+        );
+        assert_eq!(
+            scheduler.advance(&mut state),
+            super::SchedulerStatus::Progressed
+        );
+        assert_eq!(state.get(0), &ScratchValue::Number(100.0));
+        assert_eq!(
+            scheduler.advance(&mut state),
+            super::SchedulerStatus::WaitingUntil(20)
+        );
+
+        clock.set(20);
+        assert_eq!(
+            scheduler.advance(&mut state),
+            super::SchedulerStatus::Progressed
+        );
+        assert_eq!(
+            scheduler.advance(&mut state),
+            super::SchedulerStatus::Progressed
+        );
+        state.set_current_instance(original);
+        assert_eq!(state.get(1), &ScratchValue::Number(10.0));
+        state.set_current_instance(first);
+        assert_eq!(state.get(1), &ScratchValue::Number(114.0));
+        state.set_current_instance(second);
+        assert_eq!(state.get(1), &ScratchValue::Number(115.0));
+        assert_eq!(state.get(0), &ScratchValue::Number(102.0));
     }
 }
