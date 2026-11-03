@@ -75,6 +75,27 @@ mod tests {
     }
 
     #[test]
+    fn paced_mode_repeats_fair_rounds_until_a_visible_change_or_budget() {
+        let time = Rc::new(Cell::new(Duration::ZERO));
+        let step_time = Rc::clone(&time);
+        let rounds = Cell::new(0);
+        let status = run_tick(
+            PacingMode::Paced(Duration::from_millis(20)),
+            Duration::ZERO,
+            Duration::from_millis(15),
+            || time.get(),
+            || false,
+            || {
+                rounds.set(rounds.get() + 1);
+                step_time.set(time.get() + Duration::from_millis(5));
+                SchedulerStatus::Progressed
+            },
+        );
+        assert_eq!(status, SchedulerStatus::Progressed);
+        assert_eq!(rounds.get(), 3);
+    }
+
+    #[test]
     fn sleeping_scripts_end_the_tick_without_early_resume() {
         let calls = Cell::new(0);
         let status = run_tick(

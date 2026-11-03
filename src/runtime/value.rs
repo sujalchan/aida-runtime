@@ -159,6 +159,7 @@ pub struct ScratchState {
     event_sink: Option<Sender<ObservableEvent>>,
     input: RuntimeInputState,
     redraw_requested: bool,
+    presentation_requested: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -269,6 +270,7 @@ pub struct ScratchVariableMetadata {
     pub target: String,
     pub is_stage: bool,
     pub target_index: usize,
+    pub monitor_visible: bool,
 }
 
 /// names and target scope for one shared list slot.
@@ -324,6 +326,7 @@ impl ScratchVariableMetadata {
             target: target.into(),
             is_stage,
             target_index: 0,
+            monitor_visible: false,
         }
     }
 
@@ -339,16 +342,27 @@ impl ScratchVariableMetadata {
             ..Self::new(id, name, target, is_stage)
         }
     }
+
+    pub fn with_monitor_visible(mut self, visible: bool) -> Self {
+        self.monitor_visible = visible;
+        self
+    }
 }
 
 impl ScratchState {
     /// clear the previous frame's request before stepping generated scripts.
     pub fn begin_tick(&mut self) {
         self.redraw_requested = false;
+        self.presentation_requested = false;
     }
 
     pub fn request_redraw(&mut self) {
         self.redraw_requested = true;
+        self.presentation_requested = true;
+    }
+
+    fn request_presentation(&mut self) {
+        self.presentation_requested = true;
     }
 
     pub fn set_speech_bubble(
@@ -358,16 +372,26 @@ impl ScratchState {
         expires_at_millis: Option<u64>,
     ) {
         let instance = &mut self.instances[self.current_instance];
-        if instance.is_stage || text.is_empty() {
-            instance.bubble = None;
+        let next = if instance.is_stage || text.is_empty() {
+            None
         } else {
-            instance.bubble = Some(SpeechBubble {
+            Some(SpeechBubble {
                 kind,
                 text,
                 expires_at_millis,
-            });
+            })
+        };
+        let visually_changed = instance
+            .bubble
+            .as_ref()
+            .map(|bubble| (bubble.kind, bubble.text.as_str()))
+            != next
+                .as_ref()
+                .map(|bubble| (bubble.kind, bubble.text.as_str()));
+        instance.bubble = next;
+        if visually_changed {
+            self.request_redraw();
         }
-        self.request_redraw();
     }
 
     /// remove timed bubbles once their script wait has reached its deadline.
@@ -394,6 +418,11 @@ impl ScratchState {
 
     pub fn presentation_consumed(&mut self) {
         self.redraw_requested = false;
+        self.presentation_requested = false;
+    }
+
+    pub fn presentation_requested(&self) -> bool {
+        self.presentation_requested
     }
 
     /// update canonical input state from the renderer's queued events.
@@ -440,6 +469,7 @@ impl ScratchState {
             event_sink: None,
             input: RuntimeInputState::default(),
             redraw_requested: false,
+            presentation_requested: false,
         }
     }
 
@@ -472,6 +502,7 @@ impl ScratchState {
             event_sink: None,
             input: RuntimeInputState::default(),
             redraw_requested: false,
+            presentation_requested: false,
         }
     }
 
@@ -509,6 +540,7 @@ impl ScratchState {
             event_sink: None,
             input: RuntimeInputState::default(),
             redraw_requested: false,
+            presentation_requested: false,
         }
     }
 
@@ -533,15 +565,18 @@ impl ScratchState {
     #[inline]
     pub fn set(&mut self, slot: usize, value: ScratchValue) {
         let change = self.capture_variable_change(slot);
+        let old_value = self.monitored_variable_value(slot);
         if let Some(metadata) = self.variables.get(slot) {
             if !metadata.is_stage {
                 self.ensure_instance_slot(slot);
                 self.instances[self.current_instance].values[slot] = Some(value);
+                self.finish_monitored_variable_write(slot, old_value);
                 self.publish_variable_change(change, slot);
                 return;
             }
         }
         self.values[slot] = value;
+        self.finish_monitored_variable_write(slot, old_value);
         self.publish_variable_change(change, slot);
     }
 
@@ -549,7 +584,9 @@ impl ScratchState {
     #[inline]
     pub fn set_shared(&mut self, slot: usize, value: ScratchValue) {
         let change = self.capture_variable_change(slot);
+        let old_value = self.monitored_variable_value(slot);
         self.values[slot] = value;
+        self.finish_monitored_variable_write(slot, old_value);
         self.publish_variable_change(change, slot);
     }
 
@@ -557,7 +594,9 @@ impl ScratchState {
     #[inline]
     pub fn change_shared(&mut self, slot: usize, change: f64) {
         let old_value = self.capture_variable_change(slot);
+        let monitor_value = self.monitored_variable_value(slot);
         add_to_scratch_value(&mut self.values[slot], change);
+        self.finish_monitored_variable_write(slot, monitor_value);
         self.publish_variable_change(old_value, slot);
     }
 
@@ -565,6 +604,7 @@ impl ScratchState {
     #[inline]
     pub fn change_local_by(&mut self, slot: usize, change: f64) {
         if self.event_sink.is_none() {
+            let monitor_value = self.monitored_variable_value(slot);
             let current_instance = self.current_instance;
             if let Some(value) = self.instances[current_instance]
                 .values
@@ -572,16 +612,19 @@ impl ScratchState {
                 .and_then(Option::as_mut)
             {
                 add_to_scratch_value(value, change);
+                self.finish_monitored_variable_write(slot, monitor_value);
                 return;
             }
             let initial = self.values[slot].clone();
             self.ensure_instance_slot(slot);
             let value = self.instances[current_instance].values[slot].get_or_insert(initial);
             add_to_scratch_value(value, change);
+            self.finish_monitored_variable_write(slot, monitor_value);
             return;
         }
 
         let old_value = self.capture_variable_change(slot);
+        let monitor_value = self.monitored_variable_value(slot);
         let current_instance = self.current_instance;
         if let Some(value) = self.instances[current_instance]
             .values
@@ -595,7 +638,48 @@ impl ScratchState {
             let value = self.instances[current_instance].values[slot].get_or_insert(initial);
             add_to_scratch_value(value, change);
         }
+        self.finish_monitored_variable_write(slot, monitor_value);
         self.publish_variable_change(old_value, slot);
+    }
+
+    fn monitored_variable_value(&self, slot: usize) -> Option<ScratchValue> {
+        let metadata = self.variables.get(slot)?;
+        if !metadata.monitor_visible {
+            return None;
+        }
+        if metadata.is_stage {
+            return Some(self.values[slot].clone());
+        }
+        let instance = self.instances.get(self.current_instance)?;
+        if instance.original && instance.target == metadata.target_index {
+            Some(
+                instance
+                    .values
+                    .get(slot)
+                    .and_then(Option::as_ref)
+                    .unwrap_or(&self.values[slot])
+                    .clone(),
+            )
+        } else {
+            None
+        }
+    }
+
+    fn finish_monitored_variable_write(&mut self, slot: usize, old_value: Option<ScratchValue>) {
+        let Some(old_value) = old_value else {
+            return;
+        };
+        let metadata = &self.variables[slot];
+        let current = if metadata.is_stage {
+            &self.values[slot]
+        } else {
+            self.instances[self.current_instance].values[slot]
+                .as_ref()
+                .unwrap_or(&self.values[slot])
+        };
+        if *current != old_value {
+            self.request_presentation();
+        }
     }
 
     pub fn set_event_sink(&mut self, event_sink: Option<Sender<ObservableEvent>>) {
@@ -800,22 +884,34 @@ impl ScratchState {
     pub fn set_xy(&mut self, x: f64, y: f64) {
         if !self.instances[self.current_instance].is_stage {
             let instance = &mut self.instances[self.current_instance];
+            let changed = instance.x != x || instance.y != y;
             instance.x = x;
             instance.y = y;
+            if changed {
+                self.request_redraw();
+            }
         }
     }
 
     pub fn change_x_by(&mut self, dx: f64) {
         let instance = &mut self.instances[self.current_instance];
         if !instance.is_stage {
+            let old_x = instance.x;
             instance.x += dx;
+            if old_x != instance.x {
+                self.request_redraw();
+            }
         }
     }
 
     pub fn change_y_by(&mut self, dy: f64) {
         let instance = &mut self.instances[self.current_instance];
         if !instance.is_stage {
+            let old_y = instance.y;
             instance.y += dy;
+            if old_y != instance.y {
+                self.request_redraw();
+            }
         }
     }
 
@@ -950,6 +1046,7 @@ impl ScratchState {
         let id = self.instances.len();
         self.instances.push(instance);
         self.pending_clones.push(id);
+        self.request_redraw();
         Some(id)
     }
 
@@ -989,18 +1086,24 @@ impl ScratchState {
         instance.alive = false;
         instance.values.clear();
         instance.lists.clear();
+        self.request_redraw();
         true
     }
 
     pub fn remove_clones(&mut self) {
+        let mut removed_any = false;
         for instance in &mut self.instances {
             if !instance.original {
+                removed_any |= instance.alive;
                 instance.alive = false;
                 instance.values.clear();
                 instance.lists.clear();
             }
         }
         self.pending_clones.clear();
+        if removed_any {
+            self.request_redraw();
+        }
     }
 
     pub fn instance_is_alive(&self, id: usize) -> bool {
@@ -1020,7 +1123,30 @@ impl ScratchState {
     }
 
     pub fn set_list_visible(&mut self, slot: usize, visible: bool) {
-        self.list_visibility[slot] = visible;
+        if self.list_visibility[slot] != visible {
+            self.list_visibility[slot] = visible;
+            self.request_presentation();
+        }
+    }
+
+    pub fn list_before_change(&self, slot: usize) -> Option<ScratchList> {
+        if !self.list_visibility.get(slot).copied().unwrap_or(false) {
+            return None;
+        }
+        if let Some(metadata) = self.list_metadata.get(slot)
+            && !metadata.is_stage
+            && (!self.instances[self.current_instance].original
+                || self.instances[self.current_instance].target != metadata.target_index)
+        {
+            return None;
+        }
+        Some(self.list(slot).clone())
+    }
+
+    pub fn list_changed(&mut self, slot: usize, before: Option<ScratchList>) {
+        if before.is_some_and(|before| before != *self.list(slot)) {
+            self.request_presentation();
+        }
     }
 
     /// look up a list by its Scratch ID.
@@ -1343,10 +1469,7 @@ mod tests {
         let mut state = ScratchState::with_metadata(
             vec![ScratchValue::Text(" 2.5 ".to_owned())],
             vec![ScratchVariableMetadata::new(
-                "local",
-                "score",
-                "Sprite",
-                false,
+                "local", "score", "Sprite", false,
             )],
         );
         state.register_target(0, "Stage", true);
@@ -1440,5 +1563,65 @@ mod tests {
             pressed: false,
         });
         assert!(!state.key_pressed("a"));
+    }
+
+    #[test]
+    fn only_changed_visible_state_requests_a_redraw() {
+        let mut state = ScratchState::with_metadata(
+            vec![1.0_f64.into(), 1.0_f64.into()],
+            vec![
+                ScratchVariableMetadata::for_target("visible", "visible", "Stage", 0, true)
+                    .with_monitor_visible(true),
+                ScratchVariableMetadata::for_target("hidden", "hidden", "Stage", 0, true),
+            ],
+        );
+        state.register_target(0, "Stage", true);
+        state.begin_tick();
+        state.set_shared(1, 2.0_f64.into());
+        assert!(!state.redraw_requested());
+        assert!(!state.presentation_requested());
+        state.set_shared(0, 1.0_f64.into());
+        assert!(!state.redraw_requested());
+        assert!(!state.presentation_requested());
+        state.set_shared(0, 2.0_f64.into());
+        assert!(!state.redraw_requested());
+        assert!(state.presentation_requested());
+    }
+
+    #[test]
+    fn unchanged_sprite_positions_and_bubbles_do_not_request_redraw() {
+        let mut state = ScratchState::new(Vec::new());
+        state.register_target(0, "Sprite1", false);
+        state.begin_tick();
+        state.set_xy(0.0, 0.0);
+        assert!(!state.redraw_requested());
+        state.set_speech_bubble(BubbleKind::Say, "hello".to_owned(), None);
+        assert!(state.redraw_requested());
+        state.presentation_consumed();
+        state.set_xy(0.0, 0.0);
+        state.set_speech_bubble(BubbleKind::Say, "hello".to_owned(), None);
+        assert!(!state.redraw_requested());
+        state.change_x_by(1.0);
+        assert!(state.redraw_requested());
+    }
+
+    #[test]
+    fn visible_list_changes_dirty_presentation_without_stopping_scripts() {
+        let mut state = ScratchState::with_project_data(
+            Vec::new(),
+            Vec::new(),
+            vec![ScratchList::new(vec!["before".into()])],
+            vec![ScratchListMetadata::for_target(
+                "items", "items", "Stage", 0, true,
+            )],
+            vec![true],
+        );
+        state.register_target(0, "Stage", true);
+        state.begin_tick();
+        let before = state.list_before_change(0);
+        state.list_mut(0).add("after".into());
+        state.list_changed(0, before);
+        assert!(state.presentation_requested());
+        assert!(!state.redraw_requested());
     }
 }

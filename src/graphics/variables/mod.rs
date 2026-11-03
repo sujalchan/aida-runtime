@@ -1067,6 +1067,7 @@ fn expanded_width(label_width: f32, value_width: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::{VariableLayer, VariableMonitor};
+    use crate::runtime::variable_snapshot_key;
 
     #[test]
     fn variable_monitor_builds_gpu_instances() {
@@ -1103,6 +1104,24 @@ mod tests {
         assert!(layer.take_dirty_gpu_shapes().is_empty());
         assert_eq!(layer.take_dirty_gpu_texts(), vec![0]);
         assert_eq!(layer.glyph_atlas_revision(), revision);
+    }
+
+    #[test]
+    fn stage_variable_snapshot_updates_its_visible_monitor() {
+        let id = "`jEk@4|i[#Fk?(8x)AV.-my variable";
+        let key = variable_snapshot_key("Stage", "my variable", id, None);
+        let mut layer = VariableLayer::new(vec![
+            VariableMonitor::new("my variable", "0", 5.0, 5.0).with_value_key(key.clone()),
+        ])
+        .unwrap();
+        layer.take_dirty_gpu_texts();
+
+        assert_eq!(
+            layer.set_monitor_value(&key, "341".to_owned()),
+            Some((0, true))
+        );
+        assert_eq!(layer.monitors[0].value, "341");
+        assert_eq!(layer.take_dirty_gpu_texts(), vec![0]);
     }
 
     #[test]

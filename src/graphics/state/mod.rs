@@ -70,6 +70,7 @@ pub(crate) struct GraphicsState {
     sprites: Vec<SpriteRenderer>,
     sprite_indices: HashMap<String, usize>,
     sprite_instance_indices: HashMap<(usize, usize), usize>,
+    last_runtime_layers: Vec<crate::runtime::LayerSnapshot>,
     variable_layer: VariableLayer,
     fading_shadow_index: Option<usize>,
     fading_shadow_bounds: Option<MonitorBounds>,
@@ -317,8 +318,8 @@ mod gpu_variable_tests {
 
     #[test]
     fn gpu_instance_layouts_match_shader_storage() {
-        assert_eq!(std::mem::size_of::<MonitorInstance>(), 80);
-        assert_eq!(std::mem::size_of::<GlyphInstance>(), 32);
+        assert_eq!(std::mem::size_of::<MonitorInstance>(), 96);
+        assert_eq!(std::mem::size_of::<GlyphInstance>(), 36);
         assert_eq!(std::mem::size_of::<GlyphMetadata>(), 32);
     }
 

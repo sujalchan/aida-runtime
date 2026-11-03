@@ -87,6 +87,7 @@ fn run_graphical(options: RunOptions) -> Result<(), String> {
     let loaded = load_sb3(project_path, "resources/projects")
         .map_err(|error| format!("failed to load project: {error}"))?;
     let project = Arc::new(loaded.project);
+    let window_title = project_window_title(project_path, options.hd_pen_mode);
 
     // winit requires its event loop and window creation to stay on the main
     // thread on macos and for cross-platform compatibility.
@@ -148,6 +149,7 @@ fn run_graphical(options: RunOptions) -> Result<(), String> {
     let mut app = renderer::RendererApp::new(
         project,
         loaded.assets_dir,
+        window_title,
         latest,
         notification_pending,
         observable_receiver,
@@ -173,6 +175,16 @@ fn run_graphical(options: RunOptions) -> Result<(), String> {
     Ok(())
 }
 
+fn project_window_title(project_path: &std::path::Path, hd_pen_mode: bool) -> String {
+    let project_name = project_path
+        .file_stem()
+        .filter(|name| !name.is_empty())
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_else(|| "Scratch project".into());
+    let prefix = if hd_pen_mode { "AIDA HD" } else { "AIDA" };
+    format!("{prefix} - {project_name}")
+}
+
 fn run_program(
     program: &mut program::GeneratedProgram,
     pacing: PacingMode,
@@ -188,7 +200,7 @@ fn run_program(
         let tick_started = pacer.begin_tick();
         let status = advance_tick(program, pacing, tick_started, &pacer, None);
         ticks += 1;
-        if program.redraw_requested() {
+        if program.presentation_requested() {
             // headless presentation consumes the same tick snapshot without creating a window.
             let _snapshot = program.observable_snapshot(ticks);
             program.presentation_consumed();
@@ -228,12 +240,16 @@ fn run_worker(
         let tick_started = pacer.begin_tick();
         let status = advance_tick(program, pacing, tick_started, &pacer, Some(inputs));
         ticks += 1;
-        let redraw_requested = program.redraw_requested();
-        publish_snapshot(program, ticks, latest, proxy, notification_pending);
-        if redraw_requested && pacing != PacingMode::Turbo {
+        let presentation_requested = program.presentation_requested();
+        if presentation_requested {
+            publish_snapshot(program, ticks, latest, proxy, notification_pending);
+        }
+        if presentation_requested && pacing != PacingMode::Turbo {
             if !wait_for_renderer(acknowledgements, ticks, stop) {
                 break;
             }
+            program.presentation_consumed();
+        } else if presentation_requested {
             program.presentation_consumed();
         }
         if max_ticks == Some(ticks) && !program.is_complete() {

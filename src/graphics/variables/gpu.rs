@@ -1019,8 +1019,8 @@ fn push_text_mesh(
 #[cfg(test)]
 mod tests {
     use super::{
-        BUBBLE_BORDER, BUBBLE_BORDER_WIDTH, BUBBLE_FONT_SIZE, BUBBLE_SPEECH_TAIL_EXTENT,
-        BUBBLE_BODY_CORNER_RADIUS, BUBBLE_TAIL_CORNER_CLEARANCE, BubbleRenderInput, SCRATCH_WIDTH,
+        BUBBLE_BODY_CORNER_RADIUS, BUBBLE_BORDER, BUBBLE_BORDER_WIDTH, BUBBLE_FONT_SIZE,
+        BUBBLE_SPEECH_TAIL_EXTENT, BUBBLE_TAIL_CORNER_CLEARANCE, BubbleRenderInput, SCRATCH_WIDTH,
         VariableLayer, linear_rgba, scaled_px_bounds,
     };
     use crate::runtime::{BubbleKind, BubbleSnapshot};
@@ -1082,10 +1082,12 @@ mod tests {
         assert!((say_body.params[1] - BUBBLE_BORDER_WIDTH).abs() < f32::EPSILON);
         assert_eq!(say_body.border, linear_rgba(BUBBLE_BORDER));
         assert_eq!(say_body.shape[2], 1.0);
-        assert_eq!(say_body.rect[3], say_body.shape[1] + BUBBLE_SPEECH_TAIL_EXTENT);
+        assert_eq!(
+            say_body.rect[3],
+            say_body.shape[1] + BUBBLE_SPEECH_TAIL_EXTENT
+        );
         let say_min_anchor = BUBBLE_BODY_CORNER_RADIUS + BUBBLE_TAIL_CORNER_CLEARANCE;
-        let expected_say_anchor = (SCRATCH_WIDTH as f32 * 0.5 - 100.0
-            - batch.transforms[0][0])
+        let expected_say_anchor = (SCRATCH_WIDTH as f32 * 0.5 - 100.0 - batch.transforms[0][0])
             .clamp(say_min_anchor, say_body.shape[0] - say_min_anchor);
         assert!((say_body.shape[3] - expected_say_anchor).abs() < 0.01);
         assert_eq!(batch.shapes.len(), 5);
@@ -1101,8 +1103,7 @@ mod tests {
         let thought_body = batch.shapes[4].rect;
         let largest_circle = batch.shapes[1].rect;
         let thought_min_anchor = BUBBLE_BODY_CORNER_RADIUS + 4.6;
-        let expected_thought_anchor = (SCRATCH_WIDTH as f32 * 0.5 + 40.0
-            - batch.transforms[1][0])
+        let expected_thought_anchor = (SCRATCH_WIDTH as f32 * 0.5 + 40.0 - batch.transforms[1][0])
             .clamp(thought_min_anchor, thought_body[2] - thought_min_anchor);
         assert!(
             (largest_circle[0] + largest_circle[2] * 0.5 - expected_thought_anchor).abs() < 0.01
@@ -1167,7 +1168,9 @@ mod tests {
         assert_eq!(batch.shapes[0].shape[2], 1.0);
         assert_eq!(batch.shapes[1].shape[2], 2.0);
         for index in 0..2 {
-            assert!((batch.transforms[index][1] + batch.shapes[index].shape[1] - 138.0).abs() < 0.01);
+            assert!(
+                (batch.transforms[index][1] + batch.shapes[index].shape[1] - 138.0).abs() < 0.01
+            );
         }
     }
 }

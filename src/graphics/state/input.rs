@@ -8,7 +8,7 @@ impl GraphicsState {
     pub(crate) fn sync_runtime_snapshot(
         &mut self,
         snapshot: &RuntimeSnapshot,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         let mut updates = snapshot
             .variables
             .iter()
@@ -30,46 +30,50 @@ impl GraphicsState {
                 updates.push((format!("__sprite/{}/y", layer.target), layer.y.to_string()));
             }
         }
-        self.write_changed_monitors(&updates)?;
+        let monitors_changed = self.write_changed_monitors(&updates)?;
+        let layers_changed = self.last_runtime_layers != snapshot.layers;
 
-        let live_clones = snapshot
-            .layers
-            .iter()
-            .filter(|layer| !layer.original)
-            .map(|layer| layer.instance_id)
-            .collect::<std::collections::HashSet<_>>();
-        self.sprites
-            .retain(|sprite| sprite.original || live_clones.contains(&sprite.instance_id));
-        self.rebuild_sprite_indices();
-        for layer in snapshot.layers.iter().filter(|layer| !layer.original) {
-            if !self
-                .sprite_instance_indices
-                .contains_key(&(layer.target_index, layer.instance_id))
-            {
-                self.add_clone_renderer(layer)?;
+        if layers_changed {
+            let live_clones = snapshot
+                .layers
+                .iter()
+                .filter(|layer| !layer.original)
+                .map(|layer| layer.instance_id)
+                .collect::<std::collections::HashSet<_>>();
+            self.sprites
+                .retain(|sprite| sprite.original || live_clones.contains(&sprite.instance_id));
+            self.rebuild_sprite_indices();
+            for layer in snapshot.layers.iter().filter(|layer| !layer.original) {
+                if !self
+                    .sprite_instance_indices
+                    .contains_key(&(layer.target_index, layer.instance_id))
+                {
+                    self.add_clone_renderer(layer)?;
+                }
+                if let Some(index) = self
+                    .sprite_instance_indices
+                    .get(&(layer.target_index, layer.instance_id))
+                    .copied()
+                {
+                    let sprite = &mut self.sprites[index];
+                    sprite.transform.position = [layer.x as f32, layer.y as f32];
+                    self.queue.write_buffer(
+                        &sprite.transform_buffer,
+                        0,
+                        bytemuck::bytes_of(&sprite.transform),
+                    );
+                }
             }
-            if let Some(index) = self
-                .sprite_instance_indices
-                .get(&(layer.target_index, layer.instance_id))
-                .copied()
-            {
-                let sprite = &mut self.sprites[index];
-                sprite.transform.position = [layer.x as f32, layer.y as f32];
-                self.queue.write_buffer(
-                    &sprite.transform_buffer,
-                    0,
-                    bytemuck::bytes_of(&sprite.transform),
-                );
+            for sprite_index in 0..self.sprites.len() {
+                if !self.sprites[sprite_index].original {
+                    let current_costume = self.sprites[sprite_index].current_costume;
+                    self.ensure_sprite_costume_mip(sprite_index, current_costume)?;
+                }
             }
+            self.sync_bubble_gpu_data(snapshot)?;
+            self.last_runtime_layers.clone_from(&snapshot.layers);
         }
-        for sprite_index in 0..self.sprites.len() {
-            if !self.sprites[sprite_index].original {
-                let current_costume = self.sprites[sprite_index].current_costume;
-                self.ensure_sprite_costume_mip(sprite_index, current_costume)?;
-            }
-        }
-        self.sync_bubble_gpu_data(snapshot)?;
-        Ok(())
+        Ok(monitors_changed || layers_changed)
     }
 
     fn add_clone_renderer(&mut self, layer: &crate::runtime::LayerSnapshot) -> Result<(), String> {
@@ -482,6 +486,9 @@ impl GraphicsState {
                     let sprite = &mut self.sprites[index];
                     if property == "costume" {
                         let costume_index = (value.max(0.0) as usize) % sprite.costumes.len();
+                        if sprite.current_costume == costume_index {
+                            continue;
+                        }
                         sprite.current_costume = costume_index;
                         let costume = &sprite.costumes[costume_index];
                         sprite.transform.logical_size = costume.logical_size;
@@ -490,22 +497,66 @@ impl GraphicsState {
                         continue;
                     }
                     let transform = &mut sprite.transform;
-                    match property {
-                        "x" => transform.position[0] = value,
-                        "y" => transform.position[1] = value,
-                        "direction" => transform.direction = value.rem_euclid(360.0),
-                        "size" => transform.scale = value / 100.0,
-                        "visible" => transform.visible = if value != 0.0 { 1.0 } else { 0.0 },
+                    let changed = match property {
+                        "x" if transform.position[0] != value => {
+                            transform.position[0] = value;
+                            true
+                        }
+                        "y" if transform.position[1] != value => {
+                            transform.position[1] = value;
+                            true
+                        }
+                        "direction" if transform.direction != value.rem_euclid(360.0) => {
+                            transform.direction = value.rem_euclid(360.0);
+                            true
+                        }
+                        "size" if transform.scale != value / 100.0 => {
+                            transform.scale = value / 100.0;
+                            true
+                        }
+                        "visible"
+                            if transform.visible != (if value != 0.0 { 1.0 } else { 0.0 }) =>
+                        {
+                            transform.visible = if value != 0.0 { 1.0 } else { 0.0 };
+                            true
+                        }
                         // hue is periodic every 200 scratch units; reduce before
                         // converting to f32 so long-running loops retain precision.
-                        "effect_color" => transform.effects_0[0] = value.rem_euclid(200.0),
-                        "effect_fisheye" => transform.effects_0[1] = value,
-                        "effect_whirl" => transform.effects_0[2] = value.rem_euclid(360.0),
-                        "effect_pixelate" => transform.effects_0[3] = value,
-                        "effect_mosaic" => transform.effects_1[0] = value,
-                        "effect_brightness" => transform.effects_1[1] = value,
-                        "effect_ghost" => transform.effects_1[2] = value,
+                        "effect_color" if transform.effects_0[0] != value.rem_euclid(200.0) => {
+                            transform.effects_0[0] = value.rem_euclid(200.0);
+                            true
+                        }
+                        "effect_fisheye" if transform.effects_0[1] != value => {
+                            transform.effects_0[1] = value;
+                            true
+                        }
+                        "effect_whirl" if transform.effects_0[2] != value.rem_euclid(360.0) => {
+                            transform.effects_0[2] = value.rem_euclid(360.0);
+                            true
+                        }
+                        "effect_pixelate" if transform.effects_0[3] != value => {
+                            transform.effects_0[3] = value;
+                            true
+                        }
+                        "effect_mosaic" if transform.effects_1[0] != value => {
+                            transform.effects_1[0] = value;
+                            true
+                        }
+                        "effect_brightness" if transform.effects_1[1] != value => {
+                            transform.effects_1[1] = value;
+                            true
+                        }
+                        "effect_ghost" if transform.effects_1[2] != value => {
+                            transform.effects_1[2] = value;
+                            true
+                        }
+                        "x" | "y" | "direction" | "size" | "visible" | "effect_color"
+                        | "effect_fisheye" | "effect_whirl" | "effect_pixelate"
+                        | "effect_mosaic" | "effect_brightness" | "effect_ghost" => false,
                         _ => continue,
+                    };
+                    if !changed {
+                        continue;
                     }
                     sprite_transform_changed[index] = true;
                     continue;
@@ -564,7 +615,7 @@ impl GraphicsState {
         if visible_value_changed && self.dev_mode {
             self.write_ui_composite_parameters();
         }
-        Ok(any_sprite_changed)
+        Ok(visible_value_changed || any_sprite_changed)
     }
 
     pub(crate) fn variable_shadow_is_animating(&self) -> bool {

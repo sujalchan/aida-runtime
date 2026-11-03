@@ -28,6 +28,7 @@ pub(crate) struct RendererApp {
     graphics: Option<GraphicsState>,
     project: Arc<ScratchProject>,
     assets_dir: PathBuf,
+    window_title: String,
     latest: Arc<RwLock<Arc<RuntimeSnapshot>>>,
     notification_pending: Arc<AtomicBool>,
     observable_events: Option<mpsc::Receiver<ObservableEvent>>,
@@ -51,6 +52,7 @@ impl RendererApp {
     pub(crate) fn new(
         project: Arc<ScratchProject>,
         assets_dir: PathBuf,
+        window_title: String,
         latest: Arc<RwLock<Arc<RuntimeSnapshot>>>,
         notification_pending: Arc<AtomicBool>,
         observable_events: Option<mpsc::Receiver<ObservableEvent>>,
@@ -66,6 +68,7 @@ impl RendererApp {
             graphics: None,
             project,
             assets_dir,
+            window_title,
             latest,
             notification_pending,
             observable_events,
@@ -99,11 +102,18 @@ impl RendererApp {
         let snapshot = self.snapshot();
         self.pending_snapshot_tick = snapshot.tick;
         if let Some(graphics) = self.graphics.as_mut() {
-            if let Err(error) = graphics.sync_runtime_snapshot(&snapshot) {
-                self.error = Some(format!("failed to update Scratch renderer state: {error}"));
+            match graphics.sync_runtime_snapshot(&snapshot) {
+                Ok(true) => {
+                    graphics.window().request_redraw();
+                    self.redraw_pending = true;
+                }
+                Ok(false) => {
+                    let _ = self.acknowledgement_sender.send(self.pending_snapshot_tick);
+                }
+                Err(error) => {
+                    self.error = Some(format!("failed to update Scratch renderer state: {error}"));
+                }
             }
-            graphics.window().request_redraw();
-            self.redraw_pending = true;
         }
     }
 
@@ -199,7 +209,7 @@ impl ApplicationHandler<RendererEvent> for RendererApp {
             return;
         }
         let attributes = WindowAttributes::default()
-            .with_title("AIDA Scratch project")
+            .with_title(&self.window_title)
             .with_inner_size(PhysicalSize::new(960, 720))
             .with_min_inner_size(PhysicalSize::new(480, 360));
         let window = match event_loop.create_window(attributes) {

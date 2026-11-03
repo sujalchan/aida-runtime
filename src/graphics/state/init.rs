@@ -747,6 +747,7 @@ impl GraphicsState {
             sprites,
             sprite_indices,
             sprite_instance_indices,
+            last_runtime_layers: Vec::new(),
             sprite_transform_layout,
             variable_layer,
             fading_shadow_index: None,

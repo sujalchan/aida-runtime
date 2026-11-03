@@ -3,7 +3,7 @@ use std::{cell::Cell, rc::Rc};
 use crate::{
     assert_expected_variables, parse_run_options,
     program::GeneratedProgram,
-    run_headless,
+    project_window_title, run_headless,
     runtime::{
         Clock, PacingMechanism, PacingMode, RuntimeSnapshot, SchedulerStatus, ScratchValue,
         VariableSnapshot,
@@ -121,6 +121,13 @@ fn cli_requires_graphical_mode_for_hd_pen_and_rejects_duplicates() {
 }
 
 #[test]
+fn project_window_title_includes_name_and_hd_pen_mode() {
+    let project = std::path::Path::new(r"C:\projects\pi-series.sb3");
+    assert_eq!(project_window_title(project, false), "AIDA - pi-series");
+    assert_eq!(project_window_title(project, true), "AIDA HD - pi-series");
+}
+
+#[test]
 fn cli_enables_development_monitor_controls() {
     let options = parse_run_options([
         "--graphical".to_owned(),
@@ -193,6 +200,21 @@ fn normal_redraw_gate_waits_for_the_matching_renderer_submission() {
     ack_tx.send(5).unwrap();
     assert!(wait_for_renderer(&ack_rx, 5, &stop_rx));
     drop(stop_tx);
+}
+
+#[test]
+fn broadcast_fixture_returns_between_rounds_and_publishes_monitor_changes() {
+    let clock = TestClock(Rc::new(Cell::new(0)));
+    let mut program = GeneratedProgram::new_with_clock(Box::new(clock));
+    program.begin_tick();
+
+    assert_eq!(program.advance_frame(), SchedulerStatus::Progressed);
+    assert!(program.presentation_requested());
+    let snapshot = program.observable_snapshot(1);
+    assert!(snapshot.variables.iter().any(|variable| {
+        variable.id == "`jEk@4|i[#Fk?(8x)AV.-my variable"
+            && variable.value == ScratchValue::Text("0".to_owned())
+    }));
 }
 
 #[test]
