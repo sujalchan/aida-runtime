@@ -1,13 +1,12 @@
 use resvg::{tiny_skia, usvg};
 use wgpu::Queue;
 
-#[cfg(test)]
-use super::SCRATCH_HEIGHT;
-use super::SCRATCH_WIDTH;
 use super::texture::RenderTexture;
+use super::{SCRATCH_HEIGHT, SCRATCH_WIDTH};
 
 #[cfg(test)]
 const SPRITE_CENTER_X_STAGE_PX: f32 = 0.0;
+const SCRATCH_MAX_TEXTURE_DIMENSION: u32 = 2048;
 const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
 
 #[derive(Clone)]
@@ -50,19 +49,43 @@ impl Sprite {
         matches!(&self.source, SpriteSource::Svg(_))
     }
 
-    pub(crate) fn raster_scale_for_viewport(
+    pub(crate) fn mip_level_for_projected_size(
         &self,
+        sprite_scale: f32,
         viewport_width: u32,
+        viewport_height: u32,
+        logical_size: [f32; 2],
         max_texture_dimension: u32,
-    ) -> f32 {
+    ) -> i8 {
         if !self.is_vector() {
-            return 1.0;
+            return 0;
         }
         let (source_width, source_height) = self.source_size();
-        let desired = (viewport_width as f32 / SCRATCH_WIDTH as f32).max(1.0);
-        let max_scale = (max_texture_dimension as f32 / source_width)
-            .min(max_texture_dimension as f32 / source_height);
-        desired.min(max_scale).max(0.05)
+        // viewport dimensions are physical pixels, while logical_size and the
+        // sprite transform use Scratch stage units. This ratio therefore also
+        // accounts for bitmap resolution without applying window DPI twice.
+        let projected_x = sprite_scale.abs() * viewport_width as f32 / SCRATCH_WIDTH as f32
+            * logical_size[0]
+            / source_width;
+        let projected_y = sprite_scale.abs() * viewport_height as f32 / SCRATCH_HEIGHT as f32
+            * logical_size[1]
+            / source_height;
+        let requested_scale = projected_x.max(projected_y).max(f32::MIN_POSITIVE);
+        let (source_width, source_height) = self.source_size();
+        let texture_limit = max_texture_dimension.min(SCRATCH_MAX_TEXTURE_DIMENSION) as f32;
+        let maximum_scale = (texture_limit / source_width)
+            .min(texture_limit / source_height)
+            .max(f32::MIN_POSITIVE);
+        let maximum_level = maximum_scale.log2().floor() as i32;
+        let requested_level = requested_scale.log2().ceil() as i32;
+        // scratch uses mip level 8 for 1x and supports levels below it down to
+        // zero. If an unusually large SVG needs more downscaling to fit the
+        // device limit, the texture limit takes precedence.
+        requested_level.clamp((-8).min(maximum_level), maximum_level) as i8
+    }
+
+    pub(crate) fn raster_scale_for_mip(level: i8) -> f32 {
+        2.0_f32.powi(level as i32)
     }
 
     pub(crate) fn logical_size(&self, bitmap_resolution: f32) -> [f32; 2] {
@@ -79,7 +102,7 @@ impl Sprite {
     pub(crate) fn texture_size(&self, raster_scale: f32) -> (u32, u32) {
         let (width, height) = self.source_size();
         let scale = if self.is_vector() {
-            raster_scale.max(0.05)
+            raster_scale.max(f32::MIN_POSITIVE)
         } else {
             1.0
         };
@@ -258,5 +281,51 @@ mod tests {
                 .all(|byte| *byte == 0)
         );
         assert!(Sprite::from_bytes(b"<svg width='0' height='0'>").is_err());
+    }
+
+    #[test]
+    fn svg_mip_selection_tracks_projected_physical_size_and_caps_to_gpu_limit() {
+        let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="50" viewBox="0 0 100 50"><rect width="100" height="50"/></svg>"#;
+        let sprite = Sprite::from_bytes(svg).unwrap();
+        let logical_size = sprite.logical_size(1.0);
+
+        assert_eq!(
+            sprite.mip_level_for_projected_size(1.0, 480, 360, logical_size, 4096),
+            0
+        );
+        assert_eq!(
+            sprite.mip_level_for_projected_size(2.0, 480, 360, logical_size, 4096),
+            1
+        );
+        assert_eq!(
+            sprite.mip_level_for_projected_size(1.0, 960, 720, logical_size, 4096),
+            1
+        );
+        assert_eq!(
+            sprite.mip_level_for_projected_size(0.1, 480, 360, logical_size, 4096),
+            -3
+        );
+        assert_eq!(
+            sprite.mip_level_for_projected_size(20.0, 480, 360, logical_size, 200),
+            1
+        );
+        assert_eq!(sprite.logical_size(1.0), logical_size);
+        assert_eq!(
+            sprite.texture_size(Sprite::raster_scale_for_mip(1)),
+            (200, 100)
+        );
+    }
+
+    #[test]
+    fn png_costume_dimensions_do_not_follow_svg_mip_selection() {
+        let pixmap = tiny_skia::Pixmap::new(3, 2).unwrap();
+        let sprite = Sprite::from_bytes(&pixmap.encode_png().unwrap()).unwrap();
+
+        assert_eq!(
+            sprite.mip_level_for_projected_size(8.0, 3840, 2880, [3.0, 2.0], 4096),
+            0
+        );
+        assert_eq!(sprite.texture_size(1.0), (3, 2));
+        assert_eq!(sprite.texture_size(256.0), (3, 2));
     }
 }

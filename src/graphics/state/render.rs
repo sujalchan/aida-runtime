@@ -14,6 +14,7 @@ impl GraphicsState {
             self.viewport
                 .map_or(1.0, |viewport| viewport.width as f32 / SCRATCH_WIDTH as f32),
         );
+        self.recreate_stage_textures();
     }
 
     pub(crate) fn rebuild_viewport_textures(&mut self) {
@@ -78,7 +79,11 @@ impl GraphicsState {
                 let sprite = &self.sprites[stamp.sprite_index];
                 let costume = &sprite.costumes[stamp.costume_index];
                 pass.set_pipeline(&self.stamp_sprite_pipeline);
-                pass.set_bind_group(0, &costume.texture_bind_group, &[]);
+                pass.set_bind_group(
+                    0,
+                    &costume.mips[&costume.selected_mip].texture_bind_group,
+                    &[],
+                );
                 pass.set_bind_group(
                     1,
                     &self.stamp_transform_bind_group,
@@ -151,7 +156,9 @@ impl GraphicsState {
             for sprite in &self.sprites {
                 pass.set_bind_group(
                     0,
-                    &sprite.costumes[sprite.current_costume].texture_bind_group,
+                    &sprite.costumes[sprite.current_costume].mips
+                        [&sprite.costumes[sprite.current_costume].selected_mip]
+                        .texture_bind_group,
                     &[],
                 );
                 pass.set_bind_group(1, &sprite.transform_bind_group, &[]);
@@ -294,12 +301,6 @@ impl GraphicsState {
             (SCRATCH_WIDTH, SCRATCH_HEIGHT)
         };
 
-        let stage_sampler = if self.hd_pen_mode {
-            &self.stage_linear_sampler
-        } else {
-            &self.stage_nearest_sampler
-        };
-
         if self.backdrop_texture.width != stage_width
             || self.backdrop_texture.height != stage_height
         {
@@ -310,7 +311,11 @@ impl GraphicsState {
                 &self.texture_layout,
                 &self.backdrop_texture,
                 &self.backdrop_texture,
-                stage_sampler,
+                if self.hd_pen_mode {
+                    &self.stage_linear_sampler
+                } else {
+                    &self.stage_nearest_sampler
+                },
                 &self.zero_uv_offset,
             );
             if let Some(backdrop) = &self.backdrop_sprite {
@@ -323,36 +328,11 @@ impl GraphicsState {
             }
         }
 
-        for sprite in &mut self.sprites {
-            for costume in &mut sprite.costumes {
-                let desired_sprite_scale = costume.sprite.raster_scale_for_viewport(
-                    viewport.width,
-                    self.device.limits().max_texture_dimension_2d,
-                );
-                let (sprite_width, sprite_height) =
-                    costume.sprite.texture_size(desired_sprite_scale);
-                if costume.texture.width != sprite_width || costume.texture.height != sprite_height
-                {
-                    let texture = RenderTexture::new(
-                        &self.device,
-                        "sprite costume texture",
-                        sprite_width,
-                        sprite_height,
-                    );
-                    costume.opaque_pixels = costume
-                        .sprite
-                        .upload_costume_to(&self.queue, &texture, desired_sprite_scale)
-                        .expect("sprite costume should rasterize at the stage's pixel density");
-                    costume.texture_bind_group = layer_bind_group(
-                        &self.device,
-                        &self.texture_layout,
-                        &texture,
-                        &texture,
-                        &self.stage_nearest_sampler,
-                        &self.zero_uv_offset,
-                    );
-                    costume.texture = texture;
-                }
+        for sprite_index in 0..self.sprites.len() {
+            let costume_count = self.sprites[sprite_index].costumes.len();
+            for costume_index in 0..costume_count {
+                self.ensure_sprite_costume_mip(sprite_index, costume_index)
+                    .expect("sprite costume should rasterize at the stage's pixel density");
             }
         }
         if self.pen_texture.width != stage_width || self.pen_texture.height != stage_height {
@@ -363,7 +343,11 @@ impl GraphicsState {
                 &self.texture_layout,
                 &self.pen_texture,
                 &self.pen_texture,
-                stage_sampler,
+                if self.hd_pen_mode {
+                    &self.stage_linear_sampler
+                } else {
+                    &self.stage_nearest_sampler
+                },
                 &self.zero_uv_offset,
             );
             self.rebuild_pen_texture();
@@ -416,5 +400,52 @@ impl GraphicsState {
             }
             self.write_ui_composite_parameters();
         }
+    }
+
+    pub(super) fn ensure_sprite_costume_mip(
+        &mut self,
+        sprite_index: usize,
+        costume_index: usize,
+    ) -> Result<(), String> {
+        let viewport = self.viewport.ok_or("stage viewport is unavailable")?;
+        let max_texture_dimension = self.device.limits().max_texture_dimension_2d;
+        let sprite = &self.sprites[sprite_index];
+        let costume = &sprite.costumes[costume_index];
+        let mip_level = costume.sprite.mip_level_for_projected_size(
+            sprite.transform.scale,
+            viewport.width,
+            viewport.height,
+            costume.logical_size,
+            max_texture_dimension,
+        );
+        let costume = &mut self.sprites[sprite_index].costumes[costume_index];
+        if !costume.mips.contains_key(&mip_level) {
+            let raster_scale = Sprite::raster_scale_for_mip(mip_level);
+            let (width, height) = costume.sprite.texture_size(raster_scale);
+            let texture =
+                RenderTexture::new(&self.device, "sprite costume mip texture", width, height);
+            let opaque_pixels =
+                costume
+                    .sprite
+                    .upload_costume_to(&self.queue, &texture, raster_scale)?;
+            let texture_bind_group = layer_bind_group(
+                &self.device,
+                &self.texture_layout,
+                &texture,
+                &texture,
+                &self.stage_nearest_sampler,
+                &self.zero_uv_offset,
+            );
+            costume.mips.insert(
+                mip_level,
+                SpriteCostumeMip {
+                    texture,
+                    opaque_pixels,
+                    texture_bind_group,
+                },
+            );
+        }
+        costume.selected_mip = mip_level;
+        Ok(())
     }
 }

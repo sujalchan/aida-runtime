@@ -162,14 +162,18 @@ struct SpriteTransform {
     effects_1: [f32; 4],
 }
 
-struct SpriteCostumeRenderer {
-    sprite: Sprite,
+struct SpriteCostumeMip {
     texture: RenderTexture,
     opaque_pixels: Vec<u8>,
     texture_bind_group: wgpu::BindGroup,
+}
+
+struct SpriteCostumeRenderer {
+    sprite: Sprite,
+    mips: HashMap<i8, SpriteCostumeMip>,
+    selected_mip: i8,
     logical_size: [f32; 2],
     rotation_center: [f32; 2],
-    raster_scale: f32,
 }
 
 struct SpriteRenderer {

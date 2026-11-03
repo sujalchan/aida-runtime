@@ -62,6 +62,12 @@ impl GraphicsState {
                 );
             }
         }
+        for sprite_index in 0..self.sprites.len() {
+            if !self.sprites[sprite_index].original {
+                let current_costume = self.sprites[sprite_index].current_costume;
+                self.ensure_sprite_costume_mip(sprite_index, current_costume)?;
+            }
+        }
         self.sync_bubble_gpu_data(snapshot)?;
         Ok(())
     }
@@ -74,14 +80,19 @@ impl GraphicsState {
         let mut costumes = Vec::with_capacity(original.costumes.len());
         for costume in &original.costumes {
             let sprite = costume.sprite.clone();
+            let selected_mip = costume.selected_mip;
+            let source_mip = &costume.mips[&selected_mip];
             let texture = RenderTexture::new(
                 &self.device,
                 "clone costume texture",
-                costume.texture.width,
-                costume.texture.height,
+                source_mip.texture.width,
+                source_mip.texture.height,
             );
-            let opaque_pixels =
-                sprite.upload_costume_to(&self.queue, &texture, costume.raster_scale)?;
+            let opaque_pixels = sprite.upload_costume_to(
+                &self.queue,
+                &texture,
+                Sprite::raster_scale_for_mip(selected_mip),
+            )?;
             let texture_bind_group = layer_bind_group(
                 &self.device,
                 &self.texture_layout,
@@ -92,12 +103,17 @@ impl GraphicsState {
             );
             costumes.push(SpriteCostumeRenderer {
                 sprite,
-                texture,
-                opaque_pixels,
-                texture_bind_group,
+                mips: HashMap::from([(
+                    selected_mip,
+                    SpriteCostumeMip {
+                        texture,
+                        opaque_pixels,
+                        texture_bind_group,
+                    },
+                )]),
+                selected_mip,
                 logical_size: costume.logical_size,
                 rotation_center: costume.rotation_center,
-                raster_scale: costume.raster_scale,
             });
         }
         let mut transform = original.transform;
@@ -137,6 +153,10 @@ impl GraphicsState {
             transform_bind_group,
         });
         self.rebuild_sprite_indices();
+        let clone_index = self.sprite_instance_indices[&(layer.target_index, layer.instance_id)];
+        for costume_index in 0..self.sprites[clone_index].costumes.len() {
+            self.ensure_sprite_costume_mip(clone_index, costume_index)?;
+        }
         Ok(())
     }
 
@@ -173,11 +193,14 @@ impl GraphicsState {
                 let costumes = sprite
                     .costumes
                     .iter()
-                    .map(|costume| SpriteSensingCostume {
-                        texture_size: (costume.texture.width, costume.texture.height),
-                        logical_size: costume.logical_size,
-                        rotation_center: costume.rotation_center,
-                        opaque_pixels: Arc::from(costume.opaque_pixels.clone()),
+                    .map(|costume| {
+                        let mip = &costume.mips[&costume.selected_mip];
+                        SpriteSensingCostume {
+                            texture_size: (mip.texture.width, mip.texture.height),
+                            logical_size: costume.logical_size,
+                            rotation_center: costume.rotation_center,
+                            opaque_pixels: Arc::from(mip.opaque_pixels.clone()),
+                        }
                     })
                     .collect();
                 (sprite.target_name.clone(), costumes)
@@ -194,11 +217,12 @@ impl GraphicsState {
             .map(|sprite| {
                 let touching = stage_pointer.is_some_and(|(mouse_x, mouse_y)| {
                     let costume = &sprite.costumes[sprite.current_costume];
+                    let mip = &costume.mips[&costume.selected_mip];
                     costume_contains_point(
                         &sprite.transform,
                         costume.logical_size,
-                        (costume.texture.width, costume.texture.height),
-                        &costume.opaque_pixels,
+                        (mip.texture.width, mip.texture.height),
+                        &mip.opaque_pixels,
                         (mouse_x, mouse_y),
                     )
                 });
@@ -514,13 +538,27 @@ impl GraphicsState {
             }
         }
         let any_sprite_changed = sprite_transform_changed.iter().any(|changed| *changed);
-        for (sprite, changed) in self.sprites.iter().zip(sprite_transform_changed) {
+        for (sprite, changed) in self
+            .sprites
+            .iter()
+            .zip(sprite_transform_changed.iter().copied())
+        {
             if changed {
                 self.queue.write_buffer(
                     &sprite.transform_buffer,
                     0,
                     bytemuck::bytes_of(&sprite.transform),
                 );
+            }
+        }
+        for sprite_index in 0..self.sprites.len() {
+            if sprite_transform_changed
+                .get(sprite_index)
+                .copied()
+                .unwrap_or(false)
+            {
+                let costume_index = self.sprites[sprite_index].current_costume;
+                self.ensure_sprite_costume_mip(sprite_index, costume_index)?;
             }
         }
         if visible_value_changed && self.dev_mode {

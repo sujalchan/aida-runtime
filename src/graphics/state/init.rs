@@ -289,10 +289,17 @@ impl GraphicsState {
             let costumes = costume_assets
                 .into_iter()
                 .map(|(sprite, logical_size, rotation_center)| {
-                    let raster_scale = sprite.raster_scale_for_viewport(
-                        viewport.map_or(SCRATCH_WIDTH, |viewport| viewport.width),
+                    let viewport_width = viewport.map_or(SCRATCH_WIDTH, |viewport| viewport.width);
+                    let viewport_height =
+                        viewport.map_or(SCRATCH_HEIGHT, |viewport| viewport.height);
+                    let mip_level = sprite.mip_level_for_projected_size(
+                        target.size as f32 / 100.0,
+                        viewport_width,
+                        viewport_height,
+                        logical_size,
                         device.limits().max_texture_dimension_2d,
                     );
+                    let raster_scale = Sprite::raster_scale_for_mip(mip_level);
                     let (width, height) = sprite.texture_size(raster_scale);
                     let texture =
                         RenderTexture::new(&device, "sprite costume texture", width, height);
@@ -414,12 +421,17 @@ impl GraphicsState {
                         );
                         SpriteCostumeRenderer {
                             sprite: costume.sprite,
-                            texture: costume.texture,
-                            opaque_pixels: costume.opaque_pixels,
-                            texture_bind_group,
+                            mips: HashMap::from([(
+                                costume.raster_scale.log2().round() as i8,
+                                SpriteCostumeMip {
+                                    texture: costume.texture,
+                                    opaque_pixels: costume.opaque_pixels,
+                                    texture_bind_group,
+                                },
+                            )]),
+                            selected_mip: costume.raster_scale.log2().round() as i8,
                             logical_size: costume.logical_size,
                             rotation_center: costume.rotation_center,
-                            raster_scale: costume.raster_scale,
                         }
                     })
                     .collect();
