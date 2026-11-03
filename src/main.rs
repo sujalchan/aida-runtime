@@ -62,7 +62,7 @@ fn run_paced(
             break;
         }
         let tick_started = pacer.begin_tick();
-        let status = program.advance();
+        let status = program.advance_frame();
         ticks += 1;
         if max_ticks == Some(ticks) && !program.is_complete() {
             break;

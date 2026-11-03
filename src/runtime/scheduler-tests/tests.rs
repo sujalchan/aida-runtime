@@ -137,6 +137,112 @@ impl ResumableScript for ClockFixtureScript {
     }
 }
 
+enum FrameOrderScript {
+    Wait { started: bool },
+    Runnable,
+}
+
+enum FrameRateScript {
+    Wait { started: bool },
+    Counter,
+}
+
+impl ResumableScript for FrameRateScript {
+    fn step(&mut self, state: &mut ScratchState, _clock: &dyn Clock) -> ScriptStatus {
+        match self {
+            Self::Wait { started: false } => {
+                *self = Self::Wait { started: true };
+                ScriptStatus::WaitUntil(120)
+            }
+            Self::Wait { started: true } => {
+                state.set_shared(1, state.get_shared(0).clone());
+                ScriptStatus::Complete
+            }
+            Self::Counter => {
+                state.change_shared(0, 1.0);
+                ScriptStatus::Yield
+            }
+        }
+    }
+}
+
+impl ResumableScript for FrameOrderScript {
+    fn step(&mut self, _state: &mut ScratchState, _clock: &dyn Clock) -> ScriptStatus {
+        match self {
+            Self::Wait { started: false } => {
+                *self = Self::Wait { started: true };
+                ScriptStatus::WaitUntil(10)
+            }
+            Self::Wait { started: true } => ScriptStatus::Complete,
+            Self::Runnable => ScriptStatus::Yield,
+        }
+    }
+}
+
+enum StopFixtureScript {
+    All {
+        target: usize,
+    },
+    Others {
+        target: usize,
+        pc: u8,
+    },
+    Write {
+        target: usize,
+        slot: usize,
+        value: f64,
+    },
+    Broadcast {
+        target: usize,
+    },
+    Receiver {
+        target: usize,
+    },
+}
+
+impl ResumableScript for StopFixtureScript {
+    fn step(&mut self, state: &mut ScratchState, _clock: &dyn Clock) -> ScriptStatus {
+        match self {
+            Self::All { .. } => ScriptStatus::StopAll,
+            Self::Others { pc, .. } if *pc == 0 => {
+                *pc = 1;
+                ScriptStatus::StopOtherScripts
+            }
+            Self::Others { pc, .. } => {
+                *pc = 2;
+                state.set_shared(0, ScratchValue::Number(1.0));
+                ScriptStatus::Complete
+            }
+            Self::Write { slot, value, .. } => {
+                state.set_shared(*slot, ScratchValue::Number(*value));
+                ScriptStatus::Complete
+            }
+            Self::Broadcast { .. } => ScriptStatus::Broadcast {
+                message: 7,
+                wait: true,
+            },
+            Self::Receiver { .. } => ScriptStatus::Yield,
+        }
+    }
+
+    fn target_instance(&self) -> usize {
+        match self {
+            Self::All { target }
+            | Self::Others { target, .. }
+            | Self::Write { target, .. }
+            | Self::Broadcast { target }
+            | Self::Receiver { target } => *target,
+        }
+    }
+
+    fn broadcast_receiver(&self) -> Option<(usize, usize, usize)> {
+        match self {
+            Self::Receiver { target } => Some((7, 0, *target)),
+            _ => None,
+        }
+    }
+}
+
 #[test]
 fn runnable_scripts_do_not_read_the_clock_when_no_script_is_waiting() {
     let clock = CountingClock(std::rc::Rc::new(std::cell::Cell::new(0)));
@@ -239,6 +345,144 @@ fn sleeping_script_uses_a_fresh_clock_read_after_another_script_runs() {
     );
     assert_eq!(clock_view.calls.get(), 2);
     assert_eq!(completed_waiter_steps.get(), 2);
+}
+
+#[test]
+fn frame_order_runs_active_scripts_before_a_script_at_its_wake_deadline() {
+    let now = std::rc::Rc::new(std::cell::Cell::new(0));
+    let clock = ControlledClock {
+        calls: std::rc::Rc::new(std::cell::Cell::new(0)),
+        now: now.clone(),
+    };
+    let mut scheduler = ScriptScheduler::with_clock(
+        vec![
+            FrameOrderScript::Wait { started: false },
+            FrameOrderScript::Runnable,
+        ],
+        Box::new(clock),
+    );
+    let mut state = ScratchState::new(vec![]);
+
+    assert_eq!(
+        scheduler.advance_script_id(0, &mut state),
+        Some(super::SchedulerStatus::Progressed)
+    );
+    assert_eq!(scheduler.script_ids_in_frame_order(), vec![1, 0]);
+    now.set(9);
+    assert_eq!(scheduler.advance_script_id(0, &mut state), None);
+    assert_eq!(
+        scheduler.advance_script_id(1, &mut state),
+        Some(super::SchedulerStatus::Progressed)
+    );
+    now.set(10);
+    assert_eq!(
+        scheduler.advance_script_id(0, &mut state),
+        Some(super::SchedulerStatus::Progressed)
+    );
+}
+
+#[test]
+fn paced_frame_rate_controls_work_completed_before_a_wait_resumes() {
+    for (ticks_per_second, expected) in [(30_usize, 31.0), (40, 41.0)] {
+        let now = std::rc::Rc::new(std::cell::Cell::new(0));
+        let clock = ControlledClock {
+            calls: std::rc::Rc::new(std::cell::Cell::new(0)),
+            now: now.clone(),
+        };
+        let mut scheduler = ScriptScheduler::with_clock(
+            vec![
+                FrameRateScript::Wait { started: false },
+                FrameRateScript::Counter,
+            ],
+            Box::new(clock),
+        );
+        let mut state = ScratchState::new(vec![0.0_f64.into(), (-1.0_f64).into()]);
+        let frame_units = 120 / ticks_per_second;
+
+        for frame in (0..=120).step_by(frame_units) {
+            now.set(frame as u64);
+            for id in scheduler.script_ids_in_frame_order() {
+                scheduler.advance_script_id(id, &mut state);
+            }
+            if state.get_shared(1) != &ScratchValue::Number(-1.0) {
+                break;
+            }
+        }
+
+        assert_eq!(state.get_shared(1), &ScratchValue::Number(expected));
+    }
+}
+
+#[test]
+fn stop_other_scripts_only_stops_the_current_target_and_continues_the_stopper() {
+    let mut state = ScratchState::new(vec![ScratchValue::Number(0.0), ScratchValue::Number(0.0)]);
+    let clone = state.create_clone(0, 1, 300).unwrap();
+    let scripts = vec![
+        StopFixtureScript::Others { target: 0, pc: 0 },
+        StopFixtureScript::Write {
+            target: 0,
+            slot: 0,
+            value: 99.0,
+        },
+        StopFixtureScript::Write {
+            target: clone,
+            slot: 1,
+            value: 2.0,
+        },
+    ];
+    let mut scheduler = ScriptScheduler::with_clock(
+        scripts,
+        Box::new(CountingClock(std::rc::Rc::new(std::cell::Cell::new(0)))),
+    );
+
+    assert_eq!(
+        scheduler.advance(&mut state),
+        super::SchedulerStatus::Progressed
+    );
+    assert_eq!(scheduler.active_scripts(), 1);
+    assert_eq!(state.get_shared(0), &ScratchValue::Number(1.0));
+    assert_eq!(
+        scheduler.advance(&mut state),
+        super::SchedulerStatus::Progressed
+    );
+    assert_eq!(state.get_shared(1), &ScratchValue::Number(2.0));
+    assert_eq!(scheduler.active_scripts(), 0);
+}
+
+#[test]
+fn stop_all_clears_scripts_clones_and_broadcast_and_wait_joins() {
+    let mut state = ScratchState::new(vec![]);
+    let clone = state.create_clone(0, 1, 300).unwrap();
+    let scripts = vec![
+        StopFixtureScript::Broadcast { target: 0 },
+        StopFixtureScript::All { target: 0 },
+    ];
+    let mut scheduler = ScriptScheduler::with_clock(
+        scripts,
+        Box::new(CountingClock(std::rc::Rc::new(std::cell::Cell::new(0)))),
+    );
+
+    assert_eq!(
+        scheduler.advance(&mut state),
+        super::SchedulerStatus::Progressed
+    );
+    let (sender, message, wait) = scheduler.take_broadcast().unwrap();
+    assert!(wait);
+    scheduler.broadcast(
+        sender,
+        vec![StopFixtureScript::Receiver { target: clone }],
+        wait,
+    );
+    assert_eq!(scheduler.active_scripts(), 3);
+    assert_eq!(
+        scheduler.advance(&mut state),
+        super::SchedulerStatus::Complete
+    );
+    assert_eq!(scheduler.active_scripts(), 0);
+    assert_eq!(state.clone_count(), 0);
+    assert!(state.take_pending_clones().is_empty());
+    assert!(scheduler.take_broadcast().is_none());
+    assert_eq!(message, 7);
 }
 
 #[test]

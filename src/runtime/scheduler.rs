@@ -85,6 +85,8 @@ pub enum ScriptStatus {
     /// suspend until the scheduler clock reaches the deadline; the scheduler will not step the script earlier.
     WaitUntil(u64),
     Complete,
+    StopAll,
+    StopOtherScripts,
     Broadcast {
         message: usize,
         wait: bool,
@@ -93,7 +95,7 @@ pub enum ScriptStatus {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SchedulerStatus {
-    /// one script advanced and another host turn may run immediately.
+    /// one or more scripts advanced and another host turn may run immediately.
     Progressed,
     /// all active scripts are waiting until the given clock time.
     WaitingUntil(u64),
@@ -192,40 +194,138 @@ impl<S: ResumableScript> ScriptScheduler<S> {
                 Some(deadline) => deadline <= *now.get_or_insert_with(|| self.clock.now_millis()),
             };
             if is_runnable && join_finished {
-                self.next = index;
-                state.set_current_instance(self.scripts[index].target_instance());
-                let status = self.scripts[index].step(state, self.clock.as_ref());
-                match status {
-                    ScriptStatus::Yield => {
-                        self.wake_at[index] = None;
-                        self.next = (index + 1) % self.scripts.len();
-                    }
-                    ScriptStatus::WaitUntil(deadline) => {
-                        self.wake_at[index] = Some(deadline);
-                        self.next = (index + 1) % self.scripts.len();
-                    }
-                    ScriptStatus::Complete => {
-                        self.scripts.remove(index);
-                        self.wake_at.remove(index);
-                        self.script_ids.remove(index);
-                        self.joins.remove(index);
-                        self.has_waiting_senders = self.joins.iter().any(Option::is_some);
-                        self.next = if self.scripts.is_empty() {
-                            0
-                        } else {
-                            index % self.scripts.len()
-                        };
-                    }
-                    ScriptStatus::Broadcast { message, wait } => {
-                        self.wake_at[index] = None;
-                        self.pending_broadcast = Some((self.script_ids[index], message, wait));
-                        self.next = (index + 1) % self.scripts.len();
-                    }
-                }
-                return SchedulerStatus::Progressed;
+                return self.run_script_at(index, state);
             }
         }
         SchedulerStatus::WaitingUntil(self.wake_at.iter().flatten().copied().min().unwrap())
+    }
+
+    /// return script ids in the order the scheduler would consider them.
+    pub fn script_ids_in_order(&self) -> Vec<u64> {
+        if self.scripts.is_empty() {
+            return Vec::new();
+        }
+        (0..self.scripts.len())
+            .map(|offset| self.script_ids[(self.next + offset) % self.scripts.len()])
+            .collect()
+    }
+
+    /// return active scripts before sleeping scripts at a frame boundary.
+    pub fn script_ids_in_frame_order(&self) -> Vec<u64> {
+        let ids = self.script_ids_in_order();
+        let mut runnable = Vec::with_capacity(ids.len());
+        let mut waking = Vec::new();
+        for id in ids {
+            let index = self
+                .script_ids
+                .iter()
+                .position(|script_id| *script_id == id)
+                .unwrap();
+            if self.wake_at[index].is_none() {
+                runnable.push(id);
+            } else {
+                waking.push(id);
+            }
+        }
+        runnable.extend(waking);
+        runnable
+    }
+
+    /// advance one selected script if it is runnable.
+    pub fn advance_script_id(
+        &mut self,
+        id: u64,
+        state: &mut ScratchState,
+    ) -> Option<SchedulerStatus> {
+        let index = self
+            .script_ids
+            .iter()
+            .position(|script_id| *script_id == id)?;
+        let join_finished = if self.has_waiting_senders {
+            if let Some(waiting) = &self.joins[index] {
+                let finished = waiting.iter().all(|id| !self.script_ids.contains(id));
+                if finished {
+                    self.joins[index] = None;
+                    self.has_waiting_senders = self.joins.iter().any(Option::is_some);
+                }
+                finished
+            } else {
+                true
+            }
+        } else {
+            true
+        };
+        let is_runnable =
+            self.wake_at[index].is_none_or(|deadline| deadline <= self.clock.now_millis());
+        (join_finished && is_runnable).then(|| self.run_script_at(index, state))
+    }
+
+    /// report completion or the next deadline when no frame script ran.
+    pub fn idle_status(&self) -> SchedulerStatus {
+        if self.scripts.is_empty() {
+            SchedulerStatus::Complete
+        } else {
+            SchedulerStatus::WaitingUntil(self.wake_at.iter().flatten().copied().min().unwrap())
+        }
+    }
+
+    fn run_script_at(&mut self, mut index: usize, state: &mut ScratchState) -> SchedulerStatus {
+        self.next = index;
+        state.set_current_instance(self.scripts[index].target_instance());
+        let mut status = self.scripts[index].step(state, self.clock.as_ref());
+        while status == ScriptStatus::StopOtherScripts {
+            let target_instance = self.scripts[index].target_instance();
+            let current_id = self.script_ids[index];
+            self.remove_other_scripts(target_instance, current_id);
+            index = self
+                .script_ids
+                .iter()
+                .position(|id| *id == current_id)
+                .expect("the stopping script remains active");
+            self.next = index;
+            state.set_current_instance(target_instance);
+            status = self.scripts[index].step(state, self.clock.as_ref());
+        }
+        match status {
+            ScriptStatus::Yield => {
+                self.wake_at[index] = None;
+                self.next = (index + 1) % self.scripts.len();
+            }
+            ScriptStatus::WaitUntil(deadline) => {
+                self.wake_at[index] = Some(deadline);
+                self.next = (index + 1) % self.scripts.len();
+            }
+            ScriptStatus::Complete => {
+                self.scripts.remove(index);
+                self.wake_at.remove(index);
+                self.script_ids.remove(index);
+                self.joins.remove(index);
+                self.has_waiting_senders = self.joins.iter().any(Option::is_some);
+                self.next = if self.scripts.is_empty() {
+                    0
+                } else {
+                    index % self.scripts.len()
+                };
+            }
+            ScriptStatus::StopAll => {
+                state.remove_clones();
+                self.scripts.clear();
+                self.wake_at.clear();
+                self.script_ids.clear();
+                self.joins.clear();
+                self.has_waiting_senders = false;
+                self.pending_broadcast = None;
+                self.next = 0;
+                return SchedulerStatus::Complete;
+            }
+            ScriptStatus::StopOtherScripts => unreachable!(),
+            ScriptStatus::Broadcast { message, wait } => {
+                self.wake_at[index] = None;
+                self.pending_broadcast = Some((self.script_ids[index], message, wait));
+                self.next = (index + 1) % self.scripts.len();
+            }
+        }
+        SchedulerStatus::Progressed
     }
 
     /// stop active scripts and start a fresh matching event set.
@@ -245,12 +345,16 @@ impl<S: ResumableScript> ScriptScheduler<S> {
     }
 
     pub fn add_scripts(&mut self, scripts: impl IntoIterator<Item = S>) {
+        let first_added = self.scripts.len();
         for script in scripts {
             self.scripts.push(script);
             self.wake_at.push(None);
             self.script_ids.push(self.next_script_id);
             self.next_script_id += 1;
             self.joins.push(None);
+        }
+        if self.scripts.len() > first_added && self.next == 0 && first_added > 0 {
+            self.next = first_added;
         }
     }
 
@@ -273,6 +377,26 @@ impl<S: ResumableScript> ScriptScheduler<S> {
             self.next = 0;
         } else {
             self.next %= self.scripts.len();
+        }
+        self.has_waiting_senders = self.joins.iter().any(Option::is_some);
+    }
+
+    fn remove_other_scripts(&mut self, target_instance: usize, current_id: u64) {
+        let mut index = 0;
+        while index < self.scripts.len() {
+            if self.script_ids[index] != current_id
+                && self.scripts[index].target_instance() == target_instance
+            {
+                self.scripts.remove(index);
+                self.wake_at.remove(index);
+                self.script_ids.remove(index);
+                self.joins.remove(index);
+                if index < self.next {
+                    self.next -= 1;
+                }
+            } else {
+                index += 1;
+            }
         }
         self.has_waiting_senders = self.joins.iter().any(Option::is_some);
     }

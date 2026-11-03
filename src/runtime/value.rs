@@ -109,6 +109,9 @@ struct ScratchTargetInstance {
     target: usize,
     original: bool,
     alive: bool,
+    is_stage: bool,
+    x: f64,
+    y: f64,
     values: Vec<Option<ScratchValue>>,
     lists: Vec<Option<ScratchList>>,
 }
@@ -206,6 +209,9 @@ impl ScratchState {
                 target: 0,
                 original: true,
                 alive: true,
+                is_stage: false,
+                x: 0.0,
+                y: 0.0,
                 values: Vec::new(),
                 lists: Vec::new(),
             }],
@@ -231,6 +237,9 @@ impl ScratchState {
                 target: 0,
                 original: true,
                 alive: true,
+                is_stage: false,
+                x: 0.0,
+                y: 0.0,
                 values: Vec::new(),
                 lists: Vec::new(),
             }],
@@ -261,6 +270,9 @@ impl ScratchState {
                 target: 0,
                 original: true,
                 alive: true,
+                is_stage: false,
+                x: 0.0,
+                y: 0.0,
                 values: Vec::new(),
                 lists: Vec::new(),
             }],
@@ -354,15 +366,56 @@ impl ScratchState {
         self.instances[self.current_instance].target
     }
 
+    pub fn set_original_xy(&mut self, target: usize, x: f64, y: f64) {
+        if let Some(instance) = self
+            .instances
+            .iter_mut()
+            .find(|instance| instance.target == target && instance.original && !instance.is_stage)
+        {
+            instance.x = x;
+            instance.y = y;
+        }
+    }
+
+    pub fn set_xy(&mut self, x: f64, y: f64) {
+        if !self.instances[self.current_instance].is_stage {
+            let instance = &mut self.instances[self.current_instance];
+            instance.x = x;
+            instance.y = y;
+        }
+    }
+
+    pub fn change_x_by(&mut self, dx: f64) {
+        let instance = &mut self.instances[self.current_instance];
+        if !instance.is_stage {
+            instance.x += dx;
+        }
+    }
+
+    pub fn position(&self, instance: usize) -> Option<(f64, f64)> {
+        self.instances
+            .get(instance)
+            .filter(|target| target.alive)
+            .map(|target| (target.x, target.y))
+    }
+
     pub fn add_original_target(&mut self, target: usize) -> usize {
         if let Some(id) = self.original_instance(target) {
             return id;
         }
         let id = self.instances.len();
+        let is_stage = self
+            .target_names
+            .iter()
+            .find(|(index, _, _)| *index == target)
+            .is_some_and(|(_, _, is_stage)| *is_stage);
         self.instances.push(ScratchTargetInstance {
             target,
             original: true,
             alive: true,
+            is_stage,
+            x: 0.0,
+            y: 0.0,
             values: vec![None; self.values.len()],
             lists: vec![None; self.lists.len()],
         });
@@ -378,7 +431,8 @@ impl ScratchState {
 
     pub fn register_target(&mut self, target: usize, name: impl Into<String>, is_stage: bool) {
         self.target_names.push((target, name.into(), is_stage));
-        self.add_original_target(target);
+        let instance = self.add_original_target(target);
+        self.instances[instance].is_stage = is_stage;
     }
 
     fn ensure_instance_slot(&mut self, slot: usize) {
@@ -426,6 +480,9 @@ impl ScratchState {
             target,
             original: false,
             alive: true,
+            is_stage: false,
+            x: self.instances[source_instance].x,
+            y: self.instances[source_instance].y,
             values: vec![None; self.values.len()],
             lists: vec![None; self.lists.len()],
         };
@@ -676,6 +733,30 @@ mod tests {
         assert_eq!(state.get(0), &ScratchValue::Number(-1.0));
         assert_eq!(state.list(0).contents(), "seed original first second");
         assert_eq!(state.list(1).contents(), "");
+    }
+
+    #[test]
+    fn clone_positions_inherit_and_then_change_independently() {
+        let mut state = ScratchState::new(vec![]);
+        state.register_target(0, "Stage", true);
+        state.register_target(1, "Sprite1", false);
+        let original = state.original_instance(1).unwrap();
+        state.set_original_xy(1, -240.0, 0.0);
+        let clone = state.create_clone(original, 1, 300).unwrap();
+
+        assert_eq!(state.position(original), Some((-240.0, 0.0)));
+        assert_eq!(state.position(clone), Some((-240.0, 0.0)));
+
+        state.set_current_instance(clone);
+        state.set_xy(12.0, 34.0);
+        state.change_x_by(3.0);
+
+        assert_eq!(state.position(clone), Some((15.0, 34.0)));
+        assert_eq!(state.position(original), Some((-240.0, 0.0)));
+
+        state.set_current_instance(0);
+        state.set_xy(99.0, 99.0);
+        assert_eq!(state.position(0), Some((0.0, 0.0)));
     }
 
     #[test]
