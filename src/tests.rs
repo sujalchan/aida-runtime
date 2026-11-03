@@ -1,9 +1,14 @@
 use std::{cell::Cell, rc::Rc};
 
 use crate::{
-    parse_run_options,
+    assert_expected_variables, parse_run_options,
     program::GeneratedProgram,
-    runtime::{Clock, PacingMechanism, PacingMode, SchedulerStatus, ScratchValue},
+    run_headless,
+    runtime::{
+        Clock, PacingMechanism, PacingMode, RuntimeSnapshot, SchedulerStatus, ScratchValue,
+        VariableSnapshot,
+    },
+    wait_for_renderer,
 };
 
 #[derive(Clone)]
@@ -66,6 +71,111 @@ fn cli_accepts_a_positive_scheduler_tick_limit() {
     .unwrap();
     assert_eq!(options.max_ticks, Some(100));
     assert!(parse_run_options(["--max-ticks".to_owned(), "0".to_owned()]).is_err());
+}
+
+#[test]
+fn cli_defaults_to_headless_and_accepts_observation_options() {
+    let default = parse_run_options(std::iter::empty()).unwrap();
+    assert!(!default.graphical);
+    assert!(default.project.is_none());
+
+    let graphical = parse_run_options([
+        "--graphical".to_owned(),
+        "--project".to_owned(),
+        "project.sb3".to_owned(),
+        "--log-observables".to_owned(),
+        "--log-variables".to_owned(),
+        "--expect-variable".to_owned(),
+        "Stage::score#score-id@shared=42".to_owned(),
+    ])
+    .unwrap();
+    assert!(graphical.graphical);
+    assert!(graphical.log_observables);
+    assert!(graphical.log_variables);
+    assert_eq!(
+        graphical.expected_variables[0].0,
+        "Stage::score#score-id@shared"
+    );
+    assert_eq!(
+        graphical.expected_variables[0].1,
+        ScratchValue::Number(42.0)
+    );
+    assert!(parse_run_options(["--graphical".to_owned(), "--headless".to_owned()]).is_err());
+}
+
+#[test]
+fn cli_enables_development_monitor_controls() {
+    let options = parse_run_options([
+        "--graphical".to_owned(),
+        "--dev".to_owned(),
+        "--project".to_owned(),
+        "project.sb3".to_owned(),
+    ])
+    .unwrap();
+    assert!(options.graphical);
+    assert!(options.dev_mode);
+
+    let default = parse_run_options(std::iter::empty()).unwrap();
+    assert!(!default.dev_mode);
+}
+
+#[test]
+fn headless_runner_executes_without_creating_a_window() {
+    let options = parse_run_options([
+        "--headless".to_owned(),
+        "--turbo".to_owned(),
+        "--max-ticks".to_owned(),
+        "1".to_owned(),
+    ])
+    .unwrap();
+    assert!(run_headless(options).is_ok());
+}
+
+#[test]
+fn headless_variable_assertions_match_scoped_snapshot_keys() {
+    let snapshot = RuntimeSnapshot {
+        tick: 3,
+        variables: vec![VariableSnapshot {
+            key: "Sprite::score#score-id@2".to_owned(),
+            id: "score-id".to_owned(),
+            name: "score".to_owned(),
+            target: "Sprite".to_owned(),
+            instance_id: Some(2),
+            value: ScratchValue::Number(9.0),
+        }],
+        ..RuntimeSnapshot::default()
+    };
+    assert!(
+        assert_expected_variables(
+            &snapshot,
+            &[(
+                "Sprite::score#score-id@2".to_owned(),
+                ScratchValue::Number(9.0)
+            )]
+        )
+        .is_ok()
+    );
+    assert!(
+        assert_expected_variables(
+            &snapshot,
+            &[(
+                "Sprite::score#score-id@2".to_owned(),
+                ScratchValue::Number(10.0)
+            )]
+        )
+        .unwrap_err()
+        .contains("observed Number(9.0)")
+    );
+}
+
+#[test]
+fn normal_redraw_gate_waits_for_the_matching_renderer_submission() {
+    let (ack_tx, ack_rx) = std::sync::mpsc::channel();
+    let (stop_tx, stop_rx) = std::sync::mpsc::channel();
+    ack_tx.send(4).unwrap();
+    ack_tx.send(5).unwrap();
+    assert!(wait_for_renderer(&ack_rx, 5, &stop_rx));
+    drop(stop_tx);
 }
 
 #[test]

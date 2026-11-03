@@ -62,12 +62,21 @@ impl<M: PacingMechanism> TickPacer<M> {
         }
     }
 
-    /// start timing a tick when frame pacing is enabled.
+    /// start timing the work budget for this scheduler tick.
     pub fn begin_tick(&self) -> Option<Duration> {
-        match self.mode {
-            PacingMode::Paced(_) => Some(self.mechanism.now()),
-            PacingMode::Turbo => None,
-        }
+        Some(self.mechanism.now())
+    }
+
+    pub fn now(&self) -> Duration {
+        self.mechanism.now()
+    }
+
+    pub fn work_budget(&self) -> Duration {
+        let interval = match self.mode {
+            PacingMode::Paced(interval) => interval,
+            PacingMode::Turbo => Duration::from_secs_f64(1.0 / PacingMode::DEFAULT_FPS),
+        };
+        interval.mul_f64(0.75)
     }
 
     pub fn finish_tick(&mut self, tick_started: Option<Duration>) {
@@ -95,11 +104,6 @@ impl<M: PacingMechanism> TickPacer<M> {
                 next_deadline
             });
         }
-    }
-
-    /// discard frame phase when a scheduler wait suspends host ticks.
-    pub fn reset_schedule(&mut self) {
-        self.next_deadline = None;
     }
 
     /// wait for a scheduler deadline in both normal and turbo modes.

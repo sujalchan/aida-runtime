@@ -6,6 +6,50 @@ pub enum ScratchValue {
 }
 
 use super::{ScratchList, scratch_number_operand, scratch_to_number};
+use std::collections::HashSet;
+use std::fmt::Debug;
+use std::sync::mpsc::Sender;
+
+/// input collected by the presentation thread and consumed by generated code.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RuntimeInputEvent {
+    Key { name: String, pressed: bool },
+    MousePosition { x: f64, y: f64 },
+    MouseButton { pressed: bool },
+}
+
+#[derive(Debug, Default)]
+struct RuntimeInputState {
+    pressed_keys: HashSet<String>,
+    mouse_x: f64,
+    mouse_y: f64,
+    mouse_down: bool,
+}
+
+impl RuntimeInputState {
+    fn apply(&mut self, event: RuntimeInputEvent) -> Option<String> {
+        match event {
+            RuntimeInputEvent::Key { name, pressed } => {
+                let name = name.to_ascii_lowercase();
+                if pressed {
+                    self.pressed_keys.insert(name.clone()).then_some(name)
+                } else {
+                    self.pressed_keys.remove(&name);
+                    None
+                }
+            }
+            RuntimeInputEvent::MousePosition { x, y } => {
+                self.mouse_x = x;
+                self.mouse_y = y;
+                None
+            }
+            RuntimeInputEvent::MouseButton { pressed } => {
+                self.mouse_down = pressed;
+                None
+            }
+        }
+    }
+}
 
 /// a borrowed view of a scratch value accepted by runtime operators.
 #[derive(Debug, Clone, Copy)]
@@ -90,7 +134,7 @@ impl From<String> for ScratchValue {
     }
 }
 
-/// shared project variables addressed by compiler-assigned slots.
+/// canonical project state read and advanced by the generated scheduler.
 #[derive(Debug)]
 pub struct ScratchState {
     values: Vec<ScratchValue>,
@@ -102,6 +146,76 @@ pub struct ScratchState {
     current_instance: usize,
     pending_clones: Vec<usize>,
     target_names: Vec<(usize, String, bool)>,
+    event_sink: Option<Sender<ObservableEvent>>,
+    input: RuntimeInputState,
+    redraw_requested: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ObservableEvent {
+    Output {
+        label: String,
+        value: String,
+    },
+    VariableChange {
+        key: String,
+        old_value: String,
+        new_value: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct VariableSnapshot {
+    pub key: String,
+    pub id: String,
+    pub name: String,
+    pub target: String,
+    pub instance_id: Option<usize>,
+    pub value: ScratchValue,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ListSnapshot {
+    pub key: String,
+    pub id: String,
+    pub name: String,
+    pub target: String,
+    pub instance_id: Option<usize>,
+    pub items: Vec<ScratchValue>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LayerSnapshot {
+    pub target_index: usize,
+    pub target: String,
+    pub instance_id: usize,
+    pub original: bool,
+    pub x: f64,
+    pub y: f64,
+}
+
+/// immutable copies for presentation and observation, never script execution state.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RuntimeSnapshot {
+    pub tick: usize,
+    pub variables: Vec<VariableSnapshot>,
+    pub lists: Vec<ListSnapshot>,
+    pub layers: Vec<LayerSnapshot>,
+}
+
+pub fn variable_snapshot_key(
+    target: &str,
+    name: &str,
+    id: &str,
+    instance_id: Option<usize>,
+) -> String {
+    let instance = instance_id.map_or_else(|| "shared".to_owned(), |id| id.to_string());
+    format!("{target}::{name}#{id}@{instance}")
+}
+
+pub fn list_snapshot_key(target: &str, name: &str, id: &str, instance_id: Option<usize>) -> String {
+    let instance = instance_id.map_or_else(|| "shared".to_owned(), |id| id.to_string());
+    format!("{target}::{name}#{id}@{instance}")
 }
 
 #[derive(Debug, Clone)]
@@ -197,6 +311,42 @@ impl ScratchVariableMetadata {
 }
 
 impl ScratchState {
+    /// clear the previous frame's request before stepping generated scripts.
+    pub fn begin_tick(&mut self) {
+        self.redraw_requested = false;
+    }
+
+    pub fn request_redraw(&mut self) {
+        self.redraw_requested = true;
+    }
+
+    pub fn redraw_requested(&self) -> bool {
+        self.redraw_requested
+    }
+
+    pub fn presentation_consumed(&mut self) {
+        self.redraw_requested = false;
+    }
+
+    /// update canonical input state from the renderer's queued events.
+    pub fn apply_input(&mut self, event: RuntimeInputEvent) -> Option<String> {
+        self.input.apply(event)
+    }
+
+    pub fn key_pressed(&self, key: &str) -> bool {
+        self.input.pressed_keys.contains(&key.to_ascii_lowercase())
+    }
+
+    pub fn mouse_x(&self) -> f64 {
+        self.input.mouse_x
+    }
+    pub fn mouse_y(&self) -> f64 {
+        self.input.mouse_y
+    }
+    pub fn mouse_down(&self) -> bool {
+        self.input.mouse_down
+    }
+
     /// create state without variable names.
     pub fn new(values: Vec<ScratchValue>) -> Self {
         Self {
@@ -218,6 +368,9 @@ impl ScratchState {
             current_instance: 0,
             pending_clones: Vec::new(),
             target_names: Vec::new(),
+            event_sink: None,
+            input: RuntimeInputState::default(),
+            redraw_requested: false,
         }
     }
 
@@ -246,6 +399,9 @@ impl ScratchState {
             current_instance: 0,
             pending_clones: Vec::new(),
             target_names: Vec::new(),
+            event_sink: None,
+            input: RuntimeInputState::default(),
+            redraw_requested: false,
         }
     }
 
@@ -279,6 +435,9 @@ impl ScratchState {
             current_instance: 0,
             pending_clones: Vec::new(),
             target_names: Vec::new(),
+            event_sink: None,
+            input: RuntimeInputState::default(),
+            redraw_requested: false,
         }
     }
 
@@ -302,25 +461,31 @@ impl ScratchState {
 
     #[inline]
     pub fn set(&mut self, slot: usize, value: ScratchValue) {
+        let change = self.capture_variable_change(slot);
         if let Some(metadata) = self.variables.get(slot) {
             if !metadata.is_stage {
                 self.ensure_instance_slot(slot);
                 self.instances[self.current_instance].values[slot] = Some(value);
+                self.publish_variable_change(change, slot);
                 return;
             }
         }
         self.values[slot] = value;
+        self.publish_variable_change(change, slot);
     }
 
     /// write a stage variable without checking variable scope metadata.
     #[inline]
     pub fn set_shared(&mut self, slot: usize, value: ScratchValue) {
+        let change = self.capture_variable_change(slot);
         self.values[slot] = value;
+        self.publish_variable_change(change, slot);
     }
 
     /// apply a scratch-converted numeric change directly to a stage variable.
     #[inline]
     pub fn change_shared(&mut self, slot: usize, change: f64) {
+        let old_value = self.capture_variable_change(slot);
         let value = &mut self.values[slot];
         match value {
             ScratchValue::Number(number) => {
@@ -330,6 +495,157 @@ impl ScratchState {
                 *value = ScratchValue::Number(scratch_to_number(&*value) + change);
             }
         }
+        self.publish_variable_change(old_value, slot);
+    }
+
+    pub fn set_event_sink(&mut self, event_sink: Option<Sender<ObservableEvent>>) {
+        self.event_sink = event_sink;
+    }
+
+    pub fn emit_observable_output(&self, label: &str, value: &impl Debug) {
+        println!("{label}: {:?}", value);
+        if let Some(event_sink) = &self.event_sink {
+            let _ = event_sink.send(ObservableEvent::Output {
+                label: label.to_owned(),
+                value: format!("{value:?}"),
+            });
+        }
+    }
+
+    fn capture_variable_change(&self, slot: usize) -> Option<(String, String)> {
+        if self.event_sink.is_none() {
+            return None;
+        }
+        let metadata = self.variables.get(slot)?;
+        let instance_id = if metadata.is_stage {
+            None
+        } else {
+            Some(self.current_instance)
+        };
+        let key =
+            variable_snapshot_key(&metadata.target, &metadata.name, &metadata.id, instance_id);
+        Some((key, format!("{:?}", self.get(slot))))
+    }
+
+    fn publish_variable_change(&self, old: Option<(String, String)>, slot: usize) {
+        let (Some((key, old_value)), Some(event_sink)) = (old, self.event_sink.as_ref()) else {
+            return;
+        };
+        let new_value = format!("{:?}", self.get(slot));
+        if old_value != new_value {
+            let _ = event_sink.send(ObservableEvent::VariableChange {
+                key,
+                old_value,
+                new_value,
+            });
+        }
+    }
+
+    pub fn observable_snapshot(&self, tick: usize) -> RuntimeSnapshot {
+        let mut snapshot = RuntimeSnapshot {
+            tick,
+            ..RuntimeSnapshot::default()
+        };
+        for (instance_id, instance) in self.instances.iter().enumerate() {
+            if !instance.alive {
+                continue;
+            }
+            let Some((_, target, is_stage)) = self
+                .target_names
+                .iter()
+                .find(|(target_index, _, _)| *target_index == instance.target)
+            else {
+                continue;
+            };
+            if !is_stage {
+                snapshot.layers.push(LayerSnapshot {
+                    target_index: instance.target,
+                    target: target.clone(),
+                    instance_id,
+                    original: instance.original,
+                    x: instance.x,
+                    y: instance.y,
+                });
+            }
+        }
+        for (slot, metadata) in self.variables.iter().enumerate() {
+            if metadata.is_stage {
+                snapshot.variables.push(VariableSnapshot {
+                    key: variable_snapshot_key(
+                        &metadata.target,
+                        &metadata.name,
+                        &metadata.id,
+                        None,
+                    ),
+                    id: metadata.id.clone(),
+                    name: metadata.name.clone(),
+                    target: metadata.target.clone(),
+                    instance_id: None,
+                    value: self.values[slot].clone(),
+                });
+                continue;
+            }
+            for (instance_id, instance) in self.instances.iter().enumerate() {
+                if !instance.alive || instance.target != metadata.target_index {
+                    continue;
+                }
+                let value = instance
+                    .values
+                    .get(slot)
+                    .and_then(Option::as_ref)
+                    .unwrap_or(&self.values[slot]);
+                snapshot.variables.push(VariableSnapshot {
+                    key: variable_snapshot_key(
+                        &metadata.target,
+                        &metadata.name,
+                        &metadata.id,
+                        Some(instance_id),
+                    ),
+                    id: metadata.id.clone(),
+                    name: metadata.name.clone(),
+                    target: metadata.target.clone(),
+                    instance_id: Some(instance_id),
+                    value: value.clone(),
+                });
+            }
+        }
+        for (slot, metadata) in self.list_metadata.iter().enumerate() {
+            if metadata.is_stage {
+                snapshot.lists.push(ListSnapshot {
+                    key: list_snapshot_key(&metadata.target, &metadata.name, &metadata.id, None),
+                    id: metadata.id.clone(),
+                    name: metadata.name.clone(),
+                    target: metadata.target.clone(),
+                    instance_id: None,
+                    items: self.lists[slot].items().to_vec(),
+                });
+                continue;
+            }
+            for (instance_id, instance) in self.instances.iter().enumerate() {
+                if !instance.alive || instance.target != metadata.target_index {
+                    continue;
+                }
+                let list = instance
+                    .lists
+                    .get(slot)
+                    .and_then(Option::as_ref)
+                    .unwrap_or(&self.lists[slot]);
+                snapshot.lists.push(ListSnapshot {
+                    key: list_snapshot_key(
+                        &metadata.target,
+                        &metadata.name,
+                        &metadata.id,
+                        Some(instance_id),
+                    ),
+                    id: metadata.id.clone(),
+                    name: metadata.name.clone(),
+                    target: metadata.target.clone(),
+                    instance_id: Some(instance_id),
+                    items: list.items().to_vec(),
+                });
+            }
+        }
+        snapshot
     }
 
     pub fn list(&self, slot: usize) -> &ScratchList {
@@ -640,7 +956,10 @@ impl ScratchState {
 
 #[cfg(test)]
 mod tests {
-    use super::{ScratchListMetadata, ScratchState, ScratchValue, ScratchVariableMetadata};
+    use super::{
+        ObservableEvent, RuntimeInputEvent, ScratchListMetadata, ScratchState, ScratchValue,
+        ScratchVariableMetadata,
+    };
     use crate::runtime::{ScratchList, scratch_to_number};
 
     #[test]
@@ -698,6 +1017,49 @@ mod tests {
         state.register_target(0, "Stage", true);
         state.register_target(1, "Sprite", false);
         state
+    }
+
+    #[test]
+    fn observable_events_and_snapshots_preserve_scoped_identity() {
+        let mut state = clone_test_state();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        state.set_event_sink(Some(sender));
+        state.set_current_instance(1);
+        state.set(0, ScratchValue::Text("changed".to_owned()));
+        state.emit_observable_output("say", &"hello");
+        let clone = state.create_clone(1, 1, 300).unwrap();
+        let snapshot = state.observable_snapshot(7);
+
+        assert!(
+            matches!(receiver.try_recv(), Ok(ObservableEvent::VariableChange { key, .. }) if key == "Sprite::score#sprite-local@1")
+        );
+        assert_eq!(
+            receiver.try_recv().unwrap(),
+            ObservableEvent::Output {
+                label: "say".to_owned(),
+                value: "\"hello\"".to_owned()
+            }
+        );
+        assert!(
+            snapshot
+                .variables
+                .iter()
+                .any(|value| value.key == "Sprite::score#sprite-local@1"
+                    && value.value == ScratchValue::Text("changed".to_owned()))
+        );
+        assert!(
+            snapshot
+                .variables
+                .iter()
+                .any(|value| value.key == format!("Sprite::score#sprite-local@{clone}"))
+        );
+        assert!(
+            snapshot
+                .layers
+                .iter()
+                .any(|layer| layer.instance_id == clone && !layer.original)
+        );
+        assert_eq!(snapshot.tick, 7);
     }
 
     #[test]
@@ -841,5 +1203,42 @@ mod tests {
         state.set_current_instance(child);
         assert_eq!(state.get(0), &ScratchValue::Number(24.0));
         assert_eq!(state.clone_count(), 2);
+    }
+
+    #[test]
+    fn redraw_gate_and_input_are_owned_by_canonical_runtime_state() {
+        let mut state = ScratchState::new(Vec::new());
+        state.begin_tick();
+        assert!(!state.redraw_requested());
+        state.set_xy(12.0, -4.0);
+        state.request_redraw();
+        assert!(state.redraw_requested());
+        state.presentation_consumed();
+        assert!(!state.redraw_requested());
+
+        assert_eq!(
+            state.apply_input(RuntimeInputEvent::Key {
+                name: "A".to_owned(),
+                pressed: true,
+            }),
+            Some("a".to_owned())
+        );
+        assert_eq!(
+            state.apply_input(RuntimeInputEvent::Key {
+                name: "a".to_owned(),
+                pressed: true,
+            }),
+            None
+        );
+        state.apply_input(RuntimeInputEvent::MousePosition { x: 21.0, y: -7.0 });
+        state.apply_input(RuntimeInputEvent::MouseButton { pressed: true });
+        assert!(state.key_pressed("a"));
+        assert_eq!((state.mouse_x(), state.mouse_y()), (21.0, -7.0));
+        assert!(state.mouse_down());
+        state.apply_input(RuntimeInputEvent::Key {
+            name: "a".to_owned(),
+            pressed: false,
+        });
+        assert!(!state.key_pressed("a"));
     }
 }
