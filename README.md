@@ -47,6 +47,14 @@ cargo run -p aida-ast -- --runtime aida-runtime/src/program.rs path/to/project.s
 cargo run -p aida-runtime -- --turbo
 ```
 
+To opt into generated fast maths paths, add `--fast-math` to the `aida-ast`
+command. Do not pass it to `aida-runtime`:
+
+```sh
+cargo run -p aida-ast -- --fast-math --runtime aida-runtime/src/program.rs path/to/project.sb3
+cargo run -p aida-runtime -- --turbo
+```
+
 The root launchers combine those steps. For example:
 
 ```sh

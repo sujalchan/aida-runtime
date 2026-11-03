@@ -5,7 +5,7 @@ pub enum ScratchValue {
     Boolean(bool),
 }
 
-use super::ScratchList;
+use super::{ScratchList, scratch_number_operand, scratch_to_number};
 
 /// a borrowed view of a scratch value accepted by runtime operators.
 #[derive(Debug, Clone, Copy)]
@@ -306,6 +306,20 @@ impl ScratchState {
         self.values[slot] = value;
     }
 
+    /// apply a scratch-converted numeric change directly to a stage variable.
+    #[inline]
+    pub fn change_shared(&mut self, slot: usize, change: f64) {
+        let value = &mut self.values[slot];
+        match value {
+            ScratchValue::Number(number) => {
+                *number = scratch_number_operand(*number) + change;
+            }
+            ScratchValue::Text(_) | ScratchValue::Boolean(_) => {
+                *value = ScratchValue::Number(scratch_to_number(&*value) + change);
+            }
+        }
+    }
+
     pub fn list(&self, slot: usize) -> &ScratchList {
         self.instances[self.current_instance]
             .lists
@@ -570,7 +584,7 @@ impl ScratchState {
 #[cfg(test)]
 mod tests {
     use super::{ScratchListMetadata, ScratchState, ScratchValue, ScratchVariableMetadata};
-    use crate::runtime::ScratchList;
+    use crate::runtime::{ScratchList, scratch_to_number};
 
     #[test]
     fn looks_up_variables_by_id_and_target_scoped_name() {
@@ -674,6 +688,31 @@ mod tests {
 
         assert_eq!(state.get_shared(1), &ScratchValue::Number(17.0));
         assert_eq!(state.get(1), &ScratchValue::Number(17.0));
+    }
+
+    #[test]
+    fn shared_change_preserves_scratch_numeric_conversion() {
+        let mut state = ScratchState::new(vec![
+            ScratchValue::Text(" 2.5 ".to_owned()),
+            ScratchValue::Boolean(true),
+            ScratchValue::Number(f64::NAN),
+            ScratchValue::Number(f64::INFINITY),
+            ScratchValue::Number(-0.0),
+        ]);
+
+        state.change_shared(0, scratch_to_number(1.5));
+        state.change_shared(1, scratch_to_number("2"));
+        state.change_shared(2, scratch_to_number(1.0));
+        state.change_shared(3, scratch_to_number(f64::NEG_INFINITY));
+        state.change_shared(4, scratch_to_number(-0.0));
+
+        assert_eq!(state.get_shared(0), &ScratchValue::Number(4.0));
+        assert_eq!(state.get_shared(1), &ScratchValue::Number(3.0));
+        assert_eq!(state.get_shared(2), &ScratchValue::Number(1.0));
+        assert!(matches!(state.get_shared(3), ScratchValue::Number(value) if value.is_nan()));
+        assert!(
+            matches!(state.get_shared(4), ScratchValue::Number(value) if value.is_sign_negative())
+        );
     }
 
     #[test]

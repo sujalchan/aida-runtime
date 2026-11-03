@@ -96,6 +96,36 @@ pub fn scratch_tan(value: impl ScratchInput) -> f64 {
     }
 }
 
+/// fast sine reporter: scratch conversion and degrees, without decimal rounding.
+pub fn fast_sin(value: impl ScratchInput) -> f64 {
+    scratch_to_number(value).to_radians().sin()
+}
+
+/// fast cosine reporter: scratch conversion and degrees, without decimal rounding.
+pub fn fast_cos(value: impl ScratchInput) -> f64 {
+    scratch_to_number(value).to_radians().cos()
+}
+
+/// fast tangent reporter without scratch's exact singularity handling.
+pub fn fast_tan(value: impl ScratchInput) -> f64 {
+    scratch_to_number(value).to_radians().tan()
+}
+
+/// fast inverse sine in degrees using the platform's native operation.
+pub fn fast_asin_degrees(value: impl ScratchInput) -> f64 {
+    scratch_to_number(value).asin().to_degrees()
+}
+
+/// fast inverse cosine in degrees using the platform's native operation.
+pub fn fast_acos_degrees(value: impl ScratchInput) -> f64 {
+    scratch_to_number(value).acos().to_degrees()
+}
+
+/// fast inverse tangent in degrees using the platform's native operation.
+pub fn fast_atan_degrees(value: impl ScratchInput) -> f64 {
+    scratch_to_number(value).atan().to_degrees()
+}
+
 /// Scratch's inverse sine in degrees, using a stable atan2 form.
 pub fn scratch_asin_degrees(value: impl ScratchInput) -> f64 {
     let number = scratch_to_number(value);
@@ -414,6 +444,61 @@ mod tests {
         assert_eq!(scratch_tan(-270.0), f64::INFINITY);
         assert_eq!(scratch_tan(-90.0), f64::NEG_INFINITY);
         assert_eq!(scratch_tan(270.0), f64::NEG_INFINITY);
+    }
+
+    #[test]
+    fn fast_trigonometry_keeps_conversion_but_skips_scratch_edge_adjustments() {
+        assert_eq!(fast_sin("30"), 30.0_f64.to_radians().sin());
+        assert_eq!(fast_cos(true), 1.0_f64.to_radians().cos());
+        assert_eq!(fast_tan(90.0), 90.0_f64.to_radians().tan());
+        assert!(fast_tan(90.0).is_finite());
+        assert_ne!(fast_sin(30.0), scratch_sin(30.0));
+        assert_eq!(fast_asin_degrees(0.5), 0.5_f64.asin().to_degrees());
+        assert_eq!(fast_acos_degrees(0.5), 0.5_f64.acos().to_degrees());
+        assert_eq!(fast_atan_degrees(1.0), 45.0);
+        assert!(fast_sin(f64::INFINITY).is_nan());
+        assert_eq!(fast_sin(f64::NAN), 0.0);
+        assert_eq!(fast_sin(-0.0).to_bits(), (-0.0_f64).to_bits());
+    }
+
+    #[test]
+    fn native_fast_arithmetic_keeps_ieee_nan_while_default_normalizes_operands() {
+        let default = scratch_number_operand(f64::NAN) + scratch_number_operand(1.0);
+        let fast = f64::NAN + 1.0;
+        assert_eq!(default, 1.0);
+        assert!(fast.is_nan());
+        assert_eq!(scratch_add("2.5", true), 3.5);
+        assert_eq!(scratch_add(f64::INFINITY, false), f64::INFINITY);
+    }
+
+    #[test]
+    #[ignore = "manual release-mode dynamic value benchmark"]
+    fn benchmark_dynamic_numeric_conversion() {
+        use std::{hint::black_box, time::Instant};
+
+        const ITERATIONS: usize = 10_000_000;
+        const SAMPLES: usize = 5;
+        let values = [
+            ScratchValue::Number(2.5),
+            ScratchValue::Text("2.5".to_owned()),
+            ScratchValue::Boolean(true),
+            ScratchValue::Text("not a number".to_owned()),
+        ];
+        let mut elapsed = Vec::with_capacity(SAMPLES);
+        for _ in 0..SAMPLES {
+            let started = Instant::now();
+            let mut sum = 0.0;
+            for index in 0..ITERATIONS {
+                sum += scratch_add(black_box(&values[index % values.len()]), 1.0);
+            }
+            black_box(sum);
+            elapsed.push(started.elapsed());
+        }
+        elapsed.sort_unstable();
+        println!(
+            "dynamic numeric conversion: iterations={ITERATIONS}, samples={SAMPLES}, median={:?}",
+            elapsed[SAMPLES / 2]
+        );
     }
 
     #[test]
