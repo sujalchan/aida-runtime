@@ -282,6 +282,12 @@ impl ScratchState {
         &self.values[slot]
     }
 
+    /// read a stage variable without checking clone-local storage.
+    #[inline]
+    pub fn get_shared(&self, slot: usize) -> &ScratchValue {
+        &self.values[slot]
+    }
+
     #[inline]
     pub fn set(&mut self, slot: usize, value: ScratchValue) {
         if let Some(metadata) = self.variables.get(slot) {
@@ -291,6 +297,12 @@ impl ScratchState {
                 return;
             }
         }
+        self.values[slot] = value;
+    }
+
+    /// write a stage variable without checking variable scope metadata.
+    #[inline]
+    pub fn set_shared(&mut self, slot: usize, value: ScratchValue) {
         self.values[slot] = value;
     }
 
@@ -640,6 +652,18 @@ mod tests {
         assert_eq!(state.get(0), &ScratchValue::Number(-1.0));
         assert_eq!(state.list(0).contents(), "seed original first second");
         assert_eq!(state.list(1).contents(), "");
+    }
+
+    #[test]
+    fn shared_variable_fast_access_ignores_clone_local_storage() {
+        let mut state = clone_test_state();
+        let clone = state.create_clone(1, 1, 300).unwrap();
+        state.set_current_instance(clone);
+
+        state.set_shared(1, 17.0_f64.into());
+
+        assert_eq!(state.get_shared(1), &ScratchValue::Number(17.0));
+        assert_eq!(state.get(1), &ScratchValue::Number(17.0));
     }
 
     #[test]

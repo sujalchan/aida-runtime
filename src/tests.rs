@@ -103,3 +103,36 @@ fn clone_with_variables_fixture_runs_and_updates_shared_stage_list() {
     );
     assert_eq!(program.state().clone_count(), 1);
 }
+
+#[test]
+#[ignore = "manual release-mode execution benchmark for the currently generated project"]
+fn benchmark_generated_project_scheduler_throughput() {
+    use std::time::Instant;
+
+    const TICKS: usize = 1_000_000;
+    const SAMPLES: usize = 7;
+    let mut elapsed = Vec::with_capacity(SAMPLES);
+
+    for _ in 0..SAMPLES {
+        let clock = TestClock(Rc::new(Cell::new(0)));
+        let mut program = GeneratedProgram::new_with_clock(Box::new(clock));
+        let started = Instant::now();
+        for _ in 0..TICKS {
+            let _ = std::hint::black_box(program.advance());
+        }
+        elapsed.push(started.elapsed());
+
+        let value = program
+            .state()
+            .get_by_id("`jEk@4|i[#Fk?(8x)AV.-my variable")
+            .expect("addition-loop variable exists");
+        assert_eq!(value, &ScratchValue::Number((TICKS - 1) as f64));
+    }
+
+    elapsed.sort_unstable();
+    let median = elapsed[SAMPLES / 2];
+    println!(
+        "generated-project scheduler benchmark: ticks={TICKS}, samples={SAMPLES}, median={median:?}, ticks_per_second={:.0}",
+        TICKS as f64 / median.as_secs_f64()
+    );
+}

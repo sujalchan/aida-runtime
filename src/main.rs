@@ -1,3 +1,4 @@
+#[rustfmt::skip]
 mod program;
 mod runtime;
 
