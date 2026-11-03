@@ -382,6 +382,44 @@ fn frame_order_runs_active_scripts_before_a_script_at_its_wake_deadline() {
 }
 
 #[test]
+fn scheduler_reports_only_scripts_added_since_the_last_frame_scan() {
+    let steps = std::rc::Rc::new(std::cell::Cell::new(0));
+    let script = || DeadlineScript {
+        deadline: 10,
+        steps: steps.clone(),
+    };
+    let mut scheduler = ScriptScheduler::new(vec![script()]);
+
+    assert_eq!(scheduler.next_script_id(), 1);
+    scheduler.add_scripts(vec![script()]);
+    let mut ids = Vec::new();
+    scheduler.append_new_script_ids_since(&mut ids, 1);
+    assert_eq!(ids, vec![1]);
+    scheduler.append_new_script_ids_since(&mut ids, 2);
+    assert_eq!(ids, vec![1]);
+}
+
+#[test]
+fn frame_order_can_reuse_its_buffer_between_scheduler_rounds() {
+    let steps = std::rc::Rc::new(std::cell::Cell::new(0));
+    let scripts = (0..2)
+        .map(|_| DeadlineScript {
+            deadline: 10,
+            steps: steps.clone(),
+        })
+        .collect();
+    let scheduler = ScriptScheduler::new(scripts);
+    let mut frame_order = Vec::with_capacity(2);
+
+    scheduler.script_ids_in_frame_order_into(&mut frame_order);
+    assert_eq!(frame_order, vec![0, 1]);
+    let capacity = frame_order.capacity();
+    scheduler.script_ids_in_frame_order_into(&mut frame_order);
+    assert_eq!(frame_order, vec![0, 1]);
+    assert_eq!(frame_order.capacity(), capacity);
+}
+
+#[test]
 fn paced_frame_rate_controls_work_completed_before_a_wait_resumes() {
     for (ticks_per_second, expected) in [(30_usize, 31.0), (40, 41.0)] {
         let now = std::rc::Rc::new(std::cell::Cell::new(0));

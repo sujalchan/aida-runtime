@@ -10,6 +10,16 @@ use std::collections::HashSet;
 use std::fmt::Debug;
 use std::sync::mpsc::Sender;
 
+#[inline]
+fn add_to_scratch_value(value: &mut ScratchValue, change: f64) {
+    match value {
+        ScratchValue::Number(number) => *number = scratch_number_operand(*number) + change,
+        ScratchValue::Text(_) | ScratchValue::Boolean(_) => {
+            *value = ScratchValue::Number(scratch_to_number(&*value) + change);
+        }
+    }
+}
+
 /// input collected by the presentation thread and consumed by generated code.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RuntimeInputEvent {
@@ -486,14 +496,43 @@ impl ScratchState {
     #[inline]
     pub fn change_shared(&mut self, slot: usize, change: f64) {
         let old_value = self.capture_variable_change(slot);
-        let value = &mut self.values[slot];
-        match value {
-            ScratchValue::Number(number) => {
-                *number = scratch_number_operand(*number) + change;
+        add_to_scratch_value(&mut self.values[slot], change);
+        self.publish_variable_change(old_value, slot);
+    }
+
+    /// change a sprite-local variable for the current instance.
+    #[inline]
+    pub fn change_local_by(&mut self, slot: usize, change: f64) {
+        if self.event_sink.is_none() {
+            let current_instance = self.current_instance;
+            if let Some(value) = self.instances[current_instance]
+                .values
+                .get_mut(slot)
+                .and_then(Option::as_mut)
+            {
+                add_to_scratch_value(value, change);
+                return;
             }
-            ScratchValue::Text(_) | ScratchValue::Boolean(_) => {
-                *value = ScratchValue::Number(scratch_to_number(&*value) + change);
-            }
+            let initial = self.values[slot].clone();
+            self.ensure_instance_slot(slot);
+            let value = self.instances[current_instance].values[slot].get_or_insert(initial);
+            add_to_scratch_value(value, change);
+            return;
+        }
+
+        let old_value = self.capture_variable_change(slot);
+        let current_instance = self.current_instance;
+        if let Some(value) = self.instances[current_instance]
+            .values
+            .get_mut(slot)
+            .and_then(Option::as_mut)
+        {
+            add_to_scratch_value(value, change);
+        } else {
+            let initial = self.values[slot].clone();
+            self.ensure_instance_slot(slot);
+            let value = self.instances[current_instance].values[slot].get_or_insert(initial);
+            add_to_scratch_value(value, change);
         }
         self.publish_variable_change(old_value, slot);
     }
@@ -705,6 +744,13 @@ impl ScratchState {
         let instance = &mut self.instances[self.current_instance];
         if !instance.is_stage {
             instance.x += dx;
+        }
+    }
+
+    pub fn change_y_by(&mut self, dy: f64) {
+        let instance = &mut self.instances[self.current_instance];
+        if !instance.is_stage {
+            instance.y += dy;
         }
     }
 
@@ -1122,6 +1168,24 @@ mod tests {
     }
 
     #[test]
+    fn motion_updates_are_visible_in_sprite_layer_snapshots() {
+        let mut state = ScratchState::new(Vec::new());
+        state.register_target(0, "Stage", true);
+        state.register_target(1, "Sprite1", false);
+        state.set_current_instance(state.original_instance(1).unwrap());
+
+        state.set_xy(0.0, 0.0);
+        state.change_x_by(10.0);
+        state.change_y_by(10.0);
+        state.request_redraw();
+
+        let snapshot = state.observable_snapshot(3);
+        assert_eq!(snapshot.layers.len(), 1);
+        assert_eq!((snapshot.layers[0].x, snapshot.layers[0].y), (10.0, 10.0));
+        assert!(state.redraw_requested());
+    }
+
+    #[test]
     fn shared_variable_fast_access_ignores_clone_local_storage() {
         let mut state = clone_test_state();
         let clone = state.create_clone(1, 1, 300).unwrap();
@@ -1156,6 +1220,52 @@ mod tests {
         assert!(
             matches!(state.get_shared(4), ScratchValue::Number(value) if value.is_sign_negative())
         );
+    }
+
+    #[test]
+    fn variable_change_updates_local_instances_independently_and_shares_stage_values() {
+        let mut state = clone_test_state();
+        let original = state.original_instance(1).unwrap();
+        state.set_current_instance(original);
+        state.change_local_by(0, 2.0);
+        let clone = state.create_clone(original, 1, 300).unwrap();
+
+        state.set_current_instance(original);
+        state.change_local_by(0, 3.0);
+        state.set_current_instance(clone);
+        state.change_local_by(0, 5.0);
+        state.change_shared(1, 4.0);
+
+        assert_eq!(state.get(0), &ScratchValue::Number(17.0));
+        assert_eq!(state.get_shared(1), &ScratchValue::Number(7.0));
+        let snapshot = state.observable_snapshot(1);
+        assert!(snapshot.variables.iter().any(|variable| {
+            variable.key == format!("Sprite::score#sprite-local@{clone}")
+                && variable.value == ScratchValue::Number(17.0)
+        }));
+        state.set_current_instance(original);
+        assert_eq!(state.get(0), &ScratchValue::Number(15.0));
+        assert_eq!(state.get(1), &ScratchValue::Number(7.0));
+    }
+
+    #[test]
+    fn local_variable_change_preserves_scratch_numeric_conversion() {
+        let mut state = ScratchState::with_metadata(
+            vec![ScratchValue::Text(" 2.5 ".to_owned())],
+            vec![ScratchVariableMetadata::new(
+                "local",
+                "score",
+                "Sprite",
+                false,
+            )],
+        );
+        state.register_target(0, "Stage", true);
+        state.register_target(1, "Sprite", false);
+        state.set_current_instance(state.original_instance(1).unwrap());
+
+        state.change_local_by(0, 1.5);
+
+        assert_eq!(state.get(0), &ScratchValue::Number(4.0));
     }
 
     #[test]

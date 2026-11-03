@@ -201,6 +201,7 @@ impl<S: ResumableScript> ScriptScheduler<S> {
     }
 
     /// return script ids in the order the scheduler would consider them.
+    #[allow(dead_code)]
     pub fn script_ids_in_order(&self) -> Vec<u64> {
         if self.scripts.is_empty() {
             return Vec::new();
@@ -212,23 +213,38 @@ impl<S: ResumableScript> ScriptScheduler<S> {
 
     /// return active scripts before sleeping scripts at a frame boundary.
     pub fn script_ids_in_frame_order(&self) -> Vec<u64> {
-        let ids = self.script_ids_in_order();
-        let mut runnable = Vec::with_capacity(ids.len());
-        let mut waking = Vec::new();
-        for id in ids {
-            let index = self
-                .script_ids
-                .iter()
-                .position(|script_id| *script_id == id)
-                .unwrap();
+        let mut ids = Vec::with_capacity(self.scripts.len());
+        self.script_ids_in_frame_order_into(&mut ids);
+        ids
+    }
+
+    /// fill a reusable buffer with runnable scripts before scripts waiting for deadlines.
+    pub fn script_ids_in_frame_order_into(&self, output: &mut Vec<u64>) {
+        output.clear();
+        if self.scripts.is_empty() {
+            return;
+        }
+        for offset in 0..self.scripts.len() {
+            let index = (self.next + offset) % self.scripts.len();
             if self.wake_at[index].is_none() {
-                runnable.push(id);
-            } else {
-                waking.push(id);
+                output.push(self.script_ids[index]);
             }
         }
-        runnable.extend(waking);
-        runnable
+        for offset in 0..self.scripts.len() {
+            let index = (self.next + offset) % self.scripts.len();
+            if self.wake_at[index].is_some() {
+                output.push(self.script_ids[index]);
+            }
+        }
+    }
+
+    /// return newly assigned script ids so frame stepping can avoid rescanning unchanged scripts.
+    pub fn append_new_script_ids_since(&self, output: &mut Vec<u64>, first_id: u64) {
+        output.extend(self.script_ids.iter().copied().filter(|id| *id >= first_id));
+    }
+
+    pub fn next_script_id(&self) -> u64 {
+        self.next_script_id
     }
 
     /// advance one selected script if it is runnable.

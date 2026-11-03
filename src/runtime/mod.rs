@@ -1,4 +1,5 @@
 mod list;
+mod motion;
 mod operators;
 mod pacing;
 mod random;
@@ -8,6 +9,8 @@ mod value;
 
 #[allow(unused_imports)]
 pub use list::{SCRATCH_LIST_LIMIT, ScratchList};
+#[allow(unused_imports)]
+pub use motion::GlideState;
 pub use operators::*;
 #[allow(unused_imports)]
 pub use pacing::{PacingMechanism, PacingMode, SystemPacingMechanism, TickPacer};

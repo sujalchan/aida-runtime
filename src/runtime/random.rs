@@ -113,4 +113,15 @@ mod tests {
         let value = scratch_random("2", 2.0);
         assert_eq!(value, 2.0);
     }
+
+    #[test]
+    fn rounded_random_stage_coordinates_stay_within_stage_bounds() {
+        let mut random = ScratchRandom::seeded(19);
+        for _ in 0..10_000 {
+            let x = super::super::scratch_round(random.between(-240.5, 240.5));
+            let y = super::super::scratch_round(random.between(-179.5, 180.5));
+            assert!((-240.0..=240.0).contains(&x));
+            assert!((-180.0..=180.0).contains(&y));
+        }
+    }
 }
