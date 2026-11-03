@@ -1,12 +1,13 @@
 use std::{cell::Cell, rc::Rc};
 
 use crate::{
-    assert_expected_variables, parse_run_options,
+    apply_input_batch, assert_expected_variables, parse_run_options,
     program::GeneratedProgram,
     project_window_title, run_headless,
     runtime::{
-        Clock, PacingMechanism, PacingMode, RuntimeSnapshot, SchedulerStatus, ScratchValue,
-        VariableSnapshot,
+        Clock, PacingMechanism, PacingMode, ResumableScript, RuntimeInputEvent, RuntimeSnapshot,
+        SchedulerStatus, ScratchState, ScratchValue, ScratchVariableMetadata, ScriptScheduler,
+        ScriptStatus, VariableSnapshot, variable_snapshot_key,
     },
     wait_for_renderer,
 };
@@ -263,6 +264,97 @@ fn broadcast_fixture_restarts_the_receiver_and_waits_for_the_restarted_run() {
         Some(&ScratchValue::Number(96.0))
     );
     assert_eq!(program.active_script_count(), 1);
+}
+
+struct SliderCounter {
+    target_instance: usize,
+    remaining: usize,
+    values: Rc<std::cell::RefCell<Vec<f64>>>,
+}
+
+impl ResumableScript for SliderCounter {
+    fn step(&mut self, state: &mut ScratchState, _clock: &dyn Clock) -> ScriptStatus {
+        let current = match state.get(0) {
+            ScratchValue::Number(value) => *value,
+            value => panic!("counter slider should be numeric, got {value:?}"),
+        };
+        let next = current + 1.0;
+        state.set(0, ScratchValue::Number(next));
+        self.values.borrow_mut().push(next);
+        self.remaining -= 1;
+        if self.remaining == 0 {
+            ScriptStatus::Complete
+        } else {
+            ScriptStatus::Yield
+        }
+    }
+
+    fn target_instance(&self) -> usize {
+        self.target_instance
+    }
+}
+
+fn verify_slider_edit_reloads_running_counter(is_stage: bool) {
+    let target_index = usize::from(!is_stage);
+    let target_name = if is_stage { "Stage" } else { "Sprite" };
+    let id = if is_stage {
+        "stage-slider"
+    } else {
+        "sprite-slider"
+    };
+    let metadata =
+        ScratchVariableMetadata::for_target(id, "limit", target_name, target_index, is_stage)
+            .with_monitor_visible(true);
+    let mut state = ScratchState::with_metadata(vec![ScratchValue::Number(10.0)], vec![metadata]);
+    state.register_target(0, "Stage", true);
+    state.register_target(1, "Sprite", false);
+    let instance = state.original_instance(target_index).unwrap();
+    let key = variable_snapshot_key(target_name, "limit", id, (!is_stage).then_some(instance));
+    let values = Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut scheduler = ScriptScheduler::new(vec![SliderCounter {
+        target_instance: instance,
+        remaining: 5,
+        values: Rc::clone(&values),
+    }]);
+
+    assert_eq!(scheduler.advance(&mut state), SchedulerStatus::Progressed);
+    assert_eq!(&*values.borrow(), &[11.0]);
+
+    let (sender, receiver) = std::sync::mpsc::channel();
+    sender
+        .send(RuntimeInputEvent::VariableValue {
+            key: key.clone(),
+            value: 40.0,
+        })
+        .unwrap();
+    sender
+        .send(RuntimeInputEvent::VariableValue { key, value: 2.0 })
+        .unwrap();
+    apply_input_batch(receiver.try_iter(), |event| {
+        state.apply_input(event);
+    });
+    assert!(state.presentation_requested());
+    let snapshot = state.observable_snapshot(1);
+    assert!(snapshot.variables.iter().any(|variable| {
+        variable.value == ScratchValue::Number(2.0)
+            && variable.key
+                == variable_snapshot_key(target_name, "limit", id, (!is_stage).then_some(instance))
+    }));
+
+    assert_eq!(scheduler.advance(&mut state), SchedulerStatus::Progressed);
+    assert_eq!(&*values.borrow(), &[11.0, 3.0]);
+    let snapshot = state.observable_snapshot(2);
+    assert!(snapshot.variables.iter().any(|variable| {
+        variable.value == ScratchValue::Number(3.0)
+            && variable.key
+                == variable_snapshot_key(target_name, "limit", id, (!is_stage).then_some(instance))
+    }));
+}
+
+#[test]
+fn slider_edits_reload_running_global_and_sprite_local_variable_caches() {
+    verify_slider_edit_reloads_running_counter(true);
+    verify_slider_edit_reloads_running_counter(false);
 }
 
 #[test]

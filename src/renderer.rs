@@ -202,6 +202,15 @@ impl RendererApp {
     }
 }
 
+fn forward_slider_edits(
+    input_sender: &mpsc::Sender<RuntimeInputEvent>,
+    graphics: &mut GraphicsState,
+) {
+    for event in graphics.read_changed_monitors() {
+        let _ = input_sender.send(event);
+    }
+}
+
 impl ApplicationHandler<RendererEvent> for RendererApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.graphics.is_some() {
@@ -354,7 +363,10 @@ impl ApplicationHandler<RendererEvent> for RendererApp {
                     if let (Some((x, y)), Some(graphics)) = (stage_pointer, self.graphics.as_mut())
                     {
                         match graphics.drag_variable_to(x, y) {
-                            Ok(_) => self.request_redraw(),
+                            Ok(_) => {
+                                forward_slider_edits(&self.input_sender, graphics);
+                                self.request_redraw();
+                            }
                             Err(error) => {
                                 self.error =
                                     Some(format!("failed to move variable monitor: {error}"));
@@ -461,6 +473,7 @@ impl ApplicationHandler<RendererEvent> for RendererApp {
                                 match graphics.begin_variable_slider(x, y) {
                                     Ok(true) => {
                                         self.dragging_slider = true;
+                                        forward_slider_edits(&self.input_sender, graphics);
                                         self.request_redraw();
                                         return;
                                     }
@@ -491,10 +504,15 @@ impl ApplicationHandler<RendererEvent> for RendererApp {
                             if self.dragging_variable || self.dragging_slider {
                                 if let Some(graphics) = self.graphics.as_mut() {
                                     if let Some((x, y)) = stage_pointer {
-                                        if let Err(error) = graphics.drag_variable_to(x, y) {
-                                            self.error = Some(format!(
-                                                "failed to finish variable drag: {error}"
-                                            ));
+                                        match graphics.drag_variable_to(x, y) {
+                                            Ok(_) => {
+                                                forward_slider_edits(&self.input_sender, graphics)
+                                            }
+                                            Err(error) => {
+                                                self.error = Some(format!(
+                                                    "failed to finish variable drag: {error}"
+                                                ));
+                                            }
                                         }
                                     }
                                     if let Err(error) = graphics.end_variable_drag() {

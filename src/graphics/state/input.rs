@@ -1,7 +1,7 @@
 use super::*;
 use crate::graphics::variables::SliderRangeEditorInput;
 use crate::runtime::SpriteSensingCostume;
-use crate::runtime::{RuntimeSnapshot, ScratchValue};
+use crate::runtime::{RuntimeInputEvent, RuntimeSnapshot, ScratchValue};
 
 impl GraphicsState {
     // feed the renderer display cache from the scheduler's canonical snapshot.
@@ -84,6 +84,7 @@ impl GraphicsState {
         let mut costumes = Vec::with_capacity(original.costumes.len());
         for costume in &original.costumes {
             let sprite = costume.sprite.clone();
+            let use_linear_sampling = sprite.is_vector();
             let selected_mip = costume.selected_mip;
             let source_mip = &costume.mips[&selected_mip];
             let texture = RenderTexture::new(
@@ -102,7 +103,11 @@ impl GraphicsState {
                 &self.texture_layout,
                 &texture,
                 &texture,
-                &self.stage_nearest_sampler,
+                if use_linear_sampling {
+                    &self.stage_linear_sampler
+                } else {
+                    &self.stage_nearest_sampler
+                },
                 &self.zero_uv_offset,
             );
             costumes.push(SpriteCostumeRenderer {
@@ -466,8 +471,12 @@ impl GraphicsState {
         Ok(())
     }
 
-    pub(crate) fn read_changed_monitors(&mut self) -> Vec<(String, String)> {
-        self.variable_layer.take_changed_manual_values()
+    pub(crate) fn read_changed_monitors(&mut self) -> Vec<RuntimeInputEvent> {
+        self.variable_layer
+            .take_changed_manual_values()
+            .into_iter()
+            .map(|(key, value)| RuntimeInputEvent::VariableValue { key, value })
+            .collect()
     }
 
     pub(crate) fn write_changed_monitors(

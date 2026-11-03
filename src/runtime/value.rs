@@ -26,6 +26,7 @@ pub enum RuntimeInputEvent {
     Key { name: String, pressed: bool },
     MousePosition { x: f64, y: f64 },
     MouseButton { pressed: bool },
+    VariableValue { key: String, value: f64 },
 }
 
 #[derive(Debug, Default)]
@@ -57,6 +58,7 @@ impl RuntimeInputState {
                 self.mouse_down = pressed;
                 None
             }
+            RuntimeInputEvent::VariableValue { .. } => None,
         }
     }
 }
@@ -427,7 +429,43 @@ impl ScratchState {
 
     /// update canonical input state from the renderer's queued events.
     pub fn apply_input(&mut self, event: RuntimeInputEvent) -> Option<String> {
-        self.input.apply(event)
+        match event {
+            RuntimeInputEvent::VariableValue { key, value } => {
+                self.apply_variable_edit(&key, value);
+                None
+            }
+            event => self.input.apply(event),
+        }
+    }
+
+    fn apply_variable_edit(&mut self, key: &str, value: f64) -> bool {
+        let target = self
+            .variables
+            .iter()
+            .enumerate()
+            .find_map(|(slot, metadata)| {
+                let instance = if metadata.is_stage {
+                    None
+                } else {
+                    Some(self.original_instance(metadata.target_index)?)
+                };
+                (variable_snapshot_key(&metadata.target, &metadata.name, &metadata.id, instance)
+                    == key)
+                    .then_some((slot, instance))
+            });
+        let Some((slot, instance)) = target else {
+            return false;
+        };
+        let next = ScratchValue::Number(value);
+        if let Some(instance) = instance {
+            let previous_instance = self.current_instance;
+            self.current_instance = instance;
+            self.set(slot, next);
+            self.current_instance = previous_instance;
+        } else {
+            self.set_shared(slot, next);
+        }
+        true
     }
 
     pub fn key_pressed(&self, key: &str) -> bool {

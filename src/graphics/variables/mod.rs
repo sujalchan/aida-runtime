@@ -165,7 +165,7 @@ pub(crate) struct VariableLayer {
     slider_hovered: Option<usize>,
     slider_thumb_hovered: Option<usize>,
     slider_width_changed: bool,
-    changed_manual_values: HashMap<String, String>,
+    changed_manual_values: HashMap<String, f64>,
     shadow_monitor: Option<usize>,
     shadow_opacity: f32,
     shadow_fade: Option<ShadowFade>,
@@ -675,7 +675,7 @@ impl VariableLayer {
         self.slider_dragging
     }
 
-    pub(crate) fn take_changed_manual_values(&mut self) -> Vec<(String, String)> {
+    pub(crate) fn take_changed_manual_values(&mut self) -> Vec<(String, f64)> {
         self.changed_manual_values.drain().collect()
     }
 
@@ -697,13 +697,14 @@ impl VariableLayer {
 
     // map the pointer across the slider range and grow its layout when needed
     fn set_slider_value(&mut self, index: usize, pointer_x: f32) -> bool {
-        let local_value = {
+        let (value, local_value) = {
             let monitor = &self.monitors[index];
             let local_x = (pointer_x - monitor.x) / monitor.scale;
             let ratio = ((local_x - 14.0) / (monitor.width - 28.0)).clamp(0.0, 1.0);
             let value =
                 monitor.slider_min + ratio as f64 * (monitor.slider_max - monitor.slider_min);
-            format_slider_value(value, monitor.slider_min, monitor.slider_max)
+            let text = format_slider_value(value, monitor.slider_min, monitor.slider_max);
+            (text.parse().unwrap_or(value), text)
         };
         let value_width = local_value.chars().count() as f32 * self.value_digit_width
             + self.monitors[index].value_horizontal_padding * 2.0;
@@ -735,10 +736,8 @@ impl VariableLayer {
         if self.monitors[index].x != old_x {
             self.mark_gpu_transform(index);
         }
-        self.changed_manual_values.insert(
-            self.monitors[index].value_key.clone(),
-            self.monitors[index].value.clone(),
-        );
+        self.changed_manual_values
+            .insert(self.monitors[index].value_key.clone(), value);
         true
     }
 
@@ -1066,7 +1065,7 @@ fn expanded_width(label_width: f32, value_width: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{VariableLayer, VariableMonitor};
+    use super::{MonitorDisplayMode, VariableLayer, VariableMonitor};
     use crate::runtime::variable_snapshot_key;
 
     #[test]
@@ -1121,6 +1120,33 @@ mod tests {
             Some((0, true))
         );
         assert_eq!(layer.monitors[0].value, "341");
+        assert_eq!(layer.take_dirty_gpu_texts(), vec![0]);
+    }
+
+    #[test]
+    fn slider_drag_coalesces_to_the_latest_numeric_value_for_its_variable_key() {
+        let id = "slider-id";
+        let key = variable_snapshot_key("Stage", "limit", id, None);
+        let monitor = VariableMonitor::new("limit", "10", 0.0, 0.0)
+            .with_display_mode(MonitorDisplayMode::Slider)
+            .with_value_key(key.clone())
+            .with_slider_range(0.0, 100.0);
+        let mut layer = VariableLayer::new(vec![monitor]).unwrap();
+        layer.take_dirty_gpu_texts();
+
+        let monitor = &layer.monitors[0];
+        let y = monitor.y - 42.0 * monitor.scale;
+        let high_x = monitor.x + (14.0 + 0.8 * (monitor.width - 28.0)) * monitor.scale;
+        assert!(layer.begin_slider_drag(high_x, y));
+
+        let monitor = &layer.monitors[0];
+        let low_x = monitor.x + (14.0 + 0.02 * (monitor.width - 28.0)) * monitor.scale;
+        assert!(layer.drag_to(low_x, y));
+
+        let changes = layer.take_changed_manual_values();
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].0, key);
+        assert_eq!(changes[0].1, 2.0);
         assert_eq!(layer.take_dirty_gpu_texts(), vec![0]);
     }
 

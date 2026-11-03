@@ -366,7 +366,7 @@ impl GraphicsState {
             ..Default::default()
         });
         let stage_linear_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("linear HD stage sampler"),
+            label: Some("linear stage sampler"),
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
@@ -416,7 +416,11 @@ impl GraphicsState {
                             &texture_layout,
                             &costume.texture,
                             &costume.texture,
-                            &stage_nearest_sampler,
+                            if costume.sprite.is_vector() {
+                                &stage_linear_sampler
+                            } else {
+                                &stage_nearest_sampler
+                            },
                             &zero_uv_offset,
                         );
                         SpriteCostumeRenderer {

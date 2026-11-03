@@ -411,6 +411,7 @@ impl GraphicsState {
         let max_texture_dimension = self.device.limits().max_texture_dimension_2d;
         let sprite = &self.sprites[sprite_index];
         let costume = &sprite.costumes[costume_index];
+        let use_linear_sampling = costume.sprite.is_vector();
         let mip_level = costume.sprite.mip_level_for_projected_size(
             sprite.transform.scale,
             viewport.width,
@@ -433,7 +434,11 @@ impl GraphicsState {
                 &self.texture_layout,
                 &texture,
                 &texture,
-                &self.stage_nearest_sampler,
+                if use_linear_sampling {
+                    &self.stage_linear_sampler
+                } else {
+                    &self.stage_nearest_sampler
+                },
                 &self.zero_uv_offset,
             );
             costume.mips.insert(

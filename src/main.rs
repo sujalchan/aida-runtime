@@ -6,6 +6,7 @@ mod renderer;
 mod runtime;
 
 use std::{
+    collections::HashMap,
     path::PathBuf,
     sync::{
         Arc, RwLock,
@@ -284,6 +285,11 @@ fn advance_tick(
 ) -> SchedulerStatus {
     let started = started.unwrap_or_else(|| pacer.now());
     let budget = pacer.work_budget();
+    if let Some(inputs) = inputs {
+        apply_input_batch(inputs.try_iter(), |event| {
+            program.apply_input(event);
+        });
+    }
     program.begin_tick();
     let redraw_requested = std::cell::Cell::new(false);
     runtime::run_tick(
@@ -293,16 +299,33 @@ fn advance_tick(
         || pacer.now(),
         || redraw_requested.get(),
         || {
-            if let Some(inputs) = inputs {
-                for event in inputs.try_iter() {
-                    program.apply_input(event);
-                }
-            }
             let status = program.advance_frame();
             redraw_requested.set(program.redraw_requested());
             status
         },
     )
+}
+
+fn apply_input_batch(
+    events: impl IntoIterator<Item = RuntimeInputEvent>,
+    mut apply: impl FnMut(RuntimeInputEvent),
+) {
+    let mut pending_variable_edits: Option<HashMap<String, f64>> = None;
+    for event in events {
+        match event {
+            RuntimeInputEvent::VariableValue { key, value } => {
+                pending_variable_edits
+                    .get_or_insert_with(HashMap::new)
+                    .insert(key, value);
+            }
+            event => apply(event),
+        }
+    }
+    if let Some(edits) = pending_variable_edits {
+        for (key, value) in edits {
+            apply(RuntimeInputEvent::VariableValue { key, value });
+        }
+    }
 }
 
 fn wait_for_renderer(
