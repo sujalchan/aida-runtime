@@ -1,5 +1,5 @@
 use super::*;
-use crate::runtime::{RuntimeSnapshot, variable_snapshot_key};
+use crate::runtime::{RuntimeSnapshot, list_snapshot_key, variable_snapshot_key};
 
 struct SpriteAsset {
     target_name: String,
@@ -11,12 +11,10 @@ struct SpriteAsset {
 }
 
 struct SpriteCostumeAsset {
-    sprite: Sprite,
-    texture: RenderTexture,
-    opaque_pixels: Vec<u8>,
+    sprite: Arc<Sprite>,
+    asset_id: String,
     logical_size: [f32; 2],
     rotation_center: [f32; 2],
-    raster_scale: f32,
 }
 
 fn sprite_costume_metrics(
@@ -66,68 +64,89 @@ fn sprite_transform(
 fn load_project_costumes(
     target: &aida_ast::parser::ScratchTarget,
     assets_dir: &std::path::Path,
-) -> Result<Vec<(Sprite, [f32; 2], [f32; 2])>, String> {
+    sources: &mut HashMap<String, Arc<Sprite>>,
+) -> Result<Vec<(Arc<Sprite>, String, [f32; 2], [f32; 2])>, String> {
     if target.costumes.is_empty() {
-        let sprite = Sprite::from_bytes(include_bytes!("../../../resources/costume1.svg"))?;
+        let asset_id = "__aida/default-costume1.svg".to_owned();
+        let sprite = sources
+            .entry(asset_id.clone())
+            .or_insert_with(|| {
+                Sprite::from_bytes(include_bytes!("../../../resources/costume1.svg"))
+                    .map(Arc::new)
+                    .expect("built-in costume should parse")
+            })
+            .clone();
         let (size, center) = sprite_costume_metrics(target, 0, &sprite);
-        return Ok(vec![(sprite, size, center)]);
+        return Ok(vec![(sprite, asset_id, size, center)]);
     }
     target
         .costumes
         .iter()
         .enumerate()
         .map(|(index, costume)| {
-            let bytes = std::fs::read(assets_dir.join(&costume.md5ext))
-                .map_err(|error| format!("failed to read costume `{}`: {error}", costume.name))?;
-            let sprite = Sprite::from_bytes(&bytes).map_err(|error| {
-                format!(
-                    "failed to load costume `{}` on sprite `{}`: {error}",
-                    costume.name, target.name
-                )
-            })?;
+            let asset_id = if costume.md5ext.is_empty() {
+                format!("{}::{}", target.name, costume.name)
+            } else {
+                costume.md5ext.clone()
+            };
+            let sprite = if let Some(sprite) = sources.get(&asset_id) {
+                Arc::clone(sprite)
+            } else {
+                let bytes = std::fs::read(assets_dir.join(&costume.md5ext)).map_err(|error| {
+                    format!("failed to read costume `{}`: {error}", costume.name)
+                })?;
+                let sprite = Arc::new(Sprite::from_bytes(&bytes).map_err(|error| {
+                    format!(
+                        "failed to load costume `{}` on sprite `{}`: {error}",
+                        costume.name, target.name
+                    )
+                })?);
+                sources.insert(asset_id.clone(), Arc::clone(&sprite));
+                sprite
+            };
             let (size, center) = sprite_costume_metrics(target, index, &sprite);
-            Ok((sprite, size, center))
+            Ok((sprite, asset_id, size, center))
         })
         .collect()
 }
 
-fn load_project_backdrop(
+fn load_project_backdrops(
     project: &aida_ast::parser::ScratchProject,
     assets_dir: &std::path::Path,
-) -> Result<Option<Sprite>, String> {
+    sources: &mut HashMap<String, Arc<Sprite>>,
+) -> Result<Vec<BackdropAsset>, String> {
     let Some(stage) = project.targets.iter().find(|target| target.is_stage) else {
-        return Ok(None);
+        return Ok(Vec::new());
     };
-    let Some(costume) = stage.costumes.get(stage.current_costume) else {
-        return Ok(None);
-    };
-    let bytes = std::fs::read(assets_dir.join(&costume.md5ext))
-        .map_err(|error| format!("failed to read backdrop `{}`: {error}", costume.name))?;
-    Sprite::from_bytes(&bytes)
-        .map(Some)
-        .map_err(|error| format!("failed to load backdrop `{}`: {error}", costume.name))
+    stage
+        .costumes
+        .iter()
+        .map(|costume| {
+            let asset_id = costume.md5ext.clone();
+            let sprite = if let Some(sprite) = sources.get(&asset_id) {
+                Arc::clone(sprite)
+            } else {
+                let bytes = std::fs::read(assets_dir.join(&costume.md5ext)).map_err(|error| {
+                    format!("failed to read backdrop `{}`: {error}", costume.name)
+                })?;
+                let sprite = Arc::new(Sprite::from_bytes(&bytes).map_err(|error| {
+                    format!("failed to load backdrop `{}`: {error}", costume.name)
+                })?);
+                sources.insert(asset_id.clone(), Arc::clone(&sprite));
+                sprite
+            };
+            Ok(BackdropAsset { asset_id, sprite })
+        })
+        .collect()
 }
 
 fn project_monitors(project: &aida_ast::parser::ScratchProject) -> Vec<VariableMonitor> {
-    use aida_ast::parser::ScratchMonitor;
+    use super::MonitorKind;
 
-    let monitor_details = |monitor: &ScratchMonitor| match monitor.opcode.as_str() {
-        "sensing_timer" => ("timer".to_owned(), "timer".to_owned()),
-        "sensing_mousex" => ("mouse x".to_owned(), "__input/mouse_x".to_owned()),
-        "sensing_mousey" => ("mouse y".to_owned(), "__input/mouse_y".to_owned()),
-        _ => {
-            let name = monitor
-                .params
-                .get("VARIABLE")
-                .and_then(serde_json::Value::as_str)
-                .or_else(|| {
-                    monitor
-                        .params
-                        .get("LIST")
-                        .and_then(serde_json::Value::as_str)
-                })
-                .unwrap_or("variable")
-                .to_owned();
+    project
+        .monitors
+        .iter()
+        .map(|monitor| {
             let id = monitor.id.as_str();
             let target = project.targets.iter().find(|target| {
                 monitor
@@ -136,34 +155,78 @@ fn project_monitors(project: &aida_ast::parser::ScratchProject) -> Vec<VariableM
                     .map_or(target.is_stage, |sprite| target.name == sprite)
                     && (target.variables.contains_key(id) || target.lists.contains_key(id))
             });
-            let key = target.map_or(name.clone(), |target| {
-                let variable_name = target
-                    .variables
-                    .get(id)
-                    .map(|variable| variable.name.as_str())
-                    .or_else(|| target.lists.get(id).map(|list| list.name.as_str()))
-                    .unwrap_or(&name);
-                variable_snapshot_key(
-                    &target.name,
-                    variable_name,
-                    id,
-                    (!target.is_stage).then_some(
-                        project
-                            .targets
-                            .iter()
-                            .position(|candidate| std::ptr::eq(candidate, target))
-                            .unwrap_or(0),
-                    ),
+            let variable = target.and_then(|target| target.variables.get(id));
+            let list = target.and_then(|target| target.lists.get(id));
+            let fallback_name = monitor
+                .params
+                .get("VARIABLE")
+                .or_else(|| monitor.params.get("LIST"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("reporter");
+            let is_list = monitor.opcode == "data_listcontents" || list.is_some();
+            let kind = if is_list {
+                MonitorKind::List
+            } else if monitor.opcode == "data_variable" || variable.is_some() {
+                MonitorKind::ScalarVariable
+            } else {
+                MonitorKind::Reporter
+            };
+            let base_name = variable
+                .map(|variable| variable.name.as_str())
+                .or_else(|| list.map(|list| list.name.as_str()))
+                .unwrap_or(fallback_name);
+            let name = if kind == MonitorKind::ScalarVariable
+                && target.is_some_and(|target| !target.is_stage)
+            {
+                format!(
+                    "{}: {}",
+                    target.map_or("", |target| target.name.as_str()),
+                    base_name
                 )
-            });
-            (name, key)
-        }
-    };
-    project
-        .monitors
-        .iter()
-        .map(|monitor| {
-            let (name, value_key) = monitor_details(monitor);
+            } else if kind == MonitorKind::ScalarVariable || kind == MonitorKind::List {
+                base_name.to_owned()
+            } else {
+                monitor_label(&monitor.opcode, &monitor.params)
+            };
+            let value_key = if let Some(target) = target {
+                let target_index = project
+                    .targets
+                    .iter()
+                    .position(|item| std::ptr::eq(item, target))
+                    .unwrap_or(0);
+                if let Some(variable) = variable {
+                    variable_snapshot_key(
+                        &target.name,
+                        &variable.name,
+                        id,
+                        (!target.is_stage).then_some(target_index),
+                    )
+                } else if let Some(list) = list {
+                    list_snapshot_key(
+                        &target.name,
+                        &list.name,
+                        id,
+                        (!target.is_stage).then_some(target_index),
+                    )
+                } else {
+                    format!("__reporter/{}/{}", monitor.opcode, monitor.id)
+                }
+            } else {
+                match monitor.opcode.as_str() {
+                    "sensing_timer" => "timer".to_owned(),
+                    "sensing_mousex" => "__input/mouse_x".to_owned(),
+                    "sensing_mousey" => "__input/mouse_y".to_owned(),
+                    "looks_backdropnumbername" => match monitor
+                        .params
+                        .get("NUMBER_NAME")
+                        .and_then(serde_json::Value::as_str)
+                    {
+                        Some("number") => "__stage/backdrop/number".to_owned(),
+                        _ => "__stage/backdrop/name".to_owned(),
+                    },
+                    _ => format!("__reporter/{}/{}", monitor.opcode, monitor.id),
+                }
+            };
             let value = monitor
                 .value
                 .as_str()
@@ -172,14 +235,11 @@ fn project_monitors(project: &aida_ast::parser::ScratchProject) -> Vec<VariableM
             let mode = match monitor.mode.as_str() {
                 "large" => MonitorDisplayMode::ValueOnly,
                 "slider" => MonitorDisplayMode::Slider,
+                "list" => MonitorDisplayMode::List,
                 _ => MonitorDisplayMode::Expanded,
             };
-            let category = if monitor.opcode.starts_with("sensing_") {
-                MonitorCategory::Sensing
-            } else {
-                MonitorCategory::Variables
-            };
-            VariableMonitor::new(
+            let category = monitor_category(&monitor.opcode, kind);
+            let mut result = VariableMonitor::new(
                 name,
                 value,
                 monitor.x as f32 - SCRATCH_WIDTH as f32 * 0.5,
@@ -187,11 +247,196 @@ fn project_monitors(project: &aida_ast::parser::ScratchProject) -> Vec<VariableM
             )
             .with_display_mode(mode)
             .with_category(category)
+            .with_kind(kind)
             .with_value_key(value_key)
             .with_visibility(monitor.visible)
-            .with_slider_range(monitor.slider_min, monitor.slider_max)
+            .with_slider_range(monitor.slider_min, monitor.slider_max);
+            if let Some(list) = list {
+                result = result.with_list_items(
+                    list.items.iter().map(project_value_text).collect(),
+                    if monitor.width > 0.0 {
+                        monitor.width as f32
+                    } else {
+                        110.0
+                    },
+                    if monitor.height > 0.0 {
+                        monitor.height as f32
+                    } else {
+                        200.0
+                    },
+                );
+            }
+            result
         })
         .collect()
+}
+
+#[cfg(test)]
+mod monitor_project_tests {
+    use super::{monitor_category, monitor_label, project_monitors};
+    use crate::graphics::state::{MonitorCategory, MonitorDisplayMode, MonitorKind};
+
+    #[test]
+    fn project_monitors_keep_owner_scope_category_and_list_mode() {
+        let project: aida_ast::parser::ScratchProject = serde_json::from_str(
+            r#"{
+                "targets": [
+                    {"name":"Stage","isStage":true,"variables":{"global-id":["score",7]},"lists":{"stage-list":["stage items",["a","b"]]}},
+                    {"name":"Sprite1","isStage":false,"variables":{"local-id":["score",5]}},
+                    {"name":"Sprite2","isStage":false,"variables":{"local-id-2":["score",9]}}
+                ],
+                "monitors": [
+                    {"id":"local-id","mode":"default","opcode":"data_variable","params":{"VARIABLE":"score"},"spriteName":"Sprite1","value":5,"x":10,"y":20,"visible":true},
+                    {"id":"local-id-2","mode":"default","opcode":"data_variable","params":{"VARIABLE":"score"},"spriteName":"Sprite2","value":9,"x":10,"y":60,"visible":true},
+                    {"id":"global-id","mode":"default","opcode":"data_variable","params":{"VARIABLE":"score"},"spriteName":null,"value":7,"x":10,"y":100,"visible":true},
+                    {"id":"stage-list","mode":"list","opcode":"data_listcontents","params":{"LIST":"stage items"},"spriteName":null,"value":2,"width":120,"height":150,"visible":true},
+                    {"id":"plus","mode":"large","opcode":"operator_add","params":{},"spriteName":null,"value":3,"visible":true}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let monitors = project_monitors(&project);
+        assert_eq!(monitors[0].name, "Sprite1: score");
+        assert_eq!(monitors[1].name, "Sprite2: score");
+        assert_eq!(monitors[2].name, "score");
+        assert_ne!(monitors[0].value_key, monitors[1].value_key);
+        assert_eq!(monitors[3].kind, MonitorKind::List);
+        assert_eq!(monitors[3].category, MonitorCategory::Lists);
+        assert_eq!(monitors[3].display_mode, MonitorDisplayMode::List);
+        assert_eq!(monitors[3].width, 120.0);
+        assert_eq!(monitors[3].height, 150.0);
+        assert_eq!(monitors[4].kind, MonitorKind::Reporter);
+        assert_eq!(monitors[4].category, MonitorCategory::Operators);
+        assert_eq!(monitors[4].display_mode, MonitorDisplayMode::ValueOnly);
+    }
+
+    #[test]
+    fn reporter_categories_cover_scratch_core_groups_and_extensions() {
+        let cases = [
+            ("motion_xposition", MonitorCategory::Motion),
+            ("looks_size", MonitorCategory::Looks),
+            ("sound_volume", MonitorCategory::Sound),
+            ("event_example", MonitorCategory::Events),
+            ("control_example", MonitorCategory::Control),
+            ("sensing_timer", MonitorCategory::Sensing),
+            ("operator_add", MonitorCategory::Operators),
+            ("procedures_reporter", MonitorCategory::MyBlocks),
+            ("pen_reporter", MonitorCategory::Extension([15, 189, 140])),
+        ];
+        for (opcode, expected) in cases {
+            assert_eq!(monitor_category(opcode, MonitorKind::Reporter), expected);
+        }
+    }
+
+    #[test]
+    fn backdrop_monitor_label_includes_number_or_name_selector() {
+        let number = std::collections::HashMap::from([(
+            "NUMBER_NAME".to_owned(),
+            serde_json::Value::String("number".to_owned()),
+        )]);
+        let name = std::collections::HashMap::from([(
+            "NUMBER_NAME".to_owned(),
+            serde_json::Value::String("name".to_owned()),
+        )]);
+        assert_eq!(
+            monitor_label("looks_backdropnumbername", &number),
+            "backdrop number"
+        );
+        assert_eq!(
+            monitor_label("looks_backdropnumbername", &name),
+            "backdrop name"
+        );
+
+        let project: aida_ast::parser::ScratchProject = serde_json::from_str(
+            r#"{"targets":[{"name":"Stage","isStage":true}],"monitors":[
+                {"id":"backdrop-number","mode":"default","opcode":"looks_backdropnumbername","params":{"NUMBER_NAME":"number"},"spriteName":null,"value":0,"visible":true},
+                {"id":"backdrop-name","mode":"default","opcode":"looks_backdropnumbername","params":{"NUMBER_NAME":"name"},"spriteName":null,"value":"backdrop1","visible":true}
+            ]}"#,
+        )
+        .unwrap();
+        let monitors = project_monitors(&project);
+        assert_eq!(monitors[0].value_key, "__stage/backdrop/number");
+        assert_eq!(monitors[1].value_key, "__stage/backdrop/name");
+    }
+}
+
+fn monitor_category(opcode: &str, kind: super::MonitorKind) -> super::MonitorCategory {
+    use super::MonitorCategory;
+    if kind == super::MonitorKind::List {
+        return MonitorCategory::Lists;
+    }
+    if kind == super::MonitorKind::ScalarVariable {
+        return MonitorCategory::Variables;
+    }
+    match opcode.split('_').next().unwrap_or("") {
+        "motion" => MonitorCategory::Motion,
+        "looks" => MonitorCategory::Looks,
+        "sound" => MonitorCategory::Sound,
+        "event" => MonitorCategory::Events,
+        "control" => MonitorCategory::Control,
+        "sensing" => MonitorCategory::Sensing,
+        "operator" => MonitorCategory::Operators,
+        "procedures" => MonitorCategory::MyBlocks,
+        "pen" => MonitorCategory::Extension([15, 189, 140]),
+        _ => MonitorCategory::Extension([15, 189, 140]),
+    }
+}
+
+fn monitor_label(
+    opcode: &str,
+    params: &std::collections::HashMap<String, serde_json::Value>,
+) -> String {
+    if opcode == "looks_backdropnumbername" || opcode == "looks_costumenumbername" {
+        let subject = if opcode == "looks_backdropnumbername" {
+            "backdrop"
+        } else {
+            "costume"
+        };
+        let detail = match params
+            .get("NUMBER_NAME")
+            .and_then(serde_json::Value::as_str)
+        {
+            Some("number") => "number",
+            Some("name") => "name",
+            _ => return subject.to_owned(),
+        };
+        return format!("{subject} {detail}");
+    }
+    let label = match opcode {
+        "motion_xposition" => "x position",
+        "motion_yposition" => "y position",
+        "motion_direction" => "direction",
+        "looks_size" => "size",
+        "sound_volume" => "volume",
+        "sensing_answer" => "answer",
+        "sensing_loudness" => "loudness",
+        "sensing_timer" => "timer",
+        "sensing_current" => "current",
+        "sensing_mousex" => "mouse x",
+        "sensing_mousey" => "mouse y",
+        "sensing_mousedown" => "mouse down?",
+        "sensing_keypressed" => "key pressed?",
+        "sensing_username" => "username",
+        "sensing_dayssince2000" => "days since 2000",
+        _ => {
+            return opcode
+                .split_once('_')
+                .map_or_else(|| opcode.to_owned(), |(_, rest)| rest.replace('_', " "));
+        }
+    };
+    if opcode == "sensing_current" {
+        if let Some(value) = params.get("CURRENTMENU") {
+            return format!("current {value}");
+        }
+    }
+    label.to_owned()
+}
+
+fn project_value_text(value: &serde_json::Value) -> String {
+    value
+        .as_str()
+        .map(str::to_owned)
+        .unwrap_or_else(|| value.to_string())
 }
 
 impl GraphicsState {
@@ -270,12 +515,15 @@ impl GraphicsState {
         // the sprite's scratch-space dimensions stay fixed while vector assets
         // rasterize at the current stage pixel density. backdrop and pen follow
         // the native/hd mode.
-        let backdrop_texture =
-            RenderTexture::new(&device, "backdrop texture", SCRATCH_WIDTH, SCRATCH_HEIGHT);
-        let backdrop_sprite = load_project_backdrop(&project, assets_dir)?;
-        if let Some(backdrop) = &backdrop_sprite {
-            backdrop.upload_backdrop_to(&queue, &backdrop_texture)?;
-        }
+        let mut asset_sources = HashMap::new();
+        let backdrops = load_project_backdrops(&project, assets_dir, &mut asset_sources)?;
+        let backdrop_index = project
+            .targets
+            .iter()
+            .find(|target| target.is_stage)
+            .map_or(0, |stage| {
+                stage.current_costume.min(backdrops.len().saturating_sub(1))
+            });
         let mut sprite_targets: Vec<_> = project
             .targets
             .iter()
@@ -285,32 +533,15 @@ impl GraphicsState {
         sprite_targets.sort_by_key(|(_, target)| target.layer_order);
         let mut sprite_assets = Vec::with_capacity(sprite_targets.len());
         for (target_index, target) in sprite_targets {
-            let costume_assets = load_project_costumes(target, assets_dir)?;
+            let costume_assets = load_project_costumes(target, assets_dir, &mut asset_sources)?;
             let costumes = costume_assets
                 .into_iter()
-                .map(|(sprite, logical_size, rotation_center)| {
-                    let viewport_width = viewport.map_or(SCRATCH_WIDTH, |viewport| viewport.width);
-                    let viewport_height =
-                        viewport.map_or(SCRATCH_HEIGHT, |viewport| viewport.height);
-                    let mip_level = sprite.mip_level_for_projected_size(
-                        target.size as f32 / 100.0,
-                        viewport_width,
-                        viewport_height,
-                        logical_size,
-                        device.limits().max_texture_dimension_2d,
-                    );
-                    let raster_scale = Sprite::raster_scale_for_mip(mip_level);
-                    let (width, height) = sprite.texture_size(raster_scale);
-                    let texture =
-                        RenderTexture::new(&device, "sprite costume texture", width, height);
-                    let opaque_pixels = sprite.upload_costume_to(&queue, &texture, raster_scale)?;
-                    Ok(SpriteCostumeAsset {
+                .map(|(sprite, asset_id, logical_size, rotation_center)| {
+                    Ok::<_, String>(SpriteCostumeAsset {
                         sprite,
-                        texture,
-                        opaque_pixels,
+                        asset_id,
                         logical_size,
                         rotation_center,
-                        raster_scale,
                     })
                 })
                 .collect::<Result<Vec<_>, String>>()?;
@@ -410,33 +641,13 @@ impl GraphicsState {
                 let costumes = asset
                     .costumes
                     .into_iter()
-                    .map(|costume| {
-                        let texture_bind_group = layer_bind_group(
-                            &device,
-                            &texture_layout,
-                            &costume.texture,
-                            &costume.texture,
-                            if costume.sprite.is_vector() {
-                                &stage_linear_sampler
-                            } else {
-                                &stage_nearest_sampler
-                            },
-                            &zero_uv_offset,
-                        );
-                        SpriteCostumeRenderer {
-                            sprite: costume.sprite,
-                            mips: HashMap::from([(
-                                costume.raster_scale.log2().round() as i8,
-                                SpriteCostumeMip {
-                                    texture: costume.texture,
-                                    opaque_pixels: costume.opaque_pixels,
-                                    texture_bind_group,
-                                },
-                            )]),
-                            selected_mip: costume.raster_scale.log2().round() as i8,
-                            logical_size: costume.logical_size,
-                            rotation_center: costume.rotation_center,
-                        }
+                    .map(|costume| SpriteCostumeRenderer {
+                        sprite: costume.sprite,
+                        asset_id: costume.asset_id,
+                        mips: HashMap::new(),
+                        selected_mip: 0,
+                        logical_size: costume.logical_size,
+                        rotation_center: costume.rotation_center,
                     })
                     .collect();
                 let transform_buffer =
@@ -482,14 +693,6 @@ impl GraphicsState {
             contents: bytemuck::cast_slice(&[2.0_f32, 2.0, 0.0, 0.0]),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
-        let backdrop_bind_group = layer_bind_group(
-            &device,
-            &texture_layout,
-            &backdrop_texture,
-            &backdrop_texture,
-            &stage_nearest_sampler,
-            &zero_uv_offset,
-        );
         let pen_bind_group = layer_bind_group(
             &device,
             &texture_layout,
@@ -723,7 +926,6 @@ impl GraphicsState {
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let backdrop_dirty = backdrop_sprite.is_none();
         let mut state = Self {
             window,
             surface,
@@ -731,12 +933,10 @@ impl GraphicsState {
             queue,
             config,
             viewport,
-            backdrop_texture,
             pen_texture,
             ui_texture,
             drag_shadow_texture,
             transparent_texture,
-            backdrop_bind_group,
             pen_bind_group,
             ui_bind_group,
             drag_shadow_bind_group,
@@ -747,7 +947,11 @@ impl GraphicsState {
             stage_nearest_sampler,
             stage_linear_sampler,
             ui_sampler,
-            backdrop_sprite,
+            backdrops,
+            backdrop_index,
+            backdrop_texture_cache: HashMap::new(),
+            backdrop_cache_clock: 0,
+            shared_costume_mips: HashMap::new(),
             sprites,
             sprite_indices,
             sprite_instance_indices,
@@ -815,11 +1019,16 @@ impl GraphicsState {
             pen_texture_dirty: true,
             pen_clear_pending: true,
             hd_pen_mode: false,
-            backdrop_dirty,
             dev_mode,
             frametime_mode,
             cpu_frame_time_ms: None,
         };
+        for sprite_index in 0..state.sprites.len() {
+            let costume_index = state.sprites[sprite_index].current_costume;
+            state.ensure_sprite_costume_mip(sprite_index, costume_index)?;
+        }
+        state.prune_unused_costume_mips();
+        state.ensure_backdrop_texture(state.backdrop_index)?;
         state.sync_runtime_snapshot(&initial_snapshot)?;
         Ok(state)
     }

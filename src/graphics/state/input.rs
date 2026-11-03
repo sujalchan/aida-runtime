@@ -14,15 +14,23 @@ impl GraphicsState {
             .iter()
             .map(|value| (value.key.clone(), scratch_value_text(&value.value)))
             .collect::<Vec<_>>();
+        updates.push((
+            "__stage/backdrop/name".to_owned(),
+            snapshot.backdrop_name.clone(),
+        ));
+        updates.push((
+            "__stage/backdrop/number".to_owned(),
+            (snapshot.backdrop_index + 1).to_string(),
+        ));
+        let mut lists_changed = false;
         for list in &snapshot.lists {
-            updates.push((
-                list.key.clone(),
-                list.items
-                    .iter()
-                    .map(scratch_value_text)
-                    .collect::<Vec<_>>()
-                    .join(" "),
-            ));
+            lists_changed |= self
+                .variable_layer
+                .set_monitor_list(
+                    &list.key,
+                    list.items.iter().map(scratch_value_text).collect(),
+                )
+                .is_some_and(|(_, visible_changed)| visible_changed);
         }
         for layer in &snapshot.layers {
             if layer.original {
@@ -32,6 +40,14 @@ impl GraphicsState {
         }
         let monitors_changed = self.write_changed_monitors(&updates)?;
         let layers_changed = self.last_runtime_layers != snapshot.layers;
+        let backdrop_index = snapshot
+            .backdrop_index
+            .min(self.backdrops.len().saturating_sub(1));
+        let backdrop_changed = backdrop_index != self.backdrop_index;
+        if backdrop_changed {
+            self.backdrop_index = backdrop_index;
+            self.ensure_backdrop_texture(backdrop_index)?;
+        }
 
         if layers_changed {
             let live_clones = snapshot
@@ -70,10 +86,11 @@ impl GraphicsState {
                     self.ensure_sprite_costume_mip(sprite_index, current_costume)?;
                 }
             }
+            self.prune_unused_costume_mips();
             self.sync_bubble_gpu_data(snapshot)?;
             self.last_runtime_layers.clone_from(&snapshot.layers);
         }
-        Ok(monitors_changed || layers_changed)
+        Ok(monitors_changed || lists_changed || layers_changed || backdrop_changed)
     }
 
     fn add_clone_renderer(&mut self, layer: &crate::runtime::LayerSnapshot) -> Result<(), String> {
@@ -81,51 +98,9 @@ impl GraphicsState {
             return Ok(());
         };
         let original = &self.sprites[original_index];
-        let mut costumes = Vec::with_capacity(original.costumes.len());
-        for costume in &original.costumes {
-            let sprite = costume.sprite.clone();
-            let use_linear_sampling = sprite.is_vector();
-            let selected_mip = costume.selected_mip;
-            let source_mip = &costume.mips[&selected_mip];
-            let texture = RenderTexture::new(
-                &self.device,
-                "clone costume texture",
-                source_mip.texture.width,
-                source_mip.texture.height,
-            );
-            let opaque_pixels = sprite.upload_costume_to(
-                &self.queue,
-                &texture,
-                Sprite::raster_scale_for_mip(selected_mip),
-            )?;
-            let texture_bind_group = layer_bind_group(
-                &self.device,
-                &self.texture_layout,
-                &texture,
-                &texture,
-                if use_linear_sampling {
-                    &self.stage_linear_sampler
-                } else {
-                    &self.stage_nearest_sampler
-                },
-                &self.zero_uv_offset,
-            );
-            costumes.push(SpriteCostumeRenderer {
-                sprite,
-                mips: HashMap::from([(
-                    selected_mip,
-                    SpriteCostumeMip {
-                        texture,
-                        opaque_pixels,
-                        texture_bind_group,
-                    },
-                )]),
-                selected_mip,
-                logical_size: costume.logical_size,
-                rotation_center: costume.rotation_center,
-            });
-        }
+        let costumes = original.costumes.clone();
         let mut transform = original.transform;
+        let current_costume = original.current_costume;
         transform.position = [layer.x as f32, layer.y as f32];
         let transform_buffer = self
             .device
@@ -156,7 +131,7 @@ impl GraphicsState {
             original: false,
             layer_order,
             costumes,
-            current_costume: original.current_costume,
+            current_costume,
             transform,
             transform_buffer,
             transform_bind_group,
@@ -621,6 +596,7 @@ impl GraphicsState {
                 self.ensure_sprite_costume_mip(sprite_index, costume_index)?;
             }
         }
+        self.prune_unused_costume_mips();
         if visible_value_changed && self.dev_mode {
             self.write_ui_composite_parameters();
         }

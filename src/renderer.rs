@@ -33,6 +33,7 @@ pub(crate) struct RendererApp {
     notification_pending: Arc<AtomicBool>,
     observable_events: Option<mpsc::Receiver<ObservableEvent>>,
     stop_sender: mpsc::Sender<()>,
+    execution_start_sender: Option<mpsc::Sender<()>>,
     acknowledgement_sender: mpsc::Sender<usize>,
     input_sender: mpsc::Sender<RuntimeInputEvent>,
     expected_variables: Vec<(String, ScratchValue)>,
@@ -57,6 +58,7 @@ impl RendererApp {
         notification_pending: Arc<AtomicBool>,
         observable_events: Option<mpsc::Receiver<ObservableEvent>>,
         stop_sender: mpsc::Sender<()>,
+        execution_start_sender: mpsc::Sender<()>,
         acknowledgement_sender: mpsc::Sender<usize>,
         input_sender: mpsc::Sender<RuntimeInputEvent>,
         expected_variables: Vec<(String, ScratchValue)>,
@@ -73,6 +75,7 @@ impl RendererApp {
             notification_pending,
             observable_events,
             stop_sender,
+            execution_start_sender: Some(execution_start_sender),
             acknowledgement_sender,
             input_sender,
             expected_variables,
@@ -151,7 +154,11 @@ impl RendererApp {
         match graphics.render_with_submission_ack(|| {
             let _ = acknowledgement_sender.send(tick);
         }) {
-            RenderOutcome::Presented => {}
+            RenderOutcome::Presented => {
+                if let Some(sender) = self.execution_start_sender.take() {
+                    let _ = sender.send(());
+                }
+            }
             RenderOutcome::SurfaceRestored => {
                 graphics.window().request_redraw();
                 self.redraw_pending = true;
@@ -243,6 +250,9 @@ impl ApplicationHandler<RendererEvent> for RendererApp {
                 graphics.set_hd_pen_mode(self.hd_pen_mode);
                 self.graphics = Some(graphics);
                 self.sync_latest_snapshot();
+                if !self.redraw_pending {
+                    self.request_redraw();
+                }
             }
             Err(error) => {
                 self.error = Some(format!("graphics initialization failed: {error}"));

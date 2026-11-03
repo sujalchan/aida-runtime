@@ -324,14 +324,7 @@ impl<S: ResumableScript> ScriptScheduler<S> {
                 };
             }
             ScriptStatus::StopAll => {
-                state.remove_clones();
-                self.scripts.clear();
-                self.wake_at.clear();
-                self.script_ids.clear();
-                self.joins.clear();
-                self.has_waiting_senders = false;
-                self.pending_broadcast = None;
-                self.next = 0;
+                self.stop_all(state);
                 return SchedulerStatus::Complete;
             }
             ScriptStatus::StopOtherScripts => unreachable!(),
@@ -342,6 +335,18 @@ impl<S: ResumableScript> ScriptScheduler<S> {
             }
         }
         SchedulerStatus::Progressed
+    }
+
+    pub fn stop_all(&mut self, state: &mut ScratchState) {
+        state.clear_speech_bubbles();
+        state.remove_clones();
+        self.scripts.clear();
+        self.wake_at.clear();
+        self.script_ids.clear();
+        self.joins.clear();
+        self.has_waiting_senders = false;
+        self.pending_broadcast = None;
+        self.next = 0;
     }
 
     /// stop active scripts and start a fresh matching event set.

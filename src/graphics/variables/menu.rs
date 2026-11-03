@@ -1,5 +1,5 @@
 use super::{
-    MonitorBounds, MonitorCategory, MonitorDisplayMode, SCRATCH_HEIGHT, SCRATCH_WIDTH,
+    MonitorBounds, MonitorDisplayMode, MonitorKind, SCRATCH_HEIGHT, SCRATCH_WIDTH,
     STAGE_HALF_HEIGHT, STAGE_HALF_WIDTH, VariableLayer,
 };
 
@@ -63,6 +63,7 @@ const READOUT_MENU_OPTIONS: &[MonitorContextAction] = &[
     MonitorContextAction::LargeReadout,
     MonitorContextAction::Hide,
 ];
+const LIST_MENU_OPTIONS: &[MonitorContextAction] = &[MonitorContextAction::Hide];
 
 impl VariableLayer {
     pub(crate) fn open_context_menu(&mut self, x: f32, y: f32) -> bool {
@@ -70,11 +71,12 @@ impl VariableLayer {
             return self.close_context_menu();
         };
         let monitor = &self.monitors[monitor_index];
-        let options = match (monitor.category, monitor.display_mode) {
-            (MonitorCategory::Variables, MonitorDisplayMode::Slider) => {
+        let options = match (monitor.kind, monitor.display_mode) {
+            (MonitorKind::List, _) => LIST_MENU_OPTIONS,
+            (MonitorKind::ScalarVariable, MonitorDisplayMode::Slider) => {
                 SLIDER_VARIABLE_MENU_OPTIONS
             }
-            (MonitorCategory::Variables, _) => VARIABLE_MENU_OPTIONS,
+            (MonitorKind::ScalarVariable, _) => VARIABLE_MENU_OPTIONS,
             _ => READOUT_MENU_OPTIONS,
         };
         let menu_height = CONTEXT_MENU_ROW_HEIGHT * options.len() as f32;

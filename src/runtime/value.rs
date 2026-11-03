@@ -5,7 +5,7 @@ pub enum ScratchValue {
     Boolean(bool),
 }
 
-use super::{ScratchList, scratch_number_operand, scratch_to_number};
+use super::{ScratchList, scratch_number_operand, scratch_random, scratch_to_number};
 use std::collections::HashSet;
 use std::fmt::Debug;
 use std::sync::mpsc::Sender;
@@ -162,6 +162,9 @@ pub struct ScratchState {
     input: RuntimeInputState,
     redraw_requested: bool,
     presentation_requested: bool,
+    backdrop_names: Vec<String>,
+    backdrop_index: usize,
+    pending_backdrop_events: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -231,6 +234,8 @@ struct SpeechBubble {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct RuntimeSnapshot {
     pub tick: usize,
+    pub backdrop_index: usize,
+    pub backdrop_name: String,
     pub variables: Vec<VariableSnapshot>,
     pub lists: Vec<ListSnapshot>,
     pub layers: Vec<LayerSnapshot>,
@@ -414,6 +419,17 @@ impl ScratchState {
         }
     }
 
+    /// clear speech and thought bubbles when the project is stopped.
+    pub fn clear_speech_bubbles(&mut self) {
+        let mut changed = false;
+        for instance in &mut self.instances {
+            changed |= instance.bubble.take().is_some();
+        }
+        if changed {
+            self.request_redraw();
+        }
+    }
+
     pub fn redraw_requested(&self) -> bool {
         self.redraw_requested
     }
@@ -508,6 +524,9 @@ impl ScratchState {
             input: RuntimeInputState::default(),
             redraw_requested: false,
             presentation_requested: false,
+            backdrop_names: Vec::new(),
+            backdrop_index: 0,
+            pending_backdrop_events: Vec::new(),
         }
     }
 
@@ -541,6 +560,9 @@ impl ScratchState {
             input: RuntimeInputState::default(),
             redraw_requested: false,
             presentation_requested: false,
+            backdrop_names: Vec::new(),
+            backdrop_index: 0,
+            pending_backdrop_events: Vec::new(),
         }
     }
 
@@ -579,7 +601,106 @@ impl ScratchState {
             input: RuntimeInputState::default(),
             redraw_requested: false,
             presentation_requested: false,
+            backdrop_names: Vec::new(),
+            backdrop_index: 0,
+            pending_backdrop_events: Vec::new(),
         }
+    }
+
+    pub fn set_backdrops(&mut self, names: Vec<String>, current_index: usize) {
+        self.backdrop_names = names;
+        self.backdrop_index = current_index.min(self.backdrop_names.len().saturating_sub(1));
+        self.pending_backdrop_events.clear();
+    }
+
+    pub fn backdrop_number_name(&self, number: bool) -> ScratchValue {
+        if number {
+            ScratchValue::Number(self.backdrop_index as f64 + 1.0)
+        } else {
+            ScratchValue::Text(
+                self.backdrop_names
+                    .get(self.backdrop_index)
+                    .cloned()
+                    .unwrap_or_default(),
+            )
+        }
+    }
+
+    pub fn switch_backdrop(&mut self, value: impl super::ScratchInput) {
+        self.select_backdrop(value.scratch_view(), false);
+    }
+
+    pub fn next_backdrop(&mut self) {
+        self.select_backdrop(
+            super::ScratchValueView::Number(self.backdrop_index as f64 + 1.0),
+            true,
+        );
+    }
+
+    pub fn take_pending_backdrop_events(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.pending_backdrop_events)
+    }
+
+    fn select_backdrop(&mut self, value: super::ScratchValueView<'_>, zero_indexed: bool) {
+        if self.backdrop_names.is_empty() {
+            return;
+        }
+        let selected = match value {
+            super::ScratchValueView::Number(number) => {
+                self.backdrop_index_from_number(number, zero_indexed)
+            }
+            super::ScratchValueView::Text(text) => {
+                if let Some(index) = self.backdrop_names.iter().position(|name| name == text) {
+                    Some(index)
+                } else if text == "next backdrop" {
+                    Some((self.backdrop_index + 1) % self.backdrop_names.len())
+                } else if text == "previous backdrop" {
+                    Some(
+                        (self.backdrop_index + self.backdrop_names.len() - 1)
+                            % self.backdrop_names.len(),
+                    )
+                } else if text == "random backdrop" {
+                    if self.backdrop_names.len() < 2 {
+                        Some(self.backdrop_index)
+                    } else {
+                        let other =
+                            scratch_random(0.0, (self.backdrop_names.len() - 2) as f64) as usize;
+                        Some(if other >= self.backdrop_index {
+                            other + 1
+                        } else {
+                            other
+                        })
+                    }
+                } else if text.trim().is_empty() {
+                    None
+                } else {
+                    text.trim()
+                        .parse::<f64>()
+                        .ok()
+                        .and_then(|number| self.backdrop_index_from_number(number, zero_indexed))
+                }
+            }
+            super::ScratchValueView::Boolean(_) => None,
+        };
+        if let Some(index) = selected {
+            self.backdrop_index = index;
+            // scratch's backdrop switch calls setCostume, which requests a
+            // redraw even when the selected costume is already active.
+            self.request_redraw();
+        }
+        if let Some(name) = self.backdrop_names.get(self.backdrop_index) {
+            self.pending_backdrop_events.push(name.clone());
+        }
+    }
+
+    fn backdrop_index_from_number(&self, number: f64, zero_indexed: bool) -> Option<usize> {
+        let adjusted = if zero_indexed { number } else { number - 1.0 };
+        let rounded = if adjusted.is_finite() {
+            (adjusted + 0.5).floor()
+        } else {
+            0.0
+        };
+        Some((rounded.rem_euclid(self.backdrop_names.len() as f64)) as usize)
     }
 
     #[inline]
@@ -766,6 +887,12 @@ impl ScratchState {
     pub fn observable_snapshot(&self, tick: usize) -> RuntimeSnapshot {
         let mut snapshot = RuntimeSnapshot {
             tick,
+            backdrop_index: self.backdrop_index,
+            backdrop_name: self
+                .backdrop_names
+                .get(self.backdrop_index)
+                .cloned()
+                .unwrap_or_default(),
             ..RuntimeSnapshot::default()
         };
         for (instance_id, instance) in self.instances.iter().enumerate() {
@@ -1271,6 +1398,83 @@ mod tests {
         assert_eq!(
             state.get_by_name("SpriteA", "stage_only"),
             Some(&ScratchValue::Boolean(true))
+        );
+    }
+
+    #[test]
+    fn empty_backdrop_input_keeps_current_backdrop_and_starts_its_hat() {
+        let mut state = ScratchState::new(Vec::new());
+        state.set_backdrops(vec!["one".to_owned(), "two".to_owned()], 1);
+        assert_eq!(state.observable_snapshot(0).backdrop_name, "two");
+        state.begin_tick();
+
+        state.switch_backdrop("");
+
+        assert_eq!(
+            state.backdrop_number_name(false),
+            ScratchValue::Text("two".to_owned())
+        );
+        assert_eq!(state.backdrop_number_name(true), ScratchValue::Number(2.0));
+        assert_eq!(state.take_pending_backdrop_events(), vec!["two"]);
+        assert!(!state.redraw_requested());
+        assert_eq!(state.observable_snapshot(1).backdrop_name, "two");
+    }
+
+    #[test]
+    fn backdrop_name_takes_priority_over_special_values_and_events_fire_without_change() {
+        let mut state = ScratchState::new(Vec::new());
+        state.set_backdrops(vec!["first".to_owned(), "next backdrop".to_owned()], 0);
+
+        state.begin_tick();
+        state.switch_backdrop("first");
+        assert!(state.redraw_requested());
+        assert_eq!(state.take_pending_backdrop_events(), vec!["first"]);
+
+        state.switch_backdrop("next backdrop");
+
+        assert_eq!(
+            state.backdrop_number_name(false),
+            ScratchValue::Text("next backdrop".to_owned())
+        );
+        assert_eq!(state.take_pending_backdrop_events(), vec!["next backdrop"]);
+        state.switch_backdrop("next backdrop");
+        assert_eq!(state.backdrop_number_name(true), ScratchValue::Number(2.0));
+        assert_eq!(state.take_pending_backdrop_events(), vec!["next backdrop"]);
+        assert_eq!(state.observable_snapshot(1).backdrop_name, "next backdrop");
+    }
+
+    #[test]
+    fn backdrop_numeric_inputs_and_special_names_follow_scratch_indexing() {
+        let mut state = ScratchState::new(Vec::new());
+        state.set_backdrops(
+            vec!["first".to_owned(), "middle".to_owned(), "last".to_owned()],
+            0,
+        );
+
+        state.switch_backdrop(2.0_f64);
+        assert_eq!(
+            state.backdrop_number_name(false),
+            ScratchValue::Text("middle".to_owned())
+        );
+        state.switch_backdrop("3");
+        assert_eq!(
+            state.backdrop_number_name(false),
+            ScratchValue::Text("last".to_owned())
+        );
+        state.switch_backdrop("previous backdrop");
+        assert_eq!(
+            state.backdrop_number_name(false),
+            ScratchValue::Text("middle".to_owned())
+        );
+        state.switch_backdrop("next backdrop");
+        assert_eq!(
+            state.backdrop_number_name(false),
+            ScratchValue::Text("last".to_owned())
+        );
+        state.switch_backdrop("random backdrop");
+        assert_ne!(
+            state.backdrop_number_name(false),
+            ScratchValue::Text("last".to_owned())
         );
     }
 

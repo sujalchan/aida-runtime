@@ -21,14 +21,14 @@ use winit::{
 };
 
 use super::pipelines::{
-    GlyphInstance, GlyphMetadata, MonitorInstance, clear_texture, composite_pipeline,
-    glyph_instance_pipeline, layer_bind_group, monitor_instance_pipeline, pen_pipeline,
-    premultiplied_composite_pipeline, sprite_pipeline, texture_layout, variable_pipeline,
+    GlyphInstance, GlyphMetadata, MonitorInstance, composite_pipeline, glyph_instance_pipeline,
+    layer_bind_group, monitor_instance_pipeline, pen_pipeline, premultiplied_composite_pipeline,
+    sprite_pipeline, texture_layout, variable_pipeline,
 };
 use super::sprite::Sprite;
 use super::texture::{LAYER_FORMAT, RenderTexture};
 use super::variables::{
-    MonitorBounds, MonitorCategory, MonitorDisplayMode, VariableLayer, VariableMonitor,
+    MonitorBounds, MonitorCategory, MonitorDisplayMode, MonitorKind, VariableLayer, VariableMonitor,
 };
 use super::viewport::StageViewport;
 use super::{SCRATCH_HEIGHT, SCRATCH_WIDTH};
@@ -50,12 +50,10 @@ pub(crate) struct GraphicsState {
     queue: Queue,
     config: SurfaceConfiguration,
     viewport: Option<StageViewport>,
-    backdrop_texture: RenderTexture,
     pen_texture: RenderTexture,
     ui_texture: RenderTexture,
     drag_shadow_texture: RenderTexture,
     transparent_texture: RenderTexture,
-    backdrop_bind_group: wgpu::BindGroup,
     pen_bind_group: wgpu::BindGroup,
     ui_bind_group: wgpu::BindGroup,
     drag_shadow_bind_group: wgpu::BindGroup,
@@ -66,7 +64,11 @@ pub(crate) struct GraphicsState {
     stage_nearest_sampler: wgpu::Sampler,
     stage_linear_sampler: wgpu::Sampler,
     ui_sampler: wgpu::Sampler,
-    backdrop_sprite: Option<Sprite>,
+    backdrops: Vec<BackdropAsset>,
+    backdrop_index: usize,
+    backdrop_texture_cache: HashMap<(String, u32, u32), CachedBackdropTexture>,
+    backdrop_cache_clock: u64,
+    shared_costume_mips: HashMap<(String, i8), Arc<SpriteCostumeMip>>,
     sprites: Vec<SpriteRenderer>,
     sprite_indices: HashMap<String, usize>,
     sprite_instance_indices: HashMap<(usize, usize), usize>,
@@ -134,7 +136,6 @@ pub(crate) struct GraphicsState {
     pen_texture_dirty: bool,
     pen_clear_pending: bool,
     hd_pen_mode: bool,
-    backdrop_dirty: bool,
     dev_mode: bool,
     frametime_mode: bool,
     cpu_frame_time_ms: Option<f32>,
@@ -169,9 +170,23 @@ struct SpriteCostumeMip {
     texture_bind_group: wgpu::BindGroup,
 }
 
+struct BackdropAsset {
+    asset_id: String,
+    sprite: Arc<Sprite>,
+}
+
+struct CachedBackdropTexture {
+    _texture: RenderTexture,
+    bind_group: wgpu::BindGroup,
+    last_used: u64,
+    bytes: usize,
+}
+
+#[derive(Clone)]
 struct SpriteCostumeRenderer {
-    sprite: Sprite,
-    mips: HashMap<i8, SpriteCostumeMip>,
+    sprite: Arc<Sprite>,
+    asset_id: String,
+    mips: HashMap<i8, Arc<SpriteCostumeMip>>,
     selected_mip: i8,
     logical_size: [f32; 2],
     rotation_center: [f32; 2],

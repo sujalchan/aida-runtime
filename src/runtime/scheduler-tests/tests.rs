@@ -1,6 +1,6 @@
 use super::{Clock, ResumableScript, ScriptScheduler, ScriptStatus, WarpBudget};
 use crate::runtime::{
-    ScratchState, ScratchValue, ScratchVariableMetadata, scratch_bool, scratch_round,
+    BubbleKind, ScratchState, ScratchValue, ScratchVariableMetadata, scratch_bool, scratch_round,
     scratch_to_number,
 };
 
@@ -490,7 +490,13 @@ fn stop_other_scripts_only_stops_the_current_target_and_continues_the_stopper() 
 #[test]
 fn stop_all_clears_scripts_clones_and_broadcast_and_wait_joins() {
     let mut state = ScratchState::new(vec![]);
+    state.register_target(0, "sprite", false);
+    state.register_target(1, "clone target", false);
+    state.set_speech_bubble(BubbleKind::Say, "hello".to_owned(), None);
     let clone = state.create_clone(0, 1, 300).unwrap();
+    state.set_current_instance(clone);
+    state.set_speech_bubble(BubbleKind::Think, "hmm".to_owned(), None);
+    state.begin_tick();
     let scripts = vec![
         StopFixtureScript::Broadcast { target: 0 },
         StopFixtureScript::All { target: 0 },
@@ -519,6 +525,12 @@ fn stop_all_clears_scripts_clones_and_broadcast_and_wait_joins() {
     assert_eq!(scheduler.active_scripts(), 0);
     assert_eq!(state.clone_count(), 0);
     assert!(state.take_pending_clones().is_empty());
+    assert!(state.redraw_requested());
+    assert!(state
+        .observable_snapshot(0)
+        .layers
+        .iter()
+        .all(|layer| layer.bubble.is_none()));
     assert!(scheduler.take_broadcast().is_none());
     assert_eq!(message, 7);
 }

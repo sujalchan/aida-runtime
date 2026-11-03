@@ -17,6 +17,23 @@ use crate::graphics::pipelines::{GlyphInstance, GlyphMetadata, MonitorInstance, 
 use crate::runtime::{BubbleKind, BubbleSnapshot};
 
 const SHADOW_BLUR_RADIUS: f32 = 2.5;
+const MONITOR_FRAME_RADIUS: f32 = 7.0;
+const MONITOR_VALUE_RADIUS: f32 = 8.0;
+const LIST_ROW_RADIUS: f32 = 4.0;
+const MONITOR_FRAME_FILL: [u8; 4] = [229, 240, 255, 255];
+const MONITOR_FRAME_BORDER: [u8; 4] = [0, 0, 0, 38];
+const LIST_ROW_INDEX_X: f32 = 7.0;
+const LIST_ROW_VALUE_X: f32 = 20.0;
+const LIST_ROW_TEXT_INSET: f32 = 6.0;
+const LIST_CONTENT_TOP: f32 = 27.0;
+const LIST_EMPTY_TOP_PADDING: f32 = 6.0;
+const MONITOR_SHAPE_TOP_ROUNDED: f32 = 3.0;
+const MONITOR_SHAPE_BOTTOM_ROUNDED: f32 = 4.0;
+const LIST_ROW_FONT_SIZE: f32 = 12.0;
+const LIST_HEADER_FONT_SIZE: f32 = 14.0;
+const LIST_LENGTH_FONT_SIZE: f32 = 12.0;
+const LIST_HEADER_HORIZONTAL_PADDING: f32 = 12.0;
+const LIST_FOOTER_SIDE_PADDING: f32 = 7.0;
 
 pub(crate) struct BubbleRenderInput {
     pub(crate) bubble: BubbleSnapshot,
@@ -260,6 +277,9 @@ impl VariableLayer {
         }
         let name = self.monitors[index].name.clone();
         let value = self.monitors[index].value.clone();
+        if self.monitors[index].kind == super::MonitorKind::List {
+            return self.build_gpu_list_monitor_instances(index, build_shapes, build_text);
+        }
         let compact = self.monitors[index].display_mode == super::MonitorDisplayMode::ValueOnly;
         if build_text && !compact {
             for ch in name.chars() {
@@ -282,7 +302,11 @@ impl VariableLayer {
         };
         let value_y = if compact { 0.0 } else { 4.0 };
         let value_height = if compact { m.height } else { 26.0 };
-        let value_radius = if compact { 7.0 } else { 8.0 };
+        let value_radius = if compact {
+            7.0
+        } else {
+            MONITOR_VALUE_RADIUS
+        };
         if build_shapes && !compact {
             push_monitor_instance(
                 &mut shapes,
@@ -291,10 +315,10 @@ impl VariableLayer {
                 0.0,
                 m.width,
                 m.height,
-                7.0,
+                MONITOR_FRAME_RADIUS,
                 1.0,
-                [232, 242, 255, 255],
-                [189, 201, 217, 255],
+                MONITOR_FRAME_FILL,
+                MONITOR_FRAME_BORDER,
             );
         }
         let vc = monitor_color(m.category);
@@ -320,9 +344,9 @@ impl VariableLayer {
                 m.value_width,
                 value_height,
                 value_radius,
-                0.0,
+                1.0,
                 vc,
-                vc,
+                MONITOR_FRAME_BORDER,
             );
         }
         if build_text && !compact {
@@ -431,6 +455,258 @@ impl VariableLayer {
         Ok((shapes, glyphs))
     }
 
+    fn build_gpu_list_monitor_instances(
+        &mut self,
+        index: usize,
+        build_shapes: bool,
+        build_text: bool,
+    ) -> Result<(Vec<MonitorInstance>, Vec<GlyphInstance>), String> {
+        let monitor = &self.monitors[index];
+        let id = monitor.gpu_id;
+        let name = monitor.name.clone();
+        let items = monitor.list_items.clone();
+        let width = monitor.width;
+        let height = monitor.height;
+        let category_color = monitor_color(monitor.category);
+        let visible_count = items
+            .len()
+            .min(((height - 52.0) / 24.0).floor().max(1.0) as usize);
+        let shown_items = items
+            .iter()
+            .take(visible_count)
+            .map(|item| fit_monitor_text(&self.regular_font, item, width - 38.0, LIST_ROW_FONT_SIZE))
+            .collect::<Vec<_>>();
+        let shown_name = fit_monitor_text(
+            &self.bold_font,
+            &name,
+            width - LIST_HEADER_HORIZONTAL_PADDING * 2.0,
+            LIST_HEADER_FONT_SIZE,
+        );
+        let length = format!("length {}", items.len());
+        let plus_width = super::text_width(&self.bold_font, "+", LIST_LENGTH_FONT_SIZE);
+        let equals_width = super::text_width(&self.bold_font, "=", LIST_LENGTH_FONT_SIZE);
+        let footer_text_width =
+            (width - LIST_FOOTER_SIDE_PADDING * 2.0 - plus_width - equals_width).max(1.0);
+        let shown_length = fit_monitor_text(
+            &self.bold_font,
+            &length,
+            footer_text_width,
+            LIST_LENGTH_FONT_SIZE,
+        );
+        if build_text {
+            for ch in shown_name.chars() {
+                self.ensure_glyph_atlas(ch, true)?;
+            }
+            for ch in shown_length.chars().chain(['+', '=']) {
+                self.ensure_glyph_atlas(ch, true)?;
+            }
+            if items.is_empty() {
+                for ch in "(empty)".chars() {
+                    self.ensure_glyph_atlas(ch, false)?;
+                }
+            }
+            for (row, item) in shown_items.iter().enumerate() {
+                for ch in (row + 1).to_string().chars() {
+                    self.ensure_glyph_atlas(ch, true)?;
+                }
+                for ch in item.chars() {
+                    self.ensure_glyph_atlas(ch, false)?;
+                }
+            }
+        }
+
+        let mut shapes = Vec::new();
+        let mut glyphs = Vec::new();
+        if build_shapes {
+            push_monitor_instance(
+                &mut shapes,
+                id,
+                0.0,
+                0.0,
+                width,
+                height,
+                MONITOR_FRAME_RADIUS,
+                1.0,
+                MONITOR_FRAME_FILL,
+                MONITOR_FRAME_BORDER,
+            );
+            push_monitor_instance(
+                &mut shapes,
+                id,
+                1.0,
+                1.0,
+                width - 2.0,
+                23.0,
+                MONITOR_FRAME_RADIUS - 1.0,
+                0.0,
+                [255, 255, 255, 255],
+                [255, 255, 255, 255],
+            );
+            shapes.last_mut().unwrap().shape = [
+                width - 2.0,
+                23.0,
+                MONITOR_SHAPE_TOP_ROUNDED,
+                MONITOR_FRAME_RADIUS - 1.0,
+            ];
+            push_monitor_instance(
+                &mut shapes,
+                id,
+                1.0,
+                height - 22.0,
+                width - 2.0,
+                21.0,
+                MONITOR_FRAME_RADIUS - 1.0,
+                0.0,
+                [255, 255, 255, 255],
+                [255, 255, 255, 255],
+            );
+            shapes.last_mut().unwrap().shape = [
+                width - 2.0,
+                21.0,
+                MONITOR_SHAPE_BOTTOM_ROUNDED,
+                MONITOR_FRAME_RADIUS - 1.0,
+            ];
+            for row in 0..visible_count {
+                let y = LIST_CONTENT_TOP + row as f32 * 24.0;
+                if y + 22.0 > height - 22.0 {
+                    break;
+                }
+                push_monitor_instance(
+                    &mut shapes,
+                    id,
+                    LIST_ROW_VALUE_X,
+                    y,
+                    (width - LIST_ROW_VALUE_X - 6.0).max(20.0),
+                    22.0,
+                    LIST_ROW_RADIUS,
+                    1.0,
+                    category_color,
+                    [0, 0, 0, 38],
+                );
+            }
+        }
+        if build_text {
+            let header_baseline = super::canvas::centered_baseline(
+                &self.bold_font,
+                LIST_HEADER_FONT_SIZE,
+                12.5,
+            );
+            self.push_glyph_instances_at_size(
+                &mut glyphs,
+                &shown_name,
+                true,
+                id,
+                centered_glyph_start(
+                    &self.bold_font,
+                    &shown_name,
+                    LIST_HEADER_FONT_SIZE,
+                    width,
+                ),
+                header_baseline,
+                width,
+                LIST_HEADER_FONT_SIZE,
+                [82, 93, 117, 255],
+            );
+            for (row, item) in shown_items.iter().enumerate() {
+                let y = LIST_CONTENT_TOP + row as f32 * 24.0;
+                if y + 22.0 > height - 22.0 {
+                    break;
+                }
+                let index_text = (row + 1).to_string();
+                let baseline =
+                    super::canvas::centered_baseline(&self.bold_font, LIST_ROW_FONT_SIZE, y + 11.0);
+                self.push_glyph_instances_at_size(
+                    &mut glyphs,
+                    &index_text,
+                    true,
+                    id,
+                    LIST_ROW_INDEX_X,
+                    baseline,
+                    20.0,
+                    LIST_ROW_FONT_SIZE,
+                    [82, 93, 117, 255],
+                );
+                self.push_glyph_instances_at_size(
+                    &mut glyphs,
+                    item,
+                    false,
+                    id,
+                    LIST_ROW_VALUE_X + LIST_ROW_TEXT_INSET,
+                    super::canvas::centered_baseline(
+                        &self.regular_font,
+                        LIST_ROW_FONT_SIZE,
+                        y + 11.0,
+                    ),
+                    width - LIST_ROW_VALUE_X - LIST_ROW_TEXT_INSET - 12.0,
+                    LIST_ROW_FONT_SIZE,
+                    [255, 255, 255, 255],
+                );
+            }
+            if items.is_empty() {
+                let empty = "(empty)";
+                self.push_glyph_instances_at_size(
+                    &mut glyphs,
+                    empty,
+                    false,
+                    id,
+                    centered_glyph_start(&self.regular_font, empty, LIST_ROW_FONT_SIZE, width),
+                    super::canvas::centered_baseline(
+                        &self.regular_font,
+                        LIST_ROW_FONT_SIZE,
+                        LIST_CONTENT_TOP + LIST_EMPTY_TOP_PADDING + LIST_ROW_FONT_SIZE * 0.5,
+                    ),
+                    width,
+                    LIST_ROW_FONT_SIZE,
+                    [82, 93, 117, 255],
+                );
+            }
+            let footer_y = super::canvas::centered_baseline(
+                &self.bold_font,
+                LIST_LENGTH_FONT_SIZE,
+                height - 11.0,
+            );
+            self.push_glyph_instances_at_size(
+                &mut glyphs,
+                "+",
+                true,
+                id,
+                LIST_FOOTER_SIDE_PADDING,
+                footer_y,
+                plus_width,
+                LIST_LENGTH_FONT_SIZE,
+                [82, 93, 117, 255],
+            );
+            let length_width =
+                super::text_width(&self.bold_font, &shown_length, LIST_LENGTH_FONT_SIZE);
+            let equals_x = width - LIST_FOOTER_SIDE_PADDING - equals_width;
+            let length_x =
+                (LIST_FOOTER_SIDE_PADDING + plus_width + equals_x - length_width) * 0.5;
+            self.push_glyph_instances_at_size(
+                &mut glyphs,
+                &shown_length,
+                true,
+                id,
+                length_x,
+                footer_y,
+                footer_text_width,
+                LIST_LENGTH_FONT_SIZE,
+                [82, 93, 117, 255],
+            );
+            self.push_glyph_instances_at_size(
+                &mut glyphs,
+                "=",
+                true,
+                id,
+                equals_x,
+                footer_y,
+                equals_width,
+                LIST_LENGTH_FONT_SIZE,
+                [82, 93, 117, 255],
+            );
+        }
+        Ok((shapes, glyphs))
+    }
+
     pub(crate) fn build_gpu_monitor_instances_for_id(
         &mut self,
         gpu_id: u32,
@@ -458,12 +734,38 @@ impl VariableLayer {
         _max_width: f32,
         color: [u8; 4],
     ) {
+        let size = if bold { 18.0 } else { 19.0 };
+        self.push_glyph_instances_at_size(
+            out,
+            text,
+            bold,
+            monitor_id,
+            start_x,
+            baseline,
+            _max_width,
+            size,
+            color,
+        );
+    }
+
+    fn push_glyph_instances_at_size(
+        &self,
+        out: &mut Vec<GlyphInstance>,
+        text: &str,
+        bold: bool,
+        monitor_id: u32,
+        start_x: f32,
+        baseline: f32,
+        _max_width: f32,
+        size: f32,
+        color: [u8; 4],
+    ) {
         let font = if bold {
             &self.bold_font
         } else {
             &self.regular_font
         };
-        let size = if bold { 18.0 } else { 19.0 };
+        let atlas_font_size = if bold { 18.0 } else { 19.0 };
         let scaled = font.as_scaled(size);
         let mut pen_x = 0.0;
         let mut previous = None;
@@ -482,7 +784,7 @@ impl VariableLayer {
                         glyph_id: e.id,
                         monitor_id,
                         color: linear_rgba(color),
-                        scale: 1.0,
+                        scale: size / atlas_font_size,
                     });
                 }
             }
@@ -795,10 +1097,104 @@ fn scaled_px_bounds(bounds: ab_glyph::Rect, scale_bucket: u32) -> [f32; 4] {
 fn monitor_color(category: super::MonitorCategory) -> [u8; 4] {
     match category {
         super::MonitorCategory::Variables => [255, 140, 26, 255],
+        super::MonitorCategory::Lists => [255, 102, 26, 255],
         super::MonitorCategory::Motion => [76, 151, 255, 255],
         super::MonitorCategory::Looks => [153, 102, 255, 255],
         super::MonitorCategory::Sound => [207, 99, 207, 255],
+        super::MonitorCategory::Events => [255, 191, 0, 255],
+        super::MonitorCategory::Control => [255, 171, 25, 255],
         super::MonitorCategory::Sensing => [92, 177, 214, 255],
+        super::MonitorCategory::Operators => [89, 192, 89, 255],
+        super::MonitorCategory::MyBlocks => [255, 102, 128, 255],
+        super::MonitorCategory::Extension(color) => [color[0], color[1], color[2], 255],
+    }
+}
+
+fn fit_monitor_text(font: &ab_glyph::FontArc, text: &str, max_width: f32, size: f32) -> String {
+    let max_width = max_width.max(1.0);
+    let mut fitted = String::new();
+    for ch in text.chars() {
+        let mut candidate = fitted.clone();
+        candidate.push(ch);
+        if super::text_width(font, &candidate, size) > max_width {
+            while !fitted.is_empty() {
+                let mut with_ellipsis = fitted.clone();
+                with_ellipsis.push('…');
+                if super::text_width(font, &with_ellipsis, size) <= max_width {
+                    fitted.push('…');
+                    break;
+                }
+                fitted.pop();
+            }
+            break;
+        }
+        fitted.push(ch);
+    }
+    fitted
+}
+
+fn centered_glyph_start(
+    font: &ab_glyph::FontArc,
+    text: &str,
+    size: f32,
+    container_width: f32,
+) -> f32 {
+    let Some((left, right)) = glyph_text_x_bounds(font, text, size) else {
+        return (container_width - super::text_width(font, text, size)) * 0.5;
+    };
+    (container_width - (right - left)) * 0.5 - left
+}
+
+fn glyph_text_x_bounds(font: &ab_glyph::FontArc, text: &str, size: f32) -> Option<(f32, f32)> {
+    let scaled = font.as_scaled(size);
+    let mut pen_x = 0.0;
+    let mut previous = None;
+    let mut left = f32::INFINITY;
+    let mut right = f32::NEG_INFINITY;
+    for ch in text.chars() {
+        let glyph_id = scaled.glyph_id(ch);
+        if let Some(previous) = previous {
+            pen_x += scaled.kern(previous, glyph_id);
+        }
+        let mut glyph = font.glyph_id(ch).with_scale(size);
+        glyph.position = ab_glyph::point(pen_x, 0.0);
+        if let Some(outline) = font.outline_glyph(glyph) {
+            let bounds = outline.px_bounds();
+            left = left.min(bounds.min.x);
+            right = right.max(bounds.max.x);
+        }
+        pen_x += scaled.h_advance(glyph_id);
+        previous = Some(glyph_id);
+    }
+    (left.is_finite() && right.is_finite()).then_some((left, right))
+}
+
+#[cfg(test)]
+mod monitor_color_tests {
+    use super::monitor_color;
+    use crate::graphics::variables::MonitorCategory;
+
+    #[test]
+    fn default_monitor_category_colors_match_scratch_palette() {
+        let categories = [
+            (MonitorCategory::Motion, [76, 151, 255, 255]),
+            (MonitorCategory::Looks, [153, 102, 255, 255]),
+            (MonitorCategory::Sound, [207, 99, 207, 255]),
+            (MonitorCategory::Events, [255, 191, 0, 255]),
+            (MonitorCategory::Control, [255, 171, 25, 255]),
+            (MonitorCategory::Sensing, [92, 177, 214, 255]),
+            (MonitorCategory::Operators, [89, 192, 89, 255]),
+            (MonitorCategory::Variables, [255, 140, 26, 255]),
+            (MonitorCategory::Lists, [255, 102, 26, 255]),
+            (MonitorCategory::MyBlocks, [255, 102, 128, 255]),
+            (
+                MonitorCategory::Extension([15, 189, 140]),
+                [15, 189, 140, 255],
+            ),
+        ];
+        for (category, expected) in categories {
+            assert_eq!(monitor_color(category), expected);
+        }
     }
 }
 
@@ -1020,10 +1416,134 @@ fn push_text_mesh(
 mod tests {
     use super::{
         BUBBLE_BODY_CORNER_RADIUS, BUBBLE_BORDER, BUBBLE_BORDER_WIDTH, BUBBLE_FONT_SIZE,
-        BUBBLE_SPEECH_TAIL_EXTENT, BUBBLE_TAIL_CORNER_CLEARANCE, BubbleRenderInput, SCRATCH_WIDTH,
-        VariableLayer, linear_rgba, scaled_px_bounds,
+        BUBBLE_SPEECH_TAIL_EXTENT, BUBBLE_TAIL_CORNER_CLEARANCE, BubbleRenderInput,
+        LIST_CONTENT_TOP, LIST_EMPTY_TOP_PADDING, LIST_FOOTER_SIDE_PADDING,
+        LIST_HEADER_FONT_SIZE, LIST_HEADER_HORIZONTAL_PADDING, LIST_ROW_FONT_SIZE,
+        LIST_LENGTH_FONT_SIZE, LIST_ROW_RADIUS, LIST_ROW_VALUE_X, MONITOR_FRAME_RADIUS,
+        MONITOR_SHAPE_BOTTOM_ROUNDED, MONITOR_SHAPE_TOP_ROUNDED, MONITOR_VALUE_RADIUS,
+        SCRATCH_WIDTH, VariableLayer, linear_rgba, scaled_px_bounds,
     };
     use crate::runtime::{BubbleKind, BubbleSnapshot};
+    use crate::graphics::variables::{MonitorKind, VariableMonitor};
+
+    #[test]
+    fn list_monitor_frame_matches_scalar_border_and_keeps_rounded_value_rows() {
+        let scalar = VariableMonitor::new("score", "5", 0.0, 0.0);
+        let list = VariableMonitor::new("items", "", 0.0, 0.0)
+            .with_kind(MonitorKind::List)
+            .with_list_items(vec!["one".to_owned()], 120.0, 100.0);
+        let mut layer = VariableLayer::new(vec![scalar, list]).unwrap();
+        let scalar_frame = layer
+            .build_gpu_monitor_instances_for_id(0, true, false)
+            .unwrap()
+            .0[0];
+        let scalar_value = layer
+            .build_gpu_monitor_instances_for_id(0, true, false)
+            .unwrap()
+            .0[1];
+        let list_frame = layer
+            .build_gpu_monitor_instances_for_id(1, true, false)
+            .unwrap()
+            .0[0];
+
+        assert_eq!(list_frame.params[0], scalar_frame.params[0]);
+        assert_eq!(list_frame.params[1], scalar_frame.params[1]);
+        assert_eq!(list_frame.fill, scalar_frame.fill);
+        assert_eq!(scalar_frame.fill, linear_rgba([229, 240, 255, 255]));
+        assert_eq!(list_frame.border, scalar_frame.border);
+        assert_eq!(scalar_value.params[1], 1.0);
+        assert_eq!(scalar_value.border, linear_rgba([0, 0, 0, 38]));
+        assert_eq!(scalar_value.params[0], MONITOR_VALUE_RADIUS);
+        let list_shapes = layer
+            .build_gpu_monitor_instances_for_id(1, true, false)
+            .unwrap()
+            .0;
+        assert_eq!(list_shapes[1].params[0], MONITOR_FRAME_RADIUS - 1.0);
+        assert_eq!(list_shapes[2].params[0], MONITOR_FRAME_RADIUS - 1.0);
+        assert_eq!(list_shapes[1].shape[2], MONITOR_SHAPE_TOP_ROUNDED);
+        assert_eq!(list_shapes[2].shape[2], MONITOR_SHAPE_BOTTOM_ROUNDED);
+        assert_eq!(list_shapes[3].params[0], LIST_ROW_RADIUS);
+        assert_eq!(list_shapes[3].rect[0], LIST_ROW_VALUE_X);
+        assert_eq!(list_shapes[3].rect[2], 120.0 - LIST_ROW_VALUE_X - 6.0);
+
+        let header = super::fit_monitor_text(
+            &layer.bold_font,
+            "a very long list name that must be clipped",
+            64.0 - LIST_HEADER_HORIZONTAL_PADDING * 2.0,
+            LIST_HEADER_FONT_SIZE,
+        );
+        let plus_width = crate::graphics::variables::text_width(
+            &layer.bold_font,
+            "+",
+            LIST_LENGTH_FONT_SIZE,
+        );
+        let equals_width = crate::graphics::variables::text_width(
+            &layer.bold_font,
+            "=",
+            LIST_LENGTH_FONT_SIZE,
+        );
+        let footer_text_width =
+            64.0 - LIST_FOOTER_SIDE_PADDING * 2.0 - plus_width - equals_width;
+        let length = super::fit_monitor_text(
+            &layer.bold_font,
+            "length 123456789",
+            footer_text_width,
+            LIST_LENGTH_FONT_SIZE,
+        );
+        assert!(
+            crate::graphics::variables::text_width(
+                &layer.bold_font,
+                &header,
+                LIST_HEADER_FONT_SIZE
+            ) <= 40.0
+        );
+        assert!(
+            crate::graphics::variables::text_width(
+                &layer.bold_font,
+                &length,
+                LIST_LENGTH_FONT_SIZE
+            ) <= footer_text_width
+        );
+        let title_ink = super::glyph_text_x_bounds(&layer.bold_font, "items", LIST_HEADER_FONT_SIZE)
+            .unwrap();
+        let title_start = super::centered_glyph_start(
+            &layer.bold_font,
+            "items",
+            LIST_HEADER_FONT_SIZE,
+            120.0,
+        );
+        assert!(((title_start + (title_ink.0 + title_ink.1) * 0.5) - 60.0).abs() < 0.01);
+        let (_, list_glyphs) = layer
+            .build_gpu_monitor_instances_for_id(1, false, true)
+            .unwrap();
+        assert!((list_glyphs[0].scale - 14.0 / 18.0).abs() < f32::EPSILON);
+        assert!((list_glyphs[5].scale - LIST_ROW_FONT_SIZE / 18.0).abs() < f32::EPSILON);
+        assert!((list_glyphs[6].scale - LIST_ROW_FONT_SIZE / 19.0).abs() < f32::EPSILON);
+        assert!((list_glyphs.last().unwrap().scale - 2.0 / 3.0).abs() < f32::EPSILON);
+
+        let empty_list = VariableMonitor::new("items", "", 0.0, 0.0)
+            .with_kind(MonitorKind::List)
+            .with_list_items(Vec::new(), 120.0, 100.0);
+        let mut empty_layer = VariableLayer::new(vec![empty_list]).unwrap();
+        let (_, empty_glyphs) = empty_layer
+            .build_gpu_monitor_instances_for_id(0, false, true)
+            .unwrap();
+        let empty_text_start = super::centered_glyph_start(
+            &empty_layer.regular_font,
+            "(empty)",
+            LIST_ROW_FONT_SIZE,
+            120.0,
+        );
+        let empty_text_center =
+            LIST_CONTENT_TOP + LIST_EMPTY_TOP_PADDING + LIST_ROW_FONT_SIZE * 0.5;
+        let empty_text_baseline = crate::graphics::variables::canvas::centered_baseline(
+            &empty_layer.regular_font,
+            LIST_ROW_FONT_SIZE,
+            empty_text_center,
+        );
+        assert!((empty_glyphs[5].local_position[0] - empty_text_start).abs() < f32::EPSILON);
+        assert!((empty_glyphs[5].local_position[1] - empty_text_baseline).abs() < f32::EPSILON);
+    }
 
     #[test]
     fn scaled_pixel_bounds_keep_top_left_glyph_orientation() {

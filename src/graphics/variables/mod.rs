@@ -27,19 +27,23 @@ use menu::{MonitorContextMenu, SliderRangeEditor, format_slider_value};
 const STAGE_HALF_WIDTH: f32 = SCRATCH_WIDTH as f32 * 0.5;
 const STAGE_HALF_HEIGHT: f32 = SCRATCH_HEIGHT as f32 * 0.5;
 const VALUE_HORIZONTAL_PADDING: f32 = 24.0;
+const SCALAR_MONITOR_SCALE: f32 = 0.55;
+const LIST_MONITOR_SCALE: f32 = 0.65;
 
 pub(crate) struct VariableMonitor {
     gpu_id: u32,
-    name: String,
-    value_key: String,
+    pub(super) name: String,
+    pub(super) value_key: String,
     value: String,
     x: f32,
     y: f32,
     origin_x: f32,
     origin_y: f32,
     scale: f32,
-    display_mode: MonitorDisplayMode,
-    category: MonitorCategory,
+    pub(super) display_mode: MonitorDisplayMode,
+    pub(super) category: MonitorCategory,
+    pub(super) kind: MonitorKind,
+    list_items: Vec<String>,
     visibility: MonitorVisibility,
     label_width: f32,
     value_width: f32,
@@ -48,8 +52,8 @@ pub(crate) struct VariableMonitor {
     slider_min_value_width: f32,
     slider_min: f64,
     slider_max: f64,
-    width: f32,
-    height: f32,
+    pub(super) width: f32,
+    pub(super) height: f32,
     shadow_tile: Option<CachedTile>,
 }
 
@@ -59,7 +63,7 @@ struct CachedTile {
     height: u32,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum MonitorDisplayMode {
     // expanded shows the label beside the value
     Expanded,
@@ -67,16 +71,31 @@ pub(crate) enum MonitorDisplayMode {
     ValueOnly,
     // slider keeps the label and value above an interactive numeric range
     Slider,
+    // list uses the dedicated indexed list layout
+    List,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // Keep the category tags for reporters added in later steps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)] // keep category tags for reporter groups not used by every project
 pub(crate) enum MonitorCategory {
     Variables,
+    Lists,
     Motion,
     Looks,
     Sound,
+    Events,
+    Control,
     Sensing,
+    Operators,
+    MyBlocks,
+    Extension([u8; 3]),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MonitorKind {
+    ScalarVariable,
+    List,
+    Reporter,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -107,6 +126,8 @@ impl VariableMonitor {
             scale: 0.65,
             display_mode: MonitorDisplayMode::Expanded,
             category: MonitorCategory::Variables,
+            kind: MonitorKind::ScalarVariable,
+            list_items: Vec::new(),
             visibility: MonitorVisibility::Visible,
             label_width: 0.0,
             value_width: 66.0,
@@ -129,6 +150,21 @@ impl VariableMonitor {
 
     pub(crate) fn with_category(mut self, category: MonitorCategory) -> Self {
         self.category = category;
+        self
+    }
+
+    pub(crate) fn with_kind(mut self, kind: MonitorKind) -> Self {
+        self.kind = kind;
+        self
+    }
+
+    pub(crate) fn with_list_items(mut self, items: Vec<String>, width: f32, height: f32) -> Self {
+        self.kind = MonitorKind::List;
+        self.category = MonitorCategory::Lists;
+        self.display_mode = MonitorDisplayMode::List;
+        self.list_items = items;
+        self.width = width.max(64.0);
+        self.height = height.max(68.0);
         self
     }
 
@@ -233,7 +269,12 @@ impl VariableLayer {
             .enumerate()
             .map(|(gpu_id, mut monitor)| {
                 monitor.gpu_id = gpu_id as u32;
-                if monitor.category != MonitorCategory::Variables
+                monitor.scale = if monitor.kind == MonitorKind::List {
+                    LIST_MONITOR_SCALE
+                } else {
+                    SCALAR_MONITOR_SCALE
+                };
+                if monitor.kind != MonitorKind::ScalarVariable
                     && monitor.display_mode == MonitorDisplayMode::Slider
                 {
                     monitor.display_mode = MonitorDisplayMode::Expanded;
@@ -243,18 +284,23 @@ impl VariableLayer {
                     + monitor.value_horizontal_padding * 2.0;
                 monitor.value_text_width =
                     monitor.value_width - monitor.value_horizontal_padding * 2.0;
-                monitor.width = if monitor.display_mode == MonitorDisplayMode::ValueOnly {
-                    monitor.value_width
+                if monitor.kind == MonitorKind::List {
+                    monitor.width = monitor.width.max(64.0);
+                    monitor.height = monitor.height.max(68.0);
                 } else {
-                    expanded_width(monitor.label_width, monitor.value_width)
-                };
-                monitor.height = if monitor.display_mode == MonitorDisplayMode::Slider {
-                    58.0
-                } else {
-                    34.0
-                };
-                if monitor.display_mode == MonitorDisplayMode::Slider {
-                    monitor.slider_min_value_width = monitor.value_width;
+                    monitor.width = if monitor.display_mode == MonitorDisplayMode::ValueOnly {
+                        monitor.value_width
+                    } else {
+                        expanded_width(monitor.label_width, monitor.value_width)
+                    };
+                    monitor.height = if monitor.display_mode == MonitorDisplayMode::Slider {
+                        58.0
+                    } else {
+                        34.0
+                    };
+                    if monitor.display_mode == MonitorDisplayMode::Slider {
+                        monitor.slider_min_value_width = monitor.value_width;
+                    }
                 }
 
                 monitor.x = clamp_monitor_x(monitor.x, monitor.width, monitor.scale);
@@ -331,8 +377,9 @@ impl VariableLayer {
         let index = self.hit_test(x, y)?;
         let monitor = &self.monitors[index];
         let display_mode = match monitor.display_mode {
+            MonitorDisplayMode::List => return None,
             MonitorDisplayMode::Expanded => MonitorDisplayMode::ValueOnly,
-            MonitorDisplayMode::ValueOnly if monitor.category == MonitorCategory::Variables => {
+            MonitorDisplayMode::ValueOnly if monitor.kind == MonitorKind::ScalarVariable => {
                 MonitorDisplayMode::Slider
             }
             MonitorDisplayMode::ValueOnly | MonitorDisplayMode::Slider => {
@@ -363,16 +410,21 @@ impl VariableLayer {
         if display_mode == MonitorDisplayMode::Slider {
             monitor.slider_min_value_width = current_value_width;
         }
-        monitor.width = if display_mode == MonitorDisplayMode::ValueOnly {
-            monitor.value_width
+        if monitor.kind == MonitorKind::List {
+            monitor.width = monitor.width.max(64.0);
+            monitor.height = monitor.height.max(68.0);
         } else {
-            expanded_width(monitor.label_width, monitor.value_width)
-        };
-        monitor.height = if display_mode == MonitorDisplayMode::Slider {
-            58.0
-        } else {
-            34.0
-        };
+            monitor.width = if display_mode == MonitorDisplayMode::ValueOnly {
+                monitor.value_width
+            } else {
+                expanded_width(monitor.label_width, monitor.value_width)
+            };
+            monitor.height = if display_mode == MonitorDisplayMode::Slider {
+                58.0
+            } else {
+                34.0
+            };
+        }
         monitor.x = clamp_monitor_x(monitor.x, monitor.width, monitor.scale);
         monitor.y = clamp_monitor_y(monitor.y, monitor.height, monitor.scale);
         self.mark_gpu_monitor(index);
@@ -445,6 +497,28 @@ impl VariableLayer {
         }
         self.mark_gpu_text(index);
         Some((index, width_changed))
+    }
+
+    pub(crate) fn set_monitor_list(
+        &mut self,
+        key: &str,
+        items: Vec<String>,
+    ) -> Option<(usize, bool)> {
+        let index = self
+            .monitors
+            .iter()
+            .position(|monitor| monitor.value_key == key)?;
+        let monitor = &mut self.monitors[index];
+        if monitor.kind != MonitorKind::List || monitor.list_items == items {
+            return Some((index, false));
+        }
+        monitor.list_items = items;
+        if monitor.visibility == MonitorVisibility::Visible {
+            self.mark_gpu_monitor(index);
+            Some((index, true))
+        } else {
+            Some((index, false))
+        }
     }
 
     pub(crate) fn set_monitor_visibility(&mut self, name: &str, visible: bool) -> Option<usize> {
@@ -786,7 +860,14 @@ impl VariableLayer {
     pub(crate) fn gpu_monitor_ids_in_draw_order(&self) -> impl Iterator<Item = u32> + '_ {
         self.monitors
             .iter()
-            .filter(|monitor| monitor.visibility == MonitorVisibility::Visible)
+            .filter(|monitor| {
+                monitor.visibility == MonitorVisibility::Visible
+                    && monitor.kind != MonitorKind::List
+            })
+            .chain(self.monitors.iter().filter(|monitor| {
+                monitor.visibility == MonitorVisibility::Visible
+                    && monitor.kind == MonitorKind::List
+            }))
             .map(|monitor| monitor.gpu_id)
     }
 
@@ -1078,6 +1159,99 @@ mod tests {
     }
 
     #[test]
+    fn list_monitor_uses_list_layout_and_keeps_its_items() {
+        let scalar = VariableMonitor::new("score", "3", 8.0, 8.0);
+        let monitor = VariableMonitor::new("items", "3", 8.0, 8.0).with_list_items(
+            vec!["red".to_owned(), "green".to_owned(), "blue".to_owned()],
+            110.0,
+            200.0,
+        );
+        let mut layer = VariableLayer::new(vec![scalar, monitor]).unwrap();
+        assert_eq!(layer.monitors[0].scale, super::SCALAR_MONITOR_SCALE);
+        assert_eq!(layer.monitors[1].scale, super::LIST_MONITOR_SCALE);
+        assert_eq!(layer.monitors[1].display_mode, MonitorDisplayMode::List);
+        assert_eq!(layer.monitors[1].category, super::MonitorCategory::Lists);
+        assert_eq!(layer.monitors[1].kind, super::MonitorKind::List);
+        let (shapes, glyphs) = layer.build_gpu_monitor_instances(1, true, true).unwrap();
+        assert_eq!(shapes.len(), 6);
+        assert!(glyphs.len() > 10);
+        let bounds = layer.monitor_bounds(1);
+        assert!(
+            layer
+                .hit_test((bounds.left + bounds.right) * 0.5 - 240.0, 0.0)
+                .is_some()
+        );
+        assert!(
+            layer
+                .toggle_compact_at((bounds.left + bounds.right) * 0.5 - 240.0, 0.0)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn list_monitors_draw_above_scalar_monitors() {
+        let list = VariableMonitor::new("items", "1", 0.0, 0.0)
+            .with_list_items(vec!["one".to_owned()], 110.0, 100.0);
+        let scalar = VariableMonitor::new("score", "1", 0.0, 0.0);
+        let layer = VariableLayer::new(vec![list, scalar]).unwrap();
+
+        assert_eq!(
+            layer.gpu_monitor_ids_in_draw_order().collect::<Vec<_>>(),
+            vec![1, 0]
+        );
+    }
+
+    #[test]
+    fn only_scalar_variable_monitors_cycle_into_slider_mode() {
+        let mut scalar =
+            VariableLayer::new(vec![VariableMonitor::new("score", "1", 0.0, 0.0)]).unwrap();
+        assert!(scalar.toggle_compact_at(1.0, -1.0).is_some());
+        assert_eq!(
+            scalar.monitors[0].display_mode,
+            MonitorDisplayMode::ValueOnly
+        );
+        assert!(scalar.toggle_compact_at(1.0, -1.0).is_some());
+        assert_eq!(scalar.monitors[0].display_mode, MonitorDisplayMode::Slider);
+
+        let reporter = VariableMonitor::new("x position", "0", 0.0, 0.0)
+            .with_kind(super::MonitorKind::Reporter)
+            .with_category(super::MonitorCategory::Motion);
+        let mut reporter = VariableLayer::new(vec![reporter]).unwrap();
+        assert!(reporter.toggle_compact_at(1.0, -1.0).is_some());
+        assert_eq!(
+            reporter.monitors[0].display_mode,
+            MonitorDisplayMode::ValueOnly
+        );
+        assert!(reporter.toggle_compact_at(1.0, -1.0).is_some());
+        assert_eq!(
+            reporter.monitors[0].display_mode,
+            MonitorDisplayMode::Expanded
+        );
+
+        let list =
+            VariableMonitor::new("items", "0", 0.0, 0.0).with_list_items(Vec::new(), 110.0, 120.0);
+        let mut list = VariableLayer::new(vec![list]).unwrap();
+        assert!(list.toggle_compact_at(1.0, -1.0).is_none());
+        assert_eq!(list.monitors[0].display_mode, MonitorDisplayMode::List);
+    }
+
+    #[test]
+    fn list_snapshot_refreshes_rows_without_converting_list_to_scalar_readout() {
+        let key = "Stage::items#list-id@shared";
+        let monitor = VariableMonitor::new("items", "1", 0.0, 0.0)
+            .with_value_key(key)
+            .with_list_items(vec!["one".to_owned()], 110.0, 120.0);
+        let mut layer = VariableLayer::new(vec![monitor]).unwrap();
+        assert_eq!(
+            layer.set_monitor_list(key, vec!["one".into(), "two".into()]),
+            Some((0, true))
+        );
+        assert_eq!(layer.monitors[0].list_items, vec!["one", "two"]);
+        assert_eq!(layer.monitors[0].display_mode, MonitorDisplayMode::List);
+        assert_eq!(layer.take_dirty_gpu_shapes(), vec![0]);
+    }
+
+    #[test]
     fn gpu_text_keeps_literal_special_characters() {
         let mut layer =
             VariableLayer::new(vec![VariableMonitor::new("a < b", "1 & 2", 0.0, 0.0)]).unwrap();
@@ -1234,3 +1408,5 @@ mod tests {
         assert_eq!(layer.glyph_atlas_revision(), high_scale_revision);
     }
 }
+
+

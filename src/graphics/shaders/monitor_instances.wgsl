@@ -43,6 +43,18 @@ fn rounded_box(p: vec2<f32>, size: vec2<f32>, radius: f32) -> f32 {
     let q = abs(p - b) - b + vec2(r);
     return length(max(q, vec2(0.0))) + min(max(q.x, q.y), 0.0) - r;
 }
+fn rounded_box_top_corners(p: vec2<f32>, size: vec2<f32>, radius: f32) -> f32 {
+    let r = select(0.0, radius, p.y < size.y * 0.5);
+    let b = size * 0.5;
+    let q = abs(p - b) - b + vec2(r);
+    return length(max(q, vec2(0.0))) + min(max(q.x, q.y), 0.0) - r;
+}
+fn rounded_box_bottom_corners(p: vec2<f32>, size: vec2<f32>, radius: f32) -> f32 {
+    let r = select(0.0, radius, p.y >= size.y * 0.5);
+    let b = size * 0.5;
+    let q = abs(p - b) - b + vec2(r);
+    return length(max(q, vec2(0.0))) + min(max(q.x, q.y), 0.0) - r;
+}
 fn tail_curve(t: f32, start: vec2<f32>, control_a: vec2<f32>, control_b: vec2<f32>, tip: vec2<f32>) -> vec2<f32> {
     let u = 1.0 - t;
     return u * u * u * start
@@ -79,7 +91,11 @@ fn smooth_union(a: f32, b: f32, radius: f32) -> f32 {
 }
 @fragment fn fs_main(input: Out) -> @location(0) vec4<f32> {
     var d = rounded_box(input.local, input.shape.xy, input.params.x);
-    if (input.shape.z > 0.5) {
+    if (input.shape.z == 3.0) {
+        d = rounded_box_top_corners(input.local, input.shape.xy, input.shape.w);
+    } else if (input.shape.z == 4.0) {
+        d = rounded_box_bottom_corners(input.local, input.shape.xy, input.shape.w);
+    } else if (input.shape.z > 0.5 && input.shape.z < 2.5) {
         let direction = select(-1.0, 1.0, input.shape.z > 1.5);
         d = smooth_union(
             d,

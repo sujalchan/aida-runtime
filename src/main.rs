@@ -106,6 +106,7 @@ fn run_graphical(options: RunOptions) -> Result<(), String> {
         (None, None)
     };
     let (stop_sender, stop_receiver) = mpsc::channel();
+    let (execution_start_sender, execution_start_receiver) = mpsc::channel();
     let (ack_sender, ack_receiver) = mpsc::channel();
     let (input_sender, input_receiver) = mpsc::channel();
     let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
@@ -134,6 +135,7 @@ fn run_graphical(options: RunOptions) -> Result<(), String> {
                 &worker_latest,
                 &worker_proxy,
                 &worker_notification_pending,
+                &execution_start_receiver,
                 &ack_receiver,
                 &input_receiver,
             );
@@ -155,6 +157,7 @@ fn run_graphical(options: RunOptions) -> Result<(), String> {
         notification_pending,
         observable_receiver,
         stop_sender.clone(),
+        execution_start_sender.clone(),
         ack_sender,
         input_sender,
         options.expected_variables,
@@ -163,6 +166,8 @@ fn run_graphical(options: RunOptions) -> Result<(), String> {
         options.hd_pen_mode,
     );
     let loop_result = event_loop.run_app(&mut app);
+    // Release the worker if the event loop exits before the first frame is presented.
+    let _ = execution_start_sender.send(());
     let app_error = app.take_error();
     let _ = stop_sender.send(());
     let worker_result = worker
@@ -229,13 +234,20 @@ fn run_worker(
     latest: &Arc<RwLock<Arc<RuntimeSnapshot>>>,
     proxy: &winit::event_loop::EventLoopProxy<renderer::RendererEvent>,
     notification_pending: &AtomicBool,
+    execution_start: &mpsc::Receiver<()>,
     acknowledgements: &mpsc::Receiver<usize>,
     inputs: &mpsc::Receiver<RuntimeInputEvent>,
 ) -> Result<usize, String> {
+    let _ = execution_start.recv();
     let mut pacer = runtime::TickPacer::new(pacing, runtime::SystemPacingMechanism::new());
     let mut ticks = 0;
+    let mut stopped_externally = false;
     loop {
-        if max_ticks.is_some_and(|limit| ticks >= limit) || stop_requested(stop) {
+        if max_ticks.is_some_and(|limit| ticks >= limit) {
+            break;
+        }
+        if stop_requested(stop) {
+            stopped_externally = true;
             break;
         }
         let tick_started = pacer.begin_tick();
@@ -247,6 +259,7 @@ fn run_worker(
         }
         if presentation_requested && pacing != PacingMode::Turbo {
             if !wait_for_renderer(acknowledgements, ticks, stop) {
+                stopped_externally = true;
                 break;
             }
             program.presentation_consumed();
@@ -262,7 +275,10 @@ fn run_worker(
                 if pacing == PacingMode::Turbo {
                     let remaining = program.duration_until(deadline);
                     match stop.recv_timeout(remaining) {
-                        Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                        Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                            stopped_externally = true;
+                            break;
+                        }
                         Err(mpsc::RecvTimeoutError::Timeout) => {}
                     }
                 } else {
@@ -271,6 +287,9 @@ fn run_worker(
             }
             SchedulerStatus::Complete => break,
         }
+    }
+    if stopped_externally {
+        program.stop_all();
     }
     publish_snapshot(program, ticks, latest, proxy, notification_pending);
     Ok(ticks)
