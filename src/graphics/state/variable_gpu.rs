@@ -131,6 +131,7 @@ impl GraphicsState {
             }
             if bindings_changed {
                 self.recreate_glyph_bind_group();
+                self.recreate_bubble_bind_groups();
             }
 
             for (x, y, width, height, pixels) in self.variable_layer.take_glyph_atlas_updates() {

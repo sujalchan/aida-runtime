@@ -36,6 +36,7 @@ pub(crate) struct RendererApp {
     input_sender: mpsc::Sender<RuntimeInputEvent>,
     expected_variables: Vec<(String, ScratchValue)>,
     dev_mode: bool,
+    test_mode: bool,
     cursor_position: Option<PhysicalPosition<f64>>,
     dragging_variable: bool,
     dragging_slider: bool,
@@ -57,6 +58,7 @@ impl RendererApp {
         input_sender: mpsc::Sender<RuntimeInputEvent>,
         expected_variables: Vec<(String, ScratchValue)>,
         dev_mode: bool,
+        test_mode: bool,
     ) -> Self {
         Self {
             graphics: None,
@@ -70,6 +72,7 @@ impl RendererApp {
             input_sender,
             expected_variables,
             dev_mode,
+            test_mode,
             cursor_position: None,
             dragging_variable: false,
             dragging_slider: false,
@@ -537,7 +540,9 @@ impl ApplicationHandler<RendererEvent> for RendererApp {
                 if let Err(error) = self.verify_expected_variables() {
                     self.error = Some(format!("assertion failed: {error}"));
                 }
-                event_loop.exit();
+                if self.test_mode {
+                    event_loop.exit();
+                }
             }
         }
     }

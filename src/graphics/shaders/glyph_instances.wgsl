@@ -1,4 +1,4 @@
-struct In { @location(0) local_position: vec2<f32>, @location(1) glyph_id: u32, @location(2) monitor_id: u32, @location(3) color: vec4<f32> };
+struct In { @location(0) local_position: vec2<f32>, @location(1) glyph_id: u32, @location(2) monitor_id: u32, @location(3) color: vec4<f32>, @location(4) scale: f32 };
 struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32>, @location(1) color: vec4<f32> };
 struct GlyphMeta { uv: vec4<f32>, bounds: vec4<f32> };
 @group(0) @binding(0) var<storage, read> monitor_transforms: array<vec4<f32>>;
@@ -10,7 +10,7 @@ struct GlyphMeta { uv: vec4<f32>, bounds: vec4<f32> };
     let p = corners[vi];
     let transform = monitor_transforms[input.monitor_id];
     let glyph_data = glyph_metadata[input.glyph_id];
-    let pixel = transform.xy + (input.local_position + glyph_data.bounds.xy + p * glyph_data.bounds.zw) * transform.z;
+    let pixel = transform.xy + (input.local_position + (glyph_data.bounds.xy + p * glyph_data.bounds.zw) * input.scale) * transform.z;
     var out: Out;
     out.position = vec4(2.0 * pixel.x / 480.0 - 1.0, 1.0 - 2.0 * pixel.y / 360.0, 0.0, 1.0);
     out.uv = glyph_data.uv.xy + p * glyph_data.uv.zw;

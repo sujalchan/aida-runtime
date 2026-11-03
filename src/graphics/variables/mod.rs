@@ -19,6 +19,8 @@ mod canvas;
 mod gpu;
 mod menu;
 
+pub(crate) use gpu::BubbleRenderInput;
+
 pub(crate) use menu::SliderRangeEditorInput;
 use menu::{MonitorContextMenu, SliderRangeEditor, format_slider_value};
 
@@ -961,7 +963,7 @@ fn load_system_font(database: &Database, bold: bool) -> Result<FontArc, String> 
         .map_err(|error| format!("failed to parse variable monitor font: {error}"))
 }
 
-fn text_width(font: &FontArc, text: &str, size: f32) -> f32 {
+pub(super) fn text_width(font: &FontArc, text: &str, size: f32) -> f32 {
     let scaled = font.as_scaled(size);
     let mut width = 0.0;
     let mut previous = None;

@@ -27,6 +27,7 @@ struct RunOptions {
     max_ticks: Option<usize>,
     graphical: bool,
     dev_mode: bool,
+    test_mode: bool,
     project: Option<PathBuf>,
     log_observables: bool,
     log_variables: bool,
@@ -38,7 +39,7 @@ fn main() {
         Ok(options) => options,
         Err(message) => {
             eprintln!(
-                "error: {message}\nusage: aida-runtime [--headless | --graphical --project <file.sb3>] [--dev] [--fps <number> | --turbo] [--max-ticks <count>] [--log-observables] [--log-variables] [--expect-variable <key>=<json-value>]"
+                "error: {message}\nusage: aida-runtime [--headless | --graphical --project <file.sb3>] [--test] [--dev] [--fps <number> | --turbo] [--max-ticks <count>] [--log-observables] [--log-variables] [--expect-variable <key>=<json-value>]"
             );
             std::process::exit(2);
         }
@@ -154,6 +155,7 @@ fn run_graphical(options: RunOptions) -> Result<(), String> {
         input_sender,
         options.expected_variables,
         options.dev_mode,
+        options.test_mode,
     );
     let loop_result = event_loop.run_app(&mut app);
     let app_error = app.take_error();
@@ -383,6 +385,7 @@ fn parse_run_options(args: impl IntoIterator<Item = String>) -> Result<RunOption
     let mut graphical = false;
     let mut headless = false;
     let mut dev_mode = false;
+    let mut test_mode = false;
     let mut project = None;
     let mut log_observables = false;
     let mut log_variables = false;
@@ -440,6 +443,12 @@ fn parse_run_options(args: impl IntoIterator<Item = String>) -> Result<RunOption
                 graphical = true;
             }
             "--dev" => dev_mode = true,
+            "--test" => {
+                if test_mode {
+                    return Err("--test may only be specified once".to_owned());
+                }
+                test_mode = true;
+            }
             "--project" => {
                 if project.is_some() {
                     return Err("--project may only be specified once".to_owned());
@@ -482,6 +491,7 @@ fn parse_run_options(args: impl IntoIterator<Item = String>) -> Result<RunOption
         max_ticks,
         graphical,
         dev_mode,
+        test_mode,
         project,
         log_observables,
         log_variables,

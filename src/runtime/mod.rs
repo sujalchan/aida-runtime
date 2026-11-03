@@ -22,9 +22,10 @@ pub use scheduler::{
 pub use tick::run_tick;
 #[allow(unused_imports)]
 pub use value::{
-    LayerSnapshot, ListSnapshot, ObservableEvent, RuntimeInputEvent, RuntimeSnapshot, ScratchInput,
-    ScratchListMetadata, ScratchState, ScratchValue, ScratchValueView, ScratchVariableMetadata,
-    VariableSnapshot, list_snapshot_key, variable_snapshot_key,
+    BubbleKind, BubbleSnapshot, LayerSnapshot, ListSnapshot, ObservableEvent, RuntimeInputEvent,
+    RuntimeSnapshot, ScratchInput, ScratchListMetadata, ScratchState, ScratchValue,
+    ScratchValueView, ScratchVariableMetadata, VariableSnapshot, list_snapshot_key,
+    variable_snapshot_key,
 };
 
 #[derive(Clone)]

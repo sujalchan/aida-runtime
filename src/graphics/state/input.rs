@@ -62,6 +62,7 @@ impl GraphicsState {
                 );
             }
         }
+        self.sync_bubble_gpu_data(snapshot)?;
         Ok(())
     }
 

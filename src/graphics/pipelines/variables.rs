@@ -16,6 +16,7 @@ pub(crate) struct MonitorInstance {
     pub(crate) border: [f32; 4],
     // corner radius, border width, and stage dimensions
     pub(crate) params: [f32; 4],
+    pub(crate) shape: [f32; 4],
     pub(crate) monitor_id: u32,
     pub(crate) _padding: [u32; 3],
 }
@@ -27,6 +28,7 @@ pub(crate) struct GlyphInstance {
     pub(crate) glyph_id: u32,
     pub(crate) monitor_id: u32,
     pub(crate) color: [f32; 4],
+    pub(crate) scale: f32,
 }
 
 #[repr(C)]
@@ -86,7 +88,7 @@ pub(crate) fn monitor_instance_pipeline(
         label: Some("instanced variable monitor SDF shader"),
         source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/monitor_instances.wgsl").into()),
     });
-    let attrs = wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4, 2 => Float32x4, 3 => Float32x4, 4 => Uint32];
+    let attrs = wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4, 2 => Float32x4, 3 => Float32x4, 4 => Float32x4, 5 => Uint32];
     let bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("monitor transform layout"),
         entries: &[wgpu::BindGroupLayoutEntry {
@@ -191,7 +193,7 @@ pub(crate) fn glyph_instance_pipeline(
         bind_group_layouts: &[Some(&bind_layout)],
         immediate_size: 0,
     });
-    let attrs = wgpu::vertex_attr_array![0 => Float32x2, 1 => Uint32, 2 => Uint32, 3 => Float32x4];
+    let attrs = wgpu::vertex_attr_array![0 => Float32x2, 1 => Uint32, 2 => Uint32, 3 => Float32x4, 4 => Float32];
     let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("instanced variable glyph pipeline"),
         layout: Some(&layout),

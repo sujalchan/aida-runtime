@@ -1,3 +1,4 @@
+mod bubble_gpu;
 mod init;
 mod input;
 mod pen;
@@ -104,6 +105,16 @@ pub(crate) struct GraphicsState {
     variable_draw_batches: Vec<VariableDrawBatch>,
     variable_draw_order: Vec<u32>,
     variable_shadow_batch_target: Option<u32>,
+    bubble_shape_instances: wgpu::Buffer,
+    bubble_shape_capacity: u64,
+    bubble_shape_count: u32,
+    bubble_transforms: wgpu::Buffer,
+    bubble_transform_capacity: u64,
+    bubble_transform_bind_group: wgpu::BindGroup,
+    bubble_glyph_instances: wgpu::Buffer,
+    bubble_glyph_capacity: u64,
+    bubble_glyph_count: u32,
+    bubble_glyph_bind_group: wgpu::BindGroup,
     glyph_atlas_texture: wgpu::Texture,
     uploaded_glyph_atlas_size: u32,
     uploaded_glyph_atlas_revision: u64,
@@ -282,6 +293,7 @@ mod gpu_variable_tests {
             glyph_id,
             monitor_id: 3,
             color: [1.0; 4],
+            scale: 1.0,
         }
     }
 

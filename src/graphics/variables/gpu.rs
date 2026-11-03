@@ -14,10 +14,192 @@ use super::{
     tessellate_glyph_outline,
 };
 use crate::graphics::pipelines::{GlyphInstance, GlyphMetadata, MonitorInstance, VariableVertex};
+use crate::runtime::{BubbleKind, BubbleSnapshot};
 
 const SHADOW_BLUR_RADIUS: f32 = 2.5;
 
+pub(crate) struct BubbleRenderInput {
+    pub(crate) bubble: BubbleSnapshot,
+    pub(crate) x: f32,
+    pub(crate) y: f32,
+    pub(crate) sprite_width: f32,
+    pub(crate) sprite_height: f32,
+}
+
+#[derive(Default)]
+pub(crate) struct BubbleGpuBatch {
+    pub(crate) transforms: Vec<[f32; 4]>,
+    pub(crate) shapes: Vec<MonitorInstance>,
+    pub(crate) glyphs: Vec<GlyphInstance>,
+}
+
+const BUBBLE_MAX_WIDTH: f32 = 210.0;
+const BUBBLE_PADDING_X: f32 = 10.0;
+const BUBBLE_PADDING_Y: f32 = 8.0;
+const BUBBLE_LINE_HEIGHT: f32 = 10.5;
+const BUBBLE_FONT_SIZE: f32 = 9.0;
+const BUBBLE_MIN_WIDTH: f32 = 56.0;
+const BUBBLE_EDGE: f32 = 8.0;
+const BUBBLE_DARK: [u8; 4] = [82, 91, 113, 255];
+const BUBBLE_BORDER: [u8; 4] = [215, 215, 215, 255];
+const BUBBLE_BORDER_WIDTH: f32 = 1.1;
+const BUBBLE_SPEECH_TAIL_EXTENT: f32 = 12.5;
+
 impl VariableLayer {
+    pub(crate) fn build_gpu_bubble_instances(
+        &mut self,
+        bubbles: &[BubbleRenderInput],
+    ) -> Result<BubbleGpuBatch, String> {
+        let mut batch = BubbleGpuBatch::default();
+        let margin = BUBBLE_EDGE;
+        let max_height = SCRATCH_HEIGHT as f32 - margin * 2.0;
+        for input in bubbles {
+            let sprite_x = SCRATCH_WIDTH as f32 * 0.5 + input.x;
+            let sprite_y = SCRATCH_HEIGHT as f32 * 0.5 - input.y;
+            let sprite_side_offset = input.sprite_width * 0.38 + 8.0;
+            let right_x = sprite_x + sprite_side_offset;
+            let left_edge = sprite_x - sprite_side_offset;
+            let right_room = SCRATCH_WIDTH as f32 - margin - right_x;
+            let left_room = left_edge - margin;
+            let body_on_right = right_room >= BUBBLE_MIN_WIDTH || right_room >= left_room;
+            let body_max_width = BUBBLE_MAX_WIDTH
+                .min(if body_on_right { right_room } else { left_room })
+                .max(BUBBLE_MIN_WIDTH);
+            let inner_width = body_max_width - BUBBLE_PADDING_X * 2.0;
+            let lines = wrap_bubble_text(&self.regular_font, &input.bubble.text, inner_width);
+            let height = (lines.len().max(1) as f32 * BUBBLE_LINE_HEIGHT + BUBBLE_PADDING_Y * 2.0)
+                .min(max_height);
+            let text_width = lines
+                .iter()
+                .map(|line| super::text_width(&self.regular_font, line, BUBBLE_FONT_SIZE))
+                .fold(0.0_f32, f32::max);
+            let width =
+                (text_width + BUBBLE_PADDING_X * 2.0).clamp(BUBBLE_MIN_WIDTH, body_max_width);
+
+            let desired_x = if body_on_right {
+                right_x
+            } else {
+                left_edge - width
+            };
+            let left = desired_x.clamp(margin, SCRATCH_WIDTH as f32 - margin - width);
+            let sprite_top = sprite_y - input.sprite_height * 0.36;
+            let desired_top = sprite_top - height - 15.0;
+            let lower_extent = if input.bubble.kind == BubbleKind::Say {
+                BUBBLE_SPEECH_TAIL_EXTENT
+            } else {
+                0.0
+            };
+            let top = desired_top.clamp(
+                margin,
+                SCRATCH_HEIGHT as f32 - margin - height - lower_extent,
+            );
+            let body_right = left + width;
+            let target_x = if body_right <= sprite_x {
+                (sprite_x - input.sprite_width * 0.44).max(body_right + 3.0)
+            } else if left >= sprite_x {
+                (sprite_x + input.sprite_width * 0.44).min(left - 3.0)
+            } else if sprite_x - left < body_right - sprite_x {
+                left - 3.0
+            } else {
+                body_right + 3.0
+            };
+            let target = [
+                target_x.clamp(margin, SCRATCH_WIDTH as f32 - margin),
+                (sprite_y - input.sprite_height * 0.24)
+                    .clamp(margin, SCRATCH_HEIGHT as f32 - margin),
+            ];
+            let bubble_id = batch.transforms.len() as u32;
+            batch.transforms.push([left, top, 1.0, 0.0]);
+            let fill = linear_rgba([255, 255, 255, 255]);
+            let border = linear_rgba(BUBBLE_BORDER);
+            if input.bubble.kind == BubbleKind::Think {
+                let thought_base = [left + width * 0.5, top + height];
+                let direction_x = if target[0] < thought_base[0] {
+                    -1.0
+                } else {
+                    1.0
+                };
+                for (center, radius) in [
+                    (thought_base, 4.6_f32),
+                    (
+                        [thought_base[0] + direction_x * 7.5, thought_base[1] + 4.0],
+                        3.4,
+                    ),
+                    (
+                        [thought_base[0] + direction_x * 13.0, thought_base[1] + 8.0],
+                        2.4,
+                    ),
+                ] {
+                    push_bubble_shape(
+                        &mut batch.shapes,
+                        [
+                            center[0] - left - radius,
+                            center[1] - top - radius,
+                            radius * 2.0,
+                            radius * 2.0,
+                        ],
+                        fill,
+                        border,
+                        radius,
+                        bubble_id,
+                    );
+                }
+            }
+
+            push_bubble_shape(
+                &mut batch.shapes,
+                [0.0, 0.0, width, height + lower_extent],
+                fill,
+                border,
+                17.0,
+                bubble_id,
+            );
+            if input.bubble.kind == BubbleKind::Say {
+                let body = batch.shapes.last_mut().expect("speech bubble body");
+                body.shape = [width, height, 1.0, 0.0];
+            }
+
+            for (line_index, line) in lines.iter().enumerate() {
+                for ch in line.chars() {
+                    self.ensure_glyph_atlas(ch, false)?;
+                }
+                let scaled_font = self.regular_font.as_scaled(BUBBLE_FONT_SIZE);
+                let baseline = super::canvas::centered_baseline(
+                    &self.regular_font,
+                    BUBBLE_FONT_SIZE,
+                    BUBBLE_PADDING_Y
+                        + line_index as f32 * BUBBLE_LINE_HEIGHT
+                        + BUBBLE_LINE_HEIGHT * 0.5,
+                );
+                let mut pen_x = BUBBLE_PADDING_X;
+                let mut previous = None;
+                for ch in line.chars() {
+                    let glyph = scaled_font.glyph_id(ch);
+                    if let Some(previous) = previous {
+                        pen_x += scaled_font.kern(previous, glyph);
+                    }
+                    if let Some(entry) =
+                        self.glyph_atlas_entries
+                            .get(&(ch, false, self.glyph_atlas_scale_bucket))
+                    {
+                        if entry.width > 0 && entry.height > 0 {
+                            batch.glyphs.push(GlyphInstance {
+                                local_position: [pen_x, baseline],
+                                glyph_id: entry.id,
+                                monitor_id: bubble_id,
+                                color: linear_rgba(BUBBLE_DARK),
+                                scale: BUBBLE_FONT_SIZE / 19.0,
+                            });
+                        }
+                    }
+                    pen_x += scaled_font.h_advance(glyph);
+                    previous = Some(glyph);
+                }
+            }
+        }
+        Ok(batch)
+    }
+
     pub(crate) fn glyph_atlas_revision(&self) -> u64 {
         self.glyph_atlas_revision
     }
@@ -303,6 +485,7 @@ impl VariableLayer {
                         glyph_id: e.id,
                         monitor_id,
                         color: linear_rgba(color),
+                        scale: 1.0,
                     });
                 }
             }
@@ -647,6 +830,7 @@ fn push_monitor_instance(
             SCRATCH_WIDTH as f32,
             SCRATCH_HEIGHT as f32,
         ],
+        shape: [0.0; 4],
         monitor_id,
         _padding: [0; 3],
     });
@@ -667,6 +851,72 @@ fn linear_rgba(color: [u8; 4]) -> [f32; 4] {
         linear(color[2]),
         color[3] as f32 / 255.0,
     ]
+}
+
+fn wrap_bubble_text(font: &ab_glyph::FontArc, text: &str, max_width: f32) -> Vec<String> {
+    let mut lines = Vec::new();
+    for paragraph in text.split('\n') {
+        let mut current = String::new();
+        for word in paragraph.split_whitespace() {
+            let candidate = if current.is_empty() {
+                word.to_owned()
+            } else {
+                format!("{current} {word}")
+            };
+            if super::text_width(font, &candidate, BUBBLE_FONT_SIZE) <= max_width {
+                current = candidate;
+                continue;
+            }
+            if !current.is_empty() {
+                lines.push(std::mem::take(&mut current));
+            }
+            if super::text_width(font, word, BUBBLE_FONT_SIZE) <= max_width {
+                current.push_str(word);
+                continue;
+            }
+            for ch in word.chars() {
+                let mut candidate = current.clone();
+                candidate.push(ch);
+                if super::text_width(font, &candidate, BUBBLE_FONT_SIZE) > max_width
+                    && !current.is_empty()
+                {
+                    lines.push(std::mem::take(&mut current));
+                }
+                current.push(ch);
+            }
+        }
+        if !current.is_empty() || paragraph.is_empty() {
+            lines.push(current);
+        }
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
+}
+
+fn push_bubble_shape(
+    shapes: &mut Vec<MonitorInstance>,
+    rect: [f32; 4],
+    fill: [f32; 4],
+    border: [f32; 4],
+    radius: f32,
+    bubble_id: u32,
+) {
+    shapes.push(MonitorInstance {
+        rect,
+        fill,
+        border,
+        params: [
+            radius,
+            BUBBLE_BORDER_WIDTH,
+            SCRATCH_WIDTH as f32,
+            SCRATCH_HEIGHT as f32,
+        ],
+        shape: [0.0; 4],
+        monitor_id: bubble_id,
+        _padding: [0; 3],
+    });
 }
 
 fn push_vertex(output: &mut Vec<VariableVertex>, stage_x: f32, stage_y: f32, color: [u8; 4]) {
@@ -771,7 +1021,11 @@ fn push_text_mesh(
 
 #[cfg(test)]
 mod tests {
-    use super::{linear_rgba, scaled_px_bounds};
+    use super::{
+        BUBBLE_BORDER, BUBBLE_BORDER_WIDTH, BUBBLE_FONT_SIZE, BUBBLE_SPEECH_TAIL_EXTENT,
+        BubbleRenderInput, VariableLayer, linear_rgba, scaled_px_bounds,
+    };
+    use crate::runtime::{BubbleKind, BubbleSnapshot};
 
     #[test]
     fn scaled_pixel_bounds_keep_top_left_glyph_orientation() {
@@ -792,5 +1046,83 @@ mod tests {
         assert!((color[1] - 0.05127).abs() < 0.0001);
         assert_eq!(color[2], 1.0);
         assert!((color[3] - 128.0 / 255.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn bubble_layout_wraps_clamps_and_keeps_each_bubble_instanced() {
+        let mut layer = VariableLayer::new(Vec::new()).unwrap();
+        let long_text = "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.";
+        let batch = layer
+            .build_gpu_bubble_instances(&[
+                BubbleRenderInput {
+                    bubble: BubbleSnapshot {
+                        kind: BubbleKind::Say,
+                        text: long_text.to_owned(),
+                    },
+                    x: -100.0,
+                    y: 170.0,
+                    sprite_width: 80.0,
+                    sprite_height: 100.0,
+                },
+                BubbleRenderInput {
+                    bubble: BubbleSnapshot {
+                        kind: BubbleKind::Think,
+                        text: "Hmm...".to_owned(),
+                    },
+                    x: 40.0,
+                    y: 0.0,
+                    sprite_width: 80.0,
+                    sprite_height: 100.0,
+                },
+            ])
+            .unwrap();
+
+        assert_eq!(batch.transforms.len(), 2);
+        assert!(batch.transforms[0][1] >= 8.0);
+        let say_body = batch.shapes[0];
+        assert_eq!(say_body.params[0], 17.0);
+        assert!((say_body.params[1] - BUBBLE_BORDER_WIDTH).abs() < f32::EPSILON);
+        assert_eq!(say_body.border, linear_rgba(BUBBLE_BORDER));
+        assert_eq!(say_body.shape[2], 1.0);
+        assert_eq!(say_body.rect[3], say_body.shape[1] + BUBBLE_SPEECH_TAIL_EXTENT);
+        assert_eq!(batch.shapes.len(), 5);
+        assert!(batch.shapes[0].rect[3] > 100.0);
+        assert!(say_body.shape[1] <= 344.0);
+        assert!(
+            batch.shapes[1..4]
+                .iter()
+                .all(|circle| circle.rect[0].abs() < 100.0 && circle.rect[1].abs() < 400.0)
+        );
+        assert_eq!(batch.shapes[4].monitor_id, 1);
+        assert_eq!(batch.shapes[4].rect[0..2], [0.0, 0.0]);
+        let thought_body = batch.shapes[4].rect;
+        let largest_circle = batch.shapes[1].rect;
+        assert!((largest_circle[0] + largest_circle[2] * 0.5 - thought_body[2] * 0.5).abs() < 0.01);
+        assert!((largest_circle[1] + largest_circle[3] * 0.5 - thought_body[3]).abs() < 0.01);
+        let middle_circle = batch.shapes[2].rect;
+        let smallest_circle = batch.shapes[3].rect;
+        assert!(middle_circle[0] < largest_circle[0]);
+        assert!(smallest_circle[0] < middle_circle[0]);
+        assert!(middle_circle[1] > largest_circle[1]);
+        assert!(smallest_circle[1] > middle_circle[1]);
+        let large_center_x = largest_circle[0] + largest_circle[2] * 0.5;
+        let middle_center_x = middle_circle[0] + middle_circle[2] * 0.5;
+        let small_center_x = smallest_circle[0] + smallest_circle[2] * 0.5;
+        let circle_distance = |a: [f32; 4], b: [f32; 4]| {
+            let dx = (a[0] + a[2] * 0.5) - (b[0] + b[2] * 0.5);
+            let dy = (a[1] + a[3] * 0.5) - (b[1] + b[3] * 0.5);
+            (dx * dx + dy * dy).sqrt()
+        };
+        let large_middle_gap = circle_distance(largest_circle, middle_circle)
+            - (largest_circle[2] + middle_circle[2]) * 0.5;
+        let middle_small_gap = circle_distance(middle_circle, smallest_circle)
+            - (middle_circle[2] + smallest_circle[2]) * 0.5;
+        assert!(large_middle_gap >= 0.0);
+        assert!(middle_small_gap >= 0.0);
+        assert!((large_middle_gap - middle_small_gap).abs() < 1.0);
+        assert!(middle_center_x - small_center_x < large_center_x - middle_center_x);
+        assert!(batch.glyphs.iter().any(|glyph| glyph.monitor_id == 0));
+        assert!(batch.glyphs.iter().any(|glyph| glyph.monitor_id == 1));
+        assert!((batch.glyphs[0].scale - BUBBLE_FONT_SIZE / 19.0).abs() < f32::EPSILON);
     }
 }

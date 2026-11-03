@@ -157,6 +157,18 @@ impl GraphicsState {
                 pass.set_bind_group(1, &sprite.transform_bind_group, &[]);
                 pass.draw(0..6, 0..1);
             }
+            if self.bubble_shape_count > 0 {
+                pass.set_pipeline(&self.monitor_instance_pipeline);
+                pass.set_bind_group(0, &self.bubble_transform_bind_group, &[]);
+                pass.set_vertex_buffer(0, self.bubble_shape_instances.slice(..));
+                pass.draw(0..6, 0..self.bubble_shape_count);
+            }
+            if self.bubble_glyph_count > 0 {
+                pass.set_pipeline(&self.glyph_instance_pipeline);
+                pass.set_bind_group(0, &self.bubble_glyph_bind_group, &[]);
+                pass.set_vertex_buffer(0, self.bubble_glyph_instances.slice(..));
+                pass.draw(0..6, 0..self.bubble_glyph_count);
+            }
             let shadow_visible = self.dev_mode
                 && self.variable_layer.shadow_opacity() > 0.0
                 && self.drag_shadow_texture_rect.is_some()

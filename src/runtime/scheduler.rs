@@ -463,6 +463,10 @@ impl<S: ResumableScript> ScriptScheduler<S> {
     pub fn duration_until(&self, deadline: u64) -> std::time::Duration {
         std::time::Duration::from_millis(deadline.saturating_sub(self.clock.now_millis()))
     }
+
+    pub fn now_millis(&self) -> u64 {
+        self.clock.now_millis()
+    }
 }
 
 #[cfg(test)]

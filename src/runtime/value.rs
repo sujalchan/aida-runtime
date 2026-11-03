@@ -202,6 +202,26 @@ pub struct LayerSnapshot {
     pub original: bool,
     pub x: f64,
     pub y: f64,
+    pub bubble: Option<BubbleSnapshot>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BubbleKind {
+    Say,
+    Think,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BubbleSnapshot {
+    pub kind: BubbleKind,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SpeechBubble {
+    kind: BubbleKind,
+    text: String,
+    expires_at_millis: Option<u64>,
 }
 
 /// immutable copies for presentation and observation, never script execution state.
@@ -238,6 +258,7 @@ struct ScratchTargetInstance {
     y: f64,
     values: Vec<Option<ScratchValue>>,
     lists: Vec<Option<ScratchList>>,
+    bubble: Option<SpeechBubble>,
 }
 
 /// names and scope information for one shared-state slot.
@@ -330,6 +351,43 @@ impl ScratchState {
         self.redraw_requested = true;
     }
 
+    pub fn set_speech_bubble(
+        &mut self,
+        kind: BubbleKind,
+        text: String,
+        expires_at_millis: Option<u64>,
+    ) {
+        let instance = &mut self.instances[self.current_instance];
+        if instance.is_stage || text.is_empty() {
+            instance.bubble = None;
+        } else {
+            instance.bubble = Some(SpeechBubble {
+                kind,
+                text,
+                expires_at_millis,
+            });
+        }
+        self.request_redraw();
+    }
+
+    /// remove timed bubbles once their script wait has reached its deadline.
+    pub fn expire_speech_bubbles(&mut self, now_millis: u64) {
+        let mut changed = false;
+        for instance in &mut self.instances {
+            if instance.bubble.as_ref().is_some_and(|bubble| {
+                bubble
+                    .expires_at_millis
+                    .is_some_and(|deadline| deadline <= now_millis)
+            }) {
+                instance.bubble = None;
+                changed = true;
+            }
+        }
+        if changed {
+            self.request_redraw();
+        }
+    }
+
     pub fn redraw_requested(&self) -> bool {
         self.redraw_requested
     }
@@ -374,6 +432,7 @@ impl ScratchState {
                 y: 0.0,
                 values: Vec::new(),
                 lists: Vec::new(),
+                bubble: None,
             }],
             current_instance: 0,
             pending_clones: Vec::new(),
@@ -405,6 +464,7 @@ impl ScratchState {
                 y: 0.0,
                 values: Vec::new(),
                 lists: Vec::new(),
+                bubble: None,
             }],
             current_instance: 0,
             pending_clones: Vec::new(),
@@ -441,6 +501,7 @@ impl ScratchState {
                 y: 0.0,
                 values: Vec::new(),
                 lists: Vec::new(),
+                bubble: None,
             }],
             current_instance: 0,
             pending_clones: Vec::new(),
@@ -604,6 +665,10 @@ impl ScratchState {
                     original: instance.original,
                     x: instance.x,
                     y: instance.y,
+                    bubble: instance.bubble.as_ref().map(|bubble| BubbleSnapshot {
+                        kind: bubble.kind,
+                        text: bubble.text.clone(),
+                    }),
                 });
             }
         }
@@ -780,6 +845,7 @@ impl ScratchState {
             y: 0.0,
             values: vec![None; self.values.len()],
             lists: vec![None; self.lists.len()],
+            bubble: None,
         });
         id
     }
@@ -847,6 +913,7 @@ impl ScratchState {
             y: self.instances[source_instance].y,
             values: vec![None; self.values.len()],
             lists: vec![None; self.lists.len()],
+            bubble: None,
         };
         for (slot, metadata) in self.variables.iter().enumerate() {
             if !metadata.is_stage && metadata.target_index == target {
@@ -1003,8 +1070,8 @@ impl ScratchState {
 #[cfg(test)]
 mod tests {
     use super::{
-        ObservableEvent, RuntimeInputEvent, ScratchListMetadata, ScratchState, ScratchValue,
-        ScratchVariableMetadata,
+        BubbleKind, ObservableEvent, RuntimeInputEvent, ScratchListMetadata, ScratchState,
+        ScratchValue, ScratchVariableMetadata,
     };
     use crate::runtime::{ScratchList, scratch_to_number};
 
@@ -1106,6 +1173,29 @@ mod tests {
                 .any(|layer| layer.instance_id == clone && !layer.original)
         );
         assert_eq!(snapshot.tick, 7);
+    }
+
+    #[test]
+    fn speech_bubbles_are_instance_local_and_expire_at_their_deadline() {
+        let mut state = ScratchState::new(Vec::new());
+        state.register_target(1, "Sprite1", false);
+        let original = state.original_instance(1).unwrap();
+        state.set_current_instance(original);
+        state.set_speech_bubble(BubbleKind::Say, "hello".to_owned(), Some(100));
+        let clone = state.create_clone(original, 1, 300).unwrap();
+
+        state.set_current_instance(clone);
+        state.set_speech_bubble(BubbleKind::Think, "hmm".to_owned(), None);
+        let snapshot = state.observable_snapshot(0);
+        assert_eq!(snapshot.layers[0].bubble.as_ref().unwrap().text, "hello");
+        assert_eq!(snapshot.layers[1].bubble.as_ref().unwrap().text, "hmm");
+
+        state.expire_speech_bubbles(99);
+        assert!(state.observable_snapshot(1).layers[0].bubble.is_some());
+        state.expire_speech_bubbles(100);
+        let snapshot = state.observable_snapshot(2);
+        assert!(snapshot.layers[0].bubble.is_none());
+        assert_eq!(snapshot.layers[1].bubble.as_ref().unwrap().text, "hmm");
     }
 
     #[test]

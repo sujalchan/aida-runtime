@@ -107,6 +107,18 @@ Use the root launcher to generate and run the same project graphically:
 ./run.sh path/to/project.sb3 --graphical --turbo
 ```
 
+Graphical runs keep the final frame open after scripts finish; close the window
+to exit. Add `--test` when a graphical run should close automatically after
+execution, for example:
+
+```sh
+./run.sh path/to/project.sb3 --graphical --test
+cargo run -p aida-runtime -- --graphical --project path/to/project.sb3 --test
+```
+
+`--test` only changes graphical window lifetime. Headless runs already exit
+when execution finishes.
+
 For direct runtime invocation, first generate the module from that project,
 then pass its path to the graphical frontend:
 

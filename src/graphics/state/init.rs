@@ -641,6 +641,57 @@ impl GraphicsState {
                 },
             ],
         });
+        let bubble_transform_capacity = 16u64;
+        let bubble_transforms = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("speech bubble transforms"),
+            size: bubble_transform_capacity * 16,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let bubble_transform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("speech bubble shape transforms"),
+            layout: &monitor_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: bubble_transforms.as_entire_binding(),
+            }],
+        });
+        let bubble_glyph_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("speech bubble glyph bindings"),
+            layout: &glyph_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: bubble_transforms.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: glyph_metadata.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&glyph_atlas_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::Sampler(&glyph_atlas_sampler),
+                },
+            ],
+        });
+        let bubble_shape_capacity = 32u64;
+        let bubble_shape_instances = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("speech bubble shape instances"),
+            size: bubble_shape_capacity * std::mem::size_of::<MonitorInstance>() as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let bubble_glyph_capacity = 512u64;
+        let bubble_glyph_instances = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("speech bubble glyph instances"),
+            size: bubble_glyph_capacity * std::mem::size_of::<GlyphInstance>() as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let readout_vertices = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("GPU frametime readout vertices"),
             size: 4,
@@ -719,6 +770,16 @@ impl GraphicsState {
             variable_draw_batches: Vec::new(),
             variable_draw_order: Vec::new(),
             variable_shadow_batch_target: None,
+            bubble_shape_instances,
+            bubble_shape_capacity,
+            bubble_shape_count: 0,
+            bubble_transforms,
+            bubble_transform_capacity,
+            bubble_transform_bind_group,
+            bubble_glyph_instances,
+            bubble_glyph_capacity,
+            bubble_glyph_count: 0,
+            bubble_glyph_bind_group,
             glyph_atlas_texture,
             uploaded_glyph_atlas_size: glyph_atlas_size,
             uploaded_glyph_atlas_revision: 0,
