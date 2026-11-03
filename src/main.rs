@@ -19,16 +19,52 @@ fn main() {
         }
     };
     let mut program = program::GeneratedProgram::new();
-    let mut pacer = runtime::TickPacer::new(options.pacing, runtime::SystemPacingMechanism::new());
+    match options.pacing {
+        runtime::PacingMode::Turbo => run_turbo(&mut program, options.max_ticks),
+        pacing => run_paced(&mut program, pacing, options.max_ticks),
+    }
+}
+
+fn run_turbo(program: &mut program::GeneratedProgram, max_ticks: Option<usize>) {
     let mut ticks = 0;
     loop {
-        if options.max_ticks.is_some_and(|limit| ticks >= limit) {
+        if max_ticks.is_some_and(|limit| ticks >= limit) {
+            break;
+        }
+        let status = program.advance();
+        ticks += 1;
+        if max_ticks == Some(ticks) && !program.is_complete() {
+            break;
+        }
+        match status {
+            runtime::SchedulerStatus::Progressed => {}
+            runtime::SchedulerStatus::WaitingUntil(deadline) => {
+                let delay = program.duration_until(deadline);
+                if !delay.is_zero() {
+                    std::thread::sleep(delay);
+                }
+            }
+            runtime::SchedulerStatus::Complete => break,
+        }
+    }
+    report_tick_limit(program, max_ticks, ticks);
+}
+
+fn run_paced(
+    program: &mut program::GeneratedProgram,
+    pacing: runtime::PacingMode,
+    max_ticks: Option<usize>,
+) {
+    let mut pacer = runtime::TickPacer::new(pacing, runtime::SystemPacingMechanism::new());
+    let mut ticks = 0;
+    loop {
+        if max_ticks.is_some_and(|limit| ticks >= limit) {
             break;
         }
         let tick_started = pacer.begin_tick();
         let status = program.advance();
         ticks += 1;
-        if options.max_ticks == Some(ticks) && !program.is_complete() {
+        if max_ticks == Some(ticks) && !program.is_complete() {
             break;
         }
         match status {
@@ -41,7 +77,11 @@ fn main() {
             runtime::SchedulerStatus::Complete => break,
         }
     }
-    if options.max_ticks == Some(ticks) && !program.is_complete() {
+    report_tick_limit(program, max_ticks, ticks);
+}
+
+fn report_tick_limit(program: &program::GeneratedProgram, max_ticks: Option<usize>, ticks: usize) {
+    if max_ticks == Some(ticks) && !program.is_complete() {
         eprintln!("stopped after {ticks} scheduler ticks (tick limit reached)");
     }
 }

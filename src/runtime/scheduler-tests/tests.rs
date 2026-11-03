@@ -80,6 +80,63 @@ impl Clock for CountingClock {
     }
 }
 
+#[derive(Clone)]
+struct ControlledClock {
+    calls: std::rc::Rc<std::cell::Cell<usize>>,
+    now: std::rc::Rc<std::cell::Cell<u64>>,
+}
+
+impl Clock for ControlledClock {
+    fn now_millis(&self) -> u64 {
+        self.calls.set(self.calls.get() + 1);
+        self.now.get()
+    }
+}
+
+struct DeadlineScript {
+    deadline: u64,
+    steps: std::rc::Rc<std::cell::Cell<usize>>,
+}
+
+impl ResumableScript for DeadlineScript {
+    fn step(&mut self, _state: &mut ScratchState, _clock: &dyn Clock) -> ScriptStatus {
+        self.steps.set(self.steps.get() + 1);
+        ScriptStatus::WaitUntil(self.deadline)
+    }
+}
+
+struct ClockAdvancingScript {
+    clock: ControlledClock,
+    values: Vec<u64>,
+    steps: usize,
+}
+
+impl ResumableScript for ClockAdvancingScript {
+    fn step(&mut self, _state: &mut ScratchState, _clock: &dyn Clock) -> ScriptStatus {
+        if let Some(value) = self.values.get(self.steps) {
+            self.clock.now.set(*value);
+            self.steps += 1;
+            ScriptStatus::Yield
+        } else {
+            ScriptStatus::Complete
+        }
+    }
+}
+
+enum ClockFixtureScript {
+    Deadline(DeadlineScript),
+    Advancing(ClockAdvancingScript),
+}
+
+impl ResumableScript for ClockFixtureScript {
+    fn step(&mut self, state: &mut ScratchState, clock: &dyn Clock) -> ScriptStatus {
+        match self {
+            Self::Deadline(script) => script.step(state, clock),
+            Self::Advancing(script) => script.step(state, clock),
+        }
+    }
+}
+
 #[test]
 fn runnable_scripts_do_not_read_the_clock_when_no_script_is_waiting() {
     let clock = CountingClock(std::rc::Rc::new(std::cell::Cell::new(0)));
@@ -98,6 +155,90 @@ fn runnable_scripts_do_not_read_the_clock_when_no_script_is_waiting() {
         super::SchedulerStatus::Progressed
     );
     assert_eq!(clock_view.0.get(), 0);
+}
+
+#[test]
+fn scanning_multiple_sleepers_reads_the_clock_once() {
+    let clock = ControlledClock {
+        calls: std::rc::Rc::new(std::cell::Cell::new(0)),
+        now: std::rc::Rc::new(std::cell::Cell::new(0)),
+    };
+    let clock_view = clock.clone();
+    let first_steps = std::rc::Rc::new(std::cell::Cell::new(0));
+    let second_steps = std::rc::Rc::new(std::cell::Cell::new(0));
+    let scripts = vec![
+        ClockFixtureScript::Deadline(DeadlineScript {
+            deadline: 10,
+            steps: first_steps.clone(),
+        }),
+        ClockFixtureScript::Deadline(DeadlineScript {
+            deadline: 20,
+            steps: second_steps.clone(),
+        }),
+    ];
+    let mut scheduler = ScriptScheduler::with_clock(scripts, Box::new(clock));
+    let mut state = ScratchState::new(vec![]);
+
+    assert_eq!(
+        scheduler.advance(&mut state),
+        super::SchedulerStatus::Progressed
+    );
+    assert_eq!(
+        scheduler.advance(&mut state),
+        super::SchedulerStatus::Progressed
+    );
+    assert_eq!(clock_view.calls.get(), 0);
+    assert_eq!(
+        scheduler.advance(&mut state),
+        super::SchedulerStatus::WaitingUntil(10)
+    );
+    assert_eq!(clock_view.calls.get(), 1);
+    assert_eq!(first_steps.get(), 1);
+    assert_eq!(second_steps.get(), 1);
+}
+
+#[test]
+fn sleeping_script_uses_a_fresh_clock_read_after_another_script_runs() {
+    let clock = ControlledClock {
+        calls: std::rc::Rc::new(std::cell::Cell::new(0)),
+        now: std::rc::Rc::new(std::cell::Cell::new(0)),
+    };
+    let clock_view = clock.clone();
+    let completed_waiter_steps = std::rc::Rc::new(std::cell::Cell::new(0));
+    let scripts = vec![
+        ClockFixtureScript::Deadline(DeadlineScript {
+            deadline: 5,
+            steps: completed_waiter_steps.clone(),
+        }),
+        ClockFixtureScript::Advancing(ClockAdvancingScript {
+            clock,
+            values: vec![1, 5],
+            steps: 0,
+        }),
+    ];
+    let mut scheduler = ScriptScheduler::with_clock(scripts, Box::new(clock_view.clone()));
+    let mut state = ScratchState::new(vec![]);
+
+    assert_eq!(
+        scheduler.advance(&mut state),
+        super::SchedulerStatus::Progressed
+    );
+    assert_eq!(
+        scheduler.advance(&mut state),
+        super::SchedulerStatus::Progressed
+    );
+    assert_eq!(
+        scheduler.advance(&mut state),
+        super::SchedulerStatus::Progressed
+    );
+    assert_eq!(clock_view.calls.get(), 1);
+    assert_eq!(completed_waiter_steps.get(), 1);
+    assert_eq!(
+        scheduler.advance(&mut state),
+        super::SchedulerStatus::Progressed
+    );
+    assert_eq!(clock_view.calls.get(), 2);
+    assert_eq!(completed_waiter_steps.get(), 2);
 }
 
 #[test]

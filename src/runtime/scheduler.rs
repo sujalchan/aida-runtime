@@ -82,9 +82,13 @@ impl Clock for MonotonicClock {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScriptStatus {
     Yield,
+    /// suspend until the scheduler clock reaches the deadline; the scheduler will not step the script earlier.
     WaitUntil(u64),
     Complete,
-    Broadcast { message: usize, wait: bool },
+    Broadcast {
+        message: usize,
+        wait: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,6 +102,7 @@ pub enum SchedulerStatus {
 }
 
 pub trait ResumableScript {
+    /// advance one script continuation; wait deadlines are enforced by the scheduler.
     fn step(&mut self, state: &mut ScratchState, clock: &dyn Clock) -> ScriptStatus;
     fn target_instance(&self) -> usize {
         0

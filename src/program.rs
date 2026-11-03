@@ -12,7 +12,7 @@ macro_rules! print_value {
 fn broadcast_message_key(message: String) -> usize { match message.to_uppercase().as_str() { _ => 0 } }
 
 #[allow(dead_code)]
-struct ProcedureFrame { function: usize, pc: usize, repeat_counts: Vec<usize>, wait_deadlines: Vec<Option<u64>>, arguments: Vec<ScratchValue>, warp_mode: bool }
+struct ProcedureFrame { function: usize, pc: usize, repeat_counts: Vec<usize>, arguments: Vec<ScratchValue>, warp_mode: bool }
 struct ScriptState { frames: Vec<ProcedureFrame>, warp_budget: WarpBudget, }
 
 enum GeneratedScript {
@@ -81,18 +81,9 @@ fn step_green_flag_script_sprite1_1(script: &mut ScriptState, state: &mut Scratc
             },
             1 => match pc {
                 0 => {
-                    let wait_started = script.frames.last().unwrap().wait_deadlines[0].is_none();
-                    let wait_deadline = if let Some(deadline) = script.frames.last().unwrap().wait_deadlines[0] { deadline } else { let duration_ms = (scratch_to_number(0.02_f64).max(0.0) * 1000.0).ceil() as u64; let deadline = clock.now_millis().saturating_add(duration_ms); script.frames.last_mut().unwrap().wait_deadlines[0] = Some(deadline); deadline };
-                    if wait_started {
-                        script.frames.last_mut().unwrap().pc = 0;
-                        return ScriptStatus::WaitUntil(wait_deadline);
-                    }
-                    if clock.now_millis() < wait_deadline {
-                        return ScriptStatus::WaitUntil(wait_deadline);
-                    }
-                    script.frames.last_mut().unwrap().wait_deadlines[0] = None;
+                    let duration_ms = (scratch_to_number(0.02_f64).max(0.0) * 1000.0).ceil() as u64; let wait_deadline = clock.now_millis().saturating_add(duration_ms);
                     script.frames.last_mut().unwrap().pc = 1;
-                    continue;
+                    return ScriptStatus::WaitUntil(wait_deadline);
                 },
                 1 => {
                     let scratch_change = scratch_to_number(-5.0_f64);
@@ -109,7 +100,7 @@ fn step_green_flag_script_sprite1_1(script: &mut ScriptState, state: &mut Scratc
     }
 }
 
-fn new_green_flag_script_sprite1_1_for(instance: usize) -> GeneratedScript { GeneratedScript::Script1(instance, ScriptState { frames: vec![ProcedureFrame { function: 0, pc: 0, repeat_counts: vec![0; 0], wait_deadlines: vec![None; 0], arguments: vec![], warp_mode: false }], warp_budget: WarpBudget::new(500), }) }
+fn new_green_flag_script_sprite1_1_for(instance: usize) -> GeneratedScript { GeneratedScript::Script1(instance, ScriptState { frames: vec![ProcedureFrame { function: 0, pc: 0, repeat_counts: vec![0; 0], arguments: vec![], warp_mode: false }], warp_budget: WarpBudget::new(500), }) }
 
 fn new_green_flag_script_sprite1_1() -> GeneratedScript { new_green_flag_script_sprite1_1_for(1) }
 
@@ -134,18 +125,9 @@ fn step_clone_start_script_sprite1_2(script: &mut ScriptState, state: &mut Scrat
             },
             1 => match pc {
                 0 => {
-                    let wait_started = script.frames.last().unwrap().wait_deadlines[0].is_none();
-                    let wait_deadline = if let Some(deadline) = script.frames.last().unwrap().wait_deadlines[0] { deadline } else { let duration_ms = (scratch_to_number(0.02_f64).max(0.0) * 1000.0).ceil() as u64; let deadline = clock.now_millis().saturating_add(duration_ms); script.frames.last_mut().unwrap().wait_deadlines[0] = Some(deadline); deadline };
-                    if wait_started {
-                        script.frames.last_mut().unwrap().pc = 0;
-                        return ScriptStatus::WaitUntil(wait_deadline);
-                    }
-                    if clock.now_millis() < wait_deadline {
-                        return ScriptStatus::WaitUntil(wait_deadline);
-                    }
-                    script.frames.last_mut().unwrap().wait_deadlines[0] = None;
+                    let duration_ms = (scratch_to_number(0.02_f64).max(0.0) * 1000.0).ceil() as u64; let wait_deadline = clock.now_millis().saturating_add(duration_ms);
                     script.frames.last_mut().unwrap().pc = 1;
-                    continue;
+                    return ScriptStatus::WaitUntil(wait_deadline);
                 },
                 1 => {
                     let scratch_change = scratch_to_number(-5.0_f64);
@@ -162,7 +144,7 @@ fn step_clone_start_script_sprite1_2(script: &mut ScriptState, state: &mut Scrat
     }
 }
 
-fn new_clone_start_script_sprite1_2_for(instance: usize) -> GeneratedScript { GeneratedScript::Script2(instance, ScriptState { frames: vec![ProcedureFrame { function: 0, pc: 0, repeat_counts: vec![0; 0], wait_deadlines: vec![None; 0], arguments: vec![], warp_mode: false }], warp_budget: WarpBudget::new(500), }) }
+fn new_clone_start_script_sprite1_2_for(instance: usize) -> GeneratedScript { GeneratedScript::Script2(instance, ScriptState { frames: vec![ProcedureFrame { function: 0, pc: 0, repeat_counts: vec![0; 0], arguments: vec![], warp_mode: false }], warp_budget: WarpBudget::new(500), }) }
 
 fn new_clone_start_script_sprite1_2(instance: usize) -> GeneratedScript { new_clone_start_script_sprite1_2_for(instance) }
 
@@ -187,18 +169,9 @@ fn step_clone_start_script_sprite1_3(script: &mut ScriptState, state: &mut Scrat
             },
             1 => match pc {
                 0 => {
-                    let wait_started = script.frames.last().unwrap().wait_deadlines[0].is_none();
-                    let wait_deadline = if let Some(deadline) = script.frames.last().unwrap().wait_deadlines[0] { deadline } else { let duration_ms = (scratch_to_number(0.02_f64).max(0.0) * 1000.0).ceil() as u64; let deadline = clock.now_millis().saturating_add(duration_ms); script.frames.last_mut().unwrap().wait_deadlines[0] = Some(deadline); deadline };
-                    if wait_started {
-                        script.frames.last_mut().unwrap().pc = 0;
-                        return ScriptStatus::WaitUntil(wait_deadline);
-                    }
-                    if clock.now_millis() < wait_deadline {
-                        return ScriptStatus::WaitUntil(wait_deadline);
-                    }
-                    script.frames.last_mut().unwrap().wait_deadlines[0] = None;
+                    let duration_ms = (scratch_to_number(0.02_f64).max(0.0) * 1000.0).ceil() as u64; let wait_deadline = clock.now_millis().saturating_add(duration_ms);
                     script.frames.last_mut().unwrap().pc = 1;
-                    continue;
+                    return ScriptStatus::WaitUntil(wait_deadline);
                 },
                 1 => {
                     let scratch_change = scratch_to_number(-5.0_f64);
@@ -215,7 +188,7 @@ fn step_clone_start_script_sprite1_3(script: &mut ScriptState, state: &mut Scrat
     }
 }
 
-fn new_clone_start_script_sprite1_3_for(instance: usize) -> GeneratedScript { GeneratedScript::Script3(instance, ScriptState { frames: vec![ProcedureFrame { function: 0, pc: 0, repeat_counts: vec![0; 0], wait_deadlines: vec![None; 0], arguments: vec![], warp_mode: false }], warp_budget: WarpBudget::new(500), }) }
+fn new_clone_start_script_sprite1_3_for(instance: usize) -> GeneratedScript { GeneratedScript::Script3(instance, ScriptState { frames: vec![ProcedureFrame { function: 0, pc: 0, repeat_counts: vec![0; 0], arguments: vec![], warp_mode: false }], warp_budget: WarpBudget::new(500), }) }
 
 fn new_clone_start_script_sprite1_3(instance: usize) -> GeneratedScript { new_clone_start_script_sprite1_3_for(instance) }
 
@@ -231,7 +204,7 @@ fn step_clone_start_script_sprite1_4(script: &mut ScriptState, state: &mut Scrat
                 0 => {
                     let inherited_warp = script.frames.last().is_some_and(|frame| frame.warp_mode);
                     script.frames.last_mut().unwrap().pc = usize::MAX;
-                    script.frames.push(ProcedureFrame { function: 1, pc: 0, repeat_counts: vec![0; 0], wait_deadlines: vec![None; 1], arguments: vec![], warp_mode: inherited_warp || true });
+                    script.frames.push(ProcedureFrame { function: 1, pc: 0, repeat_counts: vec![0; 0], arguments: vec![], warp_mode: inherited_warp || true });
                     let recursive_call = script.frames.iter().filter(|frame| frame.function == script.frames.last().unwrap().function).count() > 1;
                     if recursive_call && !script.frames.last().unwrap().warp_mode { return ScriptStatus::Yield; }
                     if script.frames.last().unwrap().warp_mode && script.warp_budget_expired(clock) { return ScriptStatus::Yield; }
@@ -241,18 +214,9 @@ fn step_clone_start_script_sprite1_4(script: &mut ScriptState, state: &mut Scrat
             },
             1 => match pc {
                 0 => {
-                    let wait_started = script.frames.last().unwrap().wait_deadlines[0].is_none();
-                    let wait_deadline = if let Some(deadline) = script.frames.last().unwrap().wait_deadlines[0] { deadline } else { let duration_ms = (scratch_to_number(0.02_f64).max(0.0) * 1000.0).ceil() as u64; let deadline = clock.now_millis().saturating_add(duration_ms); script.frames.last_mut().unwrap().wait_deadlines[0] = Some(deadline); deadline };
-                    if wait_started {
-                        script.frames.last_mut().unwrap().pc = 0;
-                        return ScriptStatus::WaitUntil(wait_deadline);
-                    }
-                    if clock.now_millis() < wait_deadline {
-                        return ScriptStatus::WaitUntil(wait_deadline);
-                    }
-                    script.frames.last_mut().unwrap().wait_deadlines[0] = None;
+                    let duration_ms = (scratch_to_number(0.02_f64).max(0.0) * 1000.0).ceil() as u64; let wait_deadline = clock.now_millis().saturating_add(duration_ms);
                     script.frames.last_mut().unwrap().pc = 1;
-                    continue;
+                    return ScriptStatus::WaitUntil(wait_deadline);
                 },
                 1 => {
                     let scratch_change = scratch_to_number(-5.0_f64);
@@ -269,7 +233,7 @@ fn step_clone_start_script_sprite1_4(script: &mut ScriptState, state: &mut Scrat
     }
 }
 
-fn new_clone_start_script_sprite1_4_for(instance: usize) -> GeneratedScript { GeneratedScript::Script4(instance, ScriptState { frames: vec![ProcedureFrame { function: 0, pc: 0, repeat_counts: vec![0; 0], wait_deadlines: vec![None; 0], arguments: vec![], warp_mode: false }], warp_budget: WarpBudget::new(500), }) }
+fn new_clone_start_script_sprite1_4_for(instance: usize) -> GeneratedScript { GeneratedScript::Script4(instance, ScriptState { frames: vec![ProcedureFrame { function: 0, pc: 0, repeat_counts: vec![0; 0], arguments: vec![], warp_mode: false }], warp_budget: WarpBudget::new(500), }) }
 
 fn new_clone_start_script_sprite1_4(instance: usize) -> GeneratedScript { new_clone_start_script_sprite1_4_for(instance) }
 
@@ -294,18 +258,9 @@ fn step_clone_start_script_sprite1_5(script: &mut ScriptState, state: &mut Scrat
             },
             1 => match pc {
                 0 => {
-                    let wait_started = script.frames.last().unwrap().wait_deadlines[0].is_none();
-                    let wait_deadline = if let Some(deadline) = script.frames.last().unwrap().wait_deadlines[0] { deadline } else { let duration_ms = (scratch_to_number(0.02_f64).max(0.0) * 1000.0).ceil() as u64; let deadline = clock.now_millis().saturating_add(duration_ms); script.frames.last_mut().unwrap().wait_deadlines[0] = Some(deadline); deadline };
-                    if wait_started {
-                        script.frames.last_mut().unwrap().pc = 0;
-                        return ScriptStatus::WaitUntil(wait_deadline);
-                    }
-                    if clock.now_millis() < wait_deadline {
-                        return ScriptStatus::WaitUntil(wait_deadline);
-                    }
-                    script.frames.last_mut().unwrap().wait_deadlines[0] = None;
+                    let duration_ms = (scratch_to_number(0.02_f64).max(0.0) * 1000.0).ceil() as u64; let wait_deadline = clock.now_millis().saturating_add(duration_ms);
                     script.frames.last_mut().unwrap().pc = 1;
-                    continue;
+                    return ScriptStatus::WaitUntil(wait_deadline);
                 },
                 1 => {
                     let scratch_change = scratch_to_number(-5.0_f64);
@@ -322,7 +277,7 @@ fn step_clone_start_script_sprite1_5(script: &mut ScriptState, state: &mut Scrat
     }
 }
 
-fn new_clone_start_script_sprite1_5_for(instance: usize) -> GeneratedScript { GeneratedScript::Script5(instance, ScriptState { frames: vec![ProcedureFrame { function: 0, pc: 0, repeat_counts: vec![0; 0], wait_deadlines: vec![None; 0], arguments: vec![], warp_mode: false }], warp_budget: WarpBudget::new(500), }) }
+fn new_clone_start_script_sprite1_5_for(instance: usize) -> GeneratedScript { GeneratedScript::Script5(instance, ScriptState { frames: vec![ProcedureFrame { function: 0, pc: 0, repeat_counts: vec![0; 0], arguments: vec![], warp_mode: false }], warp_budget: WarpBudget::new(500), }) }
 
 fn new_clone_start_script_sprite1_5(instance: usize) -> GeneratedScript { new_clone_start_script_sprite1_5_for(instance) }
 
@@ -336,18 +291,9 @@ fn step_green_flag_script_sprite1_6(script: &mut ScriptState, state: &mut Scratc
         match function {
             0 => match pc {
                 0 => {
-                    let wait_started = script.frames.last().unwrap().wait_deadlines[0].is_none();
-                    let wait_deadline = if let Some(deadline) = script.frames.last().unwrap().wait_deadlines[0] { deadline } else { let duration_ms = (scratch_to_number(1.0_f64).max(0.0) * 1000.0).ceil() as u64; let deadline = clock.now_millis().saturating_add(duration_ms); script.frames.last_mut().unwrap().wait_deadlines[0] = Some(deadline); deadline };
-                    if wait_started {
-                        script.frames.last_mut().unwrap().pc = 0;
-                        return ScriptStatus::WaitUntil(wait_deadline);
-                    }
-                    if clock.now_millis() < wait_deadline {
-                        return ScriptStatus::WaitUntil(wait_deadline);
-                    }
-                    script.frames.last_mut().unwrap().wait_deadlines[0] = None;
+                    let duration_ms = (scratch_to_number(1.0_f64).max(0.0) * 1000.0).ceil() as u64; let wait_deadline = clock.now_millis().saturating_add(duration_ms);
                     script.frames.last_mut().unwrap().pc = 1;
-                    continue;
+                    return ScriptStatus::WaitUntil(wait_deadline);
                 },
                 1 => {
                     print_value!("say", state.list(0).contents());
@@ -358,18 +304,9 @@ fn step_green_flag_script_sprite1_6(script: &mut ScriptState, state: &mut Scratc
             },
             1 => match pc {
                 0 => {
-                    let wait_started = script.frames.last().unwrap().wait_deadlines[0].is_none();
-                    let wait_deadline = if let Some(deadline) = script.frames.last().unwrap().wait_deadlines[0] { deadline } else { let duration_ms = (scratch_to_number(0.02_f64).max(0.0) * 1000.0).ceil() as u64; let deadline = clock.now_millis().saturating_add(duration_ms); script.frames.last_mut().unwrap().wait_deadlines[0] = Some(deadline); deadline };
-                    if wait_started {
-                        script.frames.last_mut().unwrap().pc = 0;
-                        return ScriptStatus::WaitUntil(wait_deadline);
-                    }
-                    if clock.now_millis() < wait_deadline {
-                        return ScriptStatus::WaitUntil(wait_deadline);
-                    }
-                    script.frames.last_mut().unwrap().wait_deadlines[0] = None;
+                    let duration_ms = (scratch_to_number(0.02_f64).max(0.0) * 1000.0).ceil() as u64; let wait_deadline = clock.now_millis().saturating_add(duration_ms);
                     script.frames.last_mut().unwrap().pc = 1;
-                    continue;
+                    return ScriptStatus::WaitUntil(wait_deadline);
                 },
                 1 => {
                     let scratch_change = scratch_to_number(-5.0_f64);
@@ -386,7 +323,7 @@ fn step_green_flag_script_sprite1_6(script: &mut ScriptState, state: &mut Scratc
     }
 }
 
-fn new_green_flag_script_sprite1_6_for(instance: usize) -> GeneratedScript { GeneratedScript::Script6(instance, ScriptState { frames: vec![ProcedureFrame { function: 0, pc: 0, repeat_counts: vec![0; 0], wait_deadlines: vec![None; 1], arguments: vec![], warp_mode: false }], warp_budget: WarpBudget::new(500), }) }
+fn new_green_flag_script_sprite1_6_for(instance: usize) -> GeneratedScript { GeneratedScript::Script6(instance, ScriptState { frames: vec![ProcedureFrame { function: 0, pc: 0, repeat_counts: vec![0; 0], arguments: vec![], warp_mode: false }], warp_budget: WarpBudget::new(500), }) }
 
 fn new_green_flag_script_sprite1_6() -> GeneratedScript { new_green_flag_script_sprite1_6_for(1) }
 
@@ -411,18 +348,9 @@ fn step_clone_start_script_sprite1_7(script: &mut ScriptState, state: &mut Scrat
             },
             1 => match pc {
                 0 => {
-                    let wait_started = script.frames.last().unwrap().wait_deadlines[0].is_none();
-                    let wait_deadline = if let Some(deadline) = script.frames.last().unwrap().wait_deadlines[0] { deadline } else { let duration_ms = (scratch_to_number(0.02_f64).max(0.0) * 1000.0).ceil() as u64; let deadline = clock.now_millis().saturating_add(duration_ms); script.frames.last_mut().unwrap().wait_deadlines[0] = Some(deadline); deadline };
-                    if wait_started {
-                        script.frames.last_mut().unwrap().pc = 0;
-                        return ScriptStatus::WaitUntil(wait_deadline);
-                    }
-                    if clock.now_millis() < wait_deadline {
-                        return ScriptStatus::WaitUntil(wait_deadline);
-                    }
-                    script.frames.last_mut().unwrap().wait_deadlines[0] = None;
+                    let duration_ms = (scratch_to_number(0.02_f64).max(0.0) * 1000.0).ceil() as u64; let wait_deadline = clock.now_millis().saturating_add(duration_ms);
                     script.frames.last_mut().unwrap().pc = 1;
-                    continue;
+                    return ScriptStatus::WaitUntil(wait_deadline);
                 },
                 1 => {
                     let scratch_change = scratch_to_number(-5.0_f64);
@@ -439,7 +367,7 @@ fn step_clone_start_script_sprite1_7(script: &mut ScriptState, state: &mut Scrat
     }
 }
 
-fn new_clone_start_script_sprite1_7_for(instance: usize) -> GeneratedScript { GeneratedScript::Script7(instance, ScriptState { frames: vec![ProcedureFrame { function: 0, pc: 0, repeat_counts: vec![0; 0], wait_deadlines: vec![None; 0], arguments: vec![], warp_mode: false }], warp_budget: WarpBudget::new(500), }) }
+fn new_clone_start_script_sprite1_7_for(instance: usize) -> GeneratedScript { GeneratedScript::Script7(instance, ScriptState { frames: vec![ProcedureFrame { function: 0, pc: 0, repeat_counts: vec![0; 0], arguments: vec![], warp_mode: false }], warp_budget: WarpBudget::new(500), }) }
 
 fn new_clone_start_script_sprite1_7(instance: usize) -> GeneratedScript { new_clone_start_script_sprite1_7_for(instance) }
 
