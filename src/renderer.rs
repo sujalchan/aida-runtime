@@ -37,6 +37,7 @@ pub(crate) struct RendererApp {
     expected_variables: Vec<(String, ScratchValue)>,
     dev_mode: bool,
     test_mode: bool,
+    hd_pen_mode: bool,
     cursor_position: Option<PhysicalPosition<f64>>,
     dragging_variable: bool,
     dragging_slider: bool,
@@ -59,6 +60,7 @@ impl RendererApp {
         expected_variables: Vec<(String, ScratchValue)>,
         dev_mode: bool,
         test_mode: bool,
+        hd_pen_mode: bool,
     ) -> Self {
         Self {
             graphics: None,
@@ -73,6 +75,7 @@ impl RendererApp {
             expected_variables,
             dev_mode,
             test_mode,
+            hd_pen_mode,
             cursor_position: None,
             dragging_variable: false,
             dragging_slider: false,
@@ -217,7 +220,8 @@ impl ApplicationHandler<RendererEvent> for RendererApp {
             (*snapshot).clone(),
             &self.assets_dir,
         )) {
-            Ok(graphics) => {
+            Ok(mut graphics) => {
+                graphics.set_hd_pen_mode(self.hd_pen_mode);
                 self.graphics = Some(graphics);
                 self.sync_latest_snapshot();
             }
@@ -243,9 +247,8 @@ impl ApplicationHandler<RendererEvent> for RendererApp {
             WindowEvent::Resized(size) => {
                 if let Some(graphics) = self.graphics.as_mut() {
                     graphics.resize(size);
-                    graphics.window().request_redraw();
-                    self.redraw_pending = true;
                 }
+                self.sync_latest_snapshot();
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 if self.dev_mode

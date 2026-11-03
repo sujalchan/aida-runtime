@@ -28,6 +28,7 @@ struct RunOptions {
     graphical: bool,
     dev_mode: bool,
     test_mode: bool,
+    hd_pen_mode: bool,
     project: Option<PathBuf>,
     log_observables: bool,
     log_variables: bool,
@@ -39,7 +40,7 @@ fn main() {
         Ok(options) => options,
         Err(message) => {
             eprintln!(
-                "error: {message}\nusage: aida-runtime [--headless | --graphical --project <file.sb3>] [--test] [--dev] [--fps <number> | --turbo] [--max-ticks <count>] [--log-observables] [--log-variables] [--expect-variable <key>=<json-value>]"
+                "error: {message}\nusage: aida-runtime [--headless | --graphical --project <file.sb3>] [--test] [--dev] [--hd-pen] [--fps <number> | --turbo] [--max-ticks <count>] [--log-observables] [--log-variables] [--expect-variable <key>=<json-value>]"
             );
             std::process::exit(2);
         }
@@ -156,6 +157,7 @@ fn run_graphical(options: RunOptions) -> Result<(), String> {
         options.expected_variables,
         options.dev_mode,
         options.test_mode,
+        options.hd_pen_mode,
     );
     let loop_result = event_loop.run_app(&mut app);
     let app_error = app.take_error();
@@ -386,6 +388,7 @@ fn parse_run_options(args: impl IntoIterator<Item = String>) -> Result<RunOption
     let mut headless = false;
     let mut dev_mode = false;
     let mut test_mode = false;
+    let mut hd_pen_mode = false;
     let mut project = None;
     let mut log_observables = false;
     let mut log_variables = false;
@@ -443,6 +446,12 @@ fn parse_run_options(args: impl IntoIterator<Item = String>) -> Result<RunOption
                 graphical = true;
             }
             "--dev" => dev_mode = true,
+            "--hd-pen" => {
+                if hd_pen_mode {
+                    return Err("--hd-pen may only be specified once".to_owned());
+                }
+                hd_pen_mode = true;
+            }
             "--test" => {
                 if test_mode {
                     return Err("--test may only be specified once".to_owned());
@@ -486,12 +495,16 @@ fn parse_run_options(args: impl IntoIterator<Item = String>) -> Result<RunOption
     } else {
         PacingMode::from_fps(PacingMode::DEFAULT_FPS)?
     };
+    if hd_pen_mode && !graphical {
+        return Err("--hd-pen requires --graphical".to_owned());
+    }
     Ok(RunOptions {
         pacing,
         max_ticks,
         graphical,
         dev_mode,
         test_mode,
+        hd_pen_mode,
         project,
         log_observables,
         log_variables,

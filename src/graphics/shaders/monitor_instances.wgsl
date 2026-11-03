@@ -34,6 +34,7 @@ struct Out {
     }
     out.shape.x *= transform.z;
     out.shape.y *= transform.z;
+    out.shape.w *= transform.z;
     return out;
 }
 fn rounded_box(p: vec2<f32>, size: vec2<f32>, radius: f32) -> f32 {
@@ -49,13 +50,14 @@ fn tail_curve(t: f32, start: vec2<f32>, control_a: vec2<f32>, control_b: vec2<f3
         + 3.0 * u * t * t * control_b
         + t * t * t * tip;
 }
-fn speech_tail_distance(p: vec2<f32>, body_size: vec2<f32>) -> f32 {
+fn speech_tail_distance(p: vec2<f32>, body_size: vec2<f32>, anchor_x: f32, direction: f32) -> f32 {
     let tail_scale = 0.55;
-    let attachment = vec2(0.0, body_size.y - 4.0);
-    let start = attachment + vec2(24.0, -1.0) * tail_scale;
-    let tip = attachment + vec2(5.0, 22.0) * tail_scale;
-    let control_a = start + vec2(-4.0, 8.0) * tail_scale;
-    let control_b = tip + vec2(8.0, -7.0) * tail_scale;
+    let attachment = vec2(anchor_x, body_size.y - 4.0);
+    let start = attachment + vec2(0.0, -1.0) * tail_scale;
+    let tip = attachment + vec2(12.0 * direction, 22.0) * tail_scale;
+    let tangent = vec2(4.0 * direction, 8.0) * tail_scale;
+    let control_a = start + tangent;
+    let control_b = tip - tangent;
     var distance = 100000.0;
     for (var index = 0u; index < 32u; index += 1u) {
         let t0 = f32(index) / 32.0;
@@ -66,7 +68,7 @@ fn speech_tail_distance(p: vec2<f32>, body_size: vec2<f32>) -> f32 {
         let projection = clamp(dot(p - a, segment) / max(dot(segment, segment), 0.0001), 0.0, 1.0);
         let t = mix(t0, t1, projection);
         let center = a + segment * projection;
-        let radius = (2.6 + 8.4 * pow(max(1.0 - t, 0.0), 1.08)) * tail_scale;
+        let radius = (3.4 + 8.6 * pow(max(1.0 - t, 0.0), 1.08)) * tail_scale;
         distance = min(distance, length(p - center) - radius);
     }
     return distance;
@@ -78,9 +80,10 @@ fn smooth_union(a: f32, b: f32, radius: f32) -> f32 {
 @fragment fn fs_main(input: Out) -> @location(0) vec4<f32> {
     var d = rounded_box(input.local, input.shape.xy, input.params.x);
     if (input.shape.z > 0.5) {
+        let direction = select(-1.0, 1.0, input.shape.z > 1.5);
         d = smooth_union(
             d,
-            speech_tail_distance(input.local, input.shape.xy),
+            speech_tail_distance(input.local, input.shape.xy, input.shape.w, direction),
             3.0,
         );
     }

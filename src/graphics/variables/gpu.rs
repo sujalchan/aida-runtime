@@ -40,10 +40,12 @@ const BUBBLE_LINE_HEIGHT: f32 = 10.5;
 const BUBBLE_FONT_SIZE: f32 = 9.0;
 const BUBBLE_MIN_WIDTH: f32 = 56.0;
 const BUBBLE_EDGE: f32 = 8.0;
+const BUBBLE_BODY_CORNER_RADIUS: f32 = 17.0;
 const BUBBLE_DARK: [u8; 4] = [82, 91, 113, 255];
 const BUBBLE_BORDER: [u8; 4] = [215, 215, 215, 255];
 const BUBBLE_BORDER_WIDTH: f32 = 1.1;
 const BUBBLE_SPEECH_TAIL_EXTENT: f32 = 12.5;
+const BUBBLE_TAIL_CORNER_CLEARANCE: f32 = 2.0;
 
 impl VariableLayer {
     pub(crate) fn build_gpu_bubble_instances(
@@ -56,7 +58,7 @@ impl VariableLayer {
         for input in bubbles {
             let sprite_x = SCRATCH_WIDTH as f32 * 0.5 + input.x;
             let sprite_y = SCRATCH_HEIGHT as f32 * 0.5 - input.y;
-            let sprite_side_offset = input.sprite_width * 0.38 + 8.0;
+            let sprite_side_offset = input.sprite_width * 0.38 + 2.0;
             let right_x = sprite_x + sprite_side_offset;
             let left_edge = sprite_x - sprite_side_offset;
             let right_room = SCRATCH_WIDTH as f32 - margin - right_x;
@@ -82,8 +84,8 @@ impl VariableLayer {
                 left_edge - width
             };
             let left = desired_x.clamp(margin, SCRATCH_WIDTH as f32 - margin - width);
-            let sprite_top = sprite_y - input.sprite_height * 0.36;
-            let desired_top = sprite_top - height - 15.0;
+            let sprite_top = sprite_y - input.sprite_height * 0.5;
+            let desired_top = sprite_top - height + 8.0;
             let lower_extent = if input.bubble.kind == BubbleKind::Say {
                 BUBBLE_SPEECH_TAIL_EXTENT
             } else {
@@ -93,34 +95,22 @@ impl VariableLayer {
                 margin,
                 SCRATCH_HEIGHT as f32 - margin - height - lower_extent,
             );
-            let body_right = left + width;
-            let target_x = if body_right <= sprite_x {
-                (sprite_x - input.sprite_width * 0.44).max(body_right + 3.0)
-            } else if left >= sprite_x {
-                (sprite_x + input.sprite_width * 0.44).min(left - 3.0)
-            } else if sprite_x - left < body_right - sprite_x {
-                left - 3.0
-            } else {
-                body_right + 3.0
-            };
-            let target = [
-                target_x.clamp(margin, SCRATCH_WIDTH as f32 - margin),
-                (sprite_y - input.sprite_height * 0.24)
-                    .clamp(margin, SCRATCH_HEIGHT as f32 - margin),
-            ];
             let bubble_id = batch.transforms.len() as u32;
             batch.transforms.push([left, top, 1.0, 0.0]);
             let fill = linear_rgba([255, 255, 255, 255]);
             let border = linear_rgba(BUBBLE_BORDER);
             if input.bubble.kind == BubbleKind::Think {
-                let thought_base = [left + width * 0.5, top + height];
-                let direction_x = if target[0] < thought_base[0] {
+                let thought_radius = 4.6_f32;
+                let safe_offset = BUBBLE_BODY_CORNER_RADIUS + thought_radius;
+                let anchor_x = (sprite_x - left).clamp(safe_offset, width - safe_offset);
+                let thought_base = [left + anchor_x, top + height];
+                let direction_x = if sprite_x < left + width * 0.5 {
                     -1.0
                 } else {
                     1.0
                 };
                 for (center, radius) in [
-                    (thought_base, 4.6_f32),
+                    (thought_base, thought_radius),
                     (
                         [thought_base[0] + direction_x * 7.5, thought_base[1] + 4.0],
                         3.4,
@@ -156,7 +146,14 @@ impl VariableLayer {
             );
             if input.bubble.kind == BubbleKind::Say {
                 let body = batch.shapes.last_mut().expect("speech bubble body");
-                body.shape = [width, height, 1.0, 0.0];
+                let safe_offset = BUBBLE_BODY_CORNER_RADIUS + BUBBLE_TAIL_CORNER_CLEARANCE;
+                let anchor_x = (sprite_x - left).clamp(safe_offset, width - safe_offset);
+                let direction = if sprite_x < left + width * 0.5 {
+                    1.0
+                } else {
+                    2.0
+                };
+                body.shape = [width, height, direction, anchor_x];
             }
 
             for (line_index, line) in lines.iter().enumerate() {
@@ -1023,7 +1020,8 @@ fn push_text_mesh(
 mod tests {
     use super::{
         BUBBLE_BORDER, BUBBLE_BORDER_WIDTH, BUBBLE_FONT_SIZE, BUBBLE_SPEECH_TAIL_EXTENT,
-        BubbleRenderInput, VariableLayer, linear_rgba, scaled_px_bounds,
+        BUBBLE_BODY_CORNER_RADIUS, BUBBLE_TAIL_CORNER_CLEARANCE, BubbleRenderInput, SCRATCH_WIDTH,
+        VariableLayer, linear_rgba, scaled_px_bounds,
     };
     use crate::runtime::{BubbleKind, BubbleSnapshot};
 
@@ -1085,6 +1083,11 @@ mod tests {
         assert_eq!(say_body.border, linear_rgba(BUBBLE_BORDER));
         assert_eq!(say_body.shape[2], 1.0);
         assert_eq!(say_body.rect[3], say_body.shape[1] + BUBBLE_SPEECH_TAIL_EXTENT);
+        let say_min_anchor = BUBBLE_BODY_CORNER_RADIUS + BUBBLE_TAIL_CORNER_CLEARANCE;
+        let expected_say_anchor = (SCRATCH_WIDTH as f32 * 0.5 - 100.0
+            - batch.transforms[0][0])
+            .clamp(say_min_anchor, say_body.shape[0] - say_min_anchor);
+        assert!((say_body.shape[3] - expected_say_anchor).abs() < 0.01);
         assert_eq!(batch.shapes.len(), 5);
         assert!(batch.shapes[0].rect[3] > 100.0);
         assert!(say_body.shape[1] <= 344.0);
@@ -1097,7 +1100,13 @@ mod tests {
         assert_eq!(batch.shapes[4].rect[0..2], [0.0, 0.0]);
         let thought_body = batch.shapes[4].rect;
         let largest_circle = batch.shapes[1].rect;
-        assert!((largest_circle[0] + largest_circle[2] * 0.5 - thought_body[2] * 0.5).abs() < 0.01);
+        let thought_min_anchor = BUBBLE_BODY_CORNER_RADIUS + 4.6;
+        let expected_thought_anchor = (SCRATCH_WIDTH as f32 * 0.5 + 40.0
+            - batch.transforms[1][0])
+            .clamp(thought_min_anchor, thought_body[2] - thought_min_anchor);
+        assert!(
+            (largest_circle[0] + largest_circle[2] * 0.5 - expected_thought_anchor).abs() < 0.01
+        );
         assert!((largest_circle[1] + largest_circle[3] * 0.5 - thought_body[3]).abs() < 0.01);
         let middle_circle = batch.shapes[2].rect;
         let smallest_circle = batch.shapes[3].rect;
@@ -1124,5 +1133,41 @@ mod tests {
         assert!(batch.glyphs.iter().any(|glyph| glyph.monitor_id == 0));
         assert!(batch.glyphs.iter().any(|glyph| glyph.monitor_id == 1));
         assert!((batch.glyphs[0].scale - BUBBLE_FONT_SIZE / 19.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn speech_tail_mirrors_toward_the_owning_sprite() {
+        let mut layer = VariableLayer::new(Vec::new()).unwrap();
+        let batch = layer
+            .build_gpu_bubble_instances(&[
+                BubbleRenderInput {
+                    bubble: BubbleSnapshot {
+                        kind: BubbleKind::Say,
+                        text: "left".to_owned(),
+                    },
+                    x: -100.0,
+                    y: 0.0,
+                    sprite_width: 80.0,
+                    sprite_height: 100.0,
+                },
+                BubbleRenderInput {
+                    bubble: BubbleSnapshot {
+                        kind: BubbleKind::Say,
+                        text: "right".to_owned(),
+                    },
+                    x: 160.0,
+                    y: 0.0,
+                    sprite_width: 80.0,
+                    sprite_height: 100.0,
+                },
+            ])
+            .unwrap();
+
+        assert_eq!(batch.shapes.len(), 2);
+        assert_eq!(batch.shapes[0].shape[2], 1.0);
+        assert_eq!(batch.shapes[1].shape[2], 2.0);
+        for index in 0..2 {
+            assert!((batch.transforms[index][1] + batch.shapes[index].shape[1] - 138.0).abs() < 0.01);
+        }
     }
 }

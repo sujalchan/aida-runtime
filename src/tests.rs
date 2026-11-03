@@ -77,12 +77,14 @@ fn cli_accepts_a_positive_scheduler_tick_limit() {
 fn cli_defaults_to_headless_and_accepts_observation_options() {
     let default = parse_run_options(std::iter::empty()).unwrap();
     assert!(!default.graphical);
+    assert!(!default.hd_pen_mode);
     assert!(default.project.is_none());
 
     let graphical = parse_run_options([
         "--graphical".to_owned(),
         "--project".to_owned(),
         "project.sb3".to_owned(),
+        "--hd-pen".to_owned(),
         "--log-observables".to_owned(),
         "--log-variables".to_owned(),
         "--expect-variable".to_owned(),
@@ -90,6 +92,7 @@ fn cli_defaults_to_headless_and_accepts_observation_options() {
     ])
     .unwrap();
     assert!(graphical.graphical);
+    assert!(graphical.hd_pen_mode);
     assert!(graphical.log_observables);
     assert!(graphical.log_variables);
     assert_eq!(
@@ -101,6 +104,20 @@ fn cli_defaults_to_headless_and_accepts_observation_options() {
         ScratchValue::Number(42.0)
     );
     assert!(parse_run_options(["--graphical".to_owned(), "--headless".to_owned()]).is_err());
+}
+
+#[test]
+fn cli_requires_graphical_mode_for_hd_pen_and_rejects_duplicates() {
+    assert!(parse_run_options(["--hd-pen".to_owned()]).is_err());
+    assert!(
+        parse_run_options([
+            "--graphical".to_owned(),
+            "--hd-pen".to_owned(),
+            "--hd-pen".to_owned(),
+        ])
+        .unwrap_err()
+        .contains("may only be specified once")
+    );
 }
 
 #[test]

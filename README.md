@@ -105,7 +105,13 @@ Use the root launcher to generate and run the same project graphically:
 ```sh
 ./run.sh path/to/project.sb3 --graphical
 ./run.sh path/to/project.sb3 --graphical --turbo
+./run.sh path/to/project.sb3 --graphical --hd-pen
 ```
+
+`--hd-pen` renders the pen layer at the stage viewport's physical resolution;
+it requires `--graphical`. Speech bubbles and variable monitors share the same
+stage-space geometry and viewport scaling, and bubble glyphs are rebuilt when
+the window is resized so their proportions and sharpness track the viewport.
 
 Graphical runs keep the final frame open after scripts finish; close the window
 to exit. Add `--test` when a graphical run should close automatically after
