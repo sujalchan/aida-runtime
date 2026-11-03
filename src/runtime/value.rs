@@ -471,6 +471,16 @@ impl ScratchState {
             .map(|instance| instance.target)
     }
 
+    pub fn instances_for_target(&self, target: usize) -> Vec<usize> {
+        self.instances
+            .iter()
+            .enumerate()
+            .filter_map(|(id, instance)| {
+                (instance.target == target && instance.alive).then_some(id)
+            })
+            .collect()
+    }
+
     pub fn delete_current_clone(&mut self) -> bool {
         let instance = &mut self.instances[self.current_instance];
         if instance.original {

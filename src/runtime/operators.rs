@@ -36,6 +36,17 @@ pub fn scratch_to_number(value: impl ScratchInput) -> f64 {
     to_number(value.scratch_view())
 }
 
+// preserve scratch's nan-to-zero conversion for already numeric operands.
+#[inline(always)]
+pub fn scratch_number_operand(value: f64) -> f64 {
+    if value.is_nan() { 0.0 } else { value }
+}
+
+/// convert a Scratch value to the text used by string menus and broadcasts.
+pub fn scratch_string(value: impl ScratchInput) -> String {
+    to_text(value.scratch_view()).into_owned()
+}
+
 fn scratch_trig_round(value: f64) -> f64 {
     if value == 0.0 {
         return 0.0;

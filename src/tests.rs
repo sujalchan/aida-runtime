@@ -3,7 +3,7 @@ use std::{cell::Cell, rc::Rc};
 use crate::{
     parse_run_options,
     program::GeneratedProgram,
-    runtime::{Clock, PacingMechanism, PacingMode, SchedulerStatus, ScratchValue, TickPacer},
+    runtime::{Clock, PacingMechanism, PacingMode, SchedulerStatus, ScratchValue},
 };
 
 #[derive(Clone)]
@@ -69,39 +69,51 @@ fn cli_accepts_a_positive_scheduler_tick_limit() {
 }
 
 #[test]
-fn clone_with_variables_fixture_runs_and_updates_shared_stage_list() {
+fn broadcast_fixture_restarts_the_receiver_and_waits_for_the_restarted_run() {
     let clock = TestClock(Rc::new(Cell::new(0)));
     let mut program = GeneratedProgram::new_with_clock(Box::new(clock.clone()));
-    let mut pacer = TickPacer::new(PacingMode::Turbo, clock.clone());
-    for _ in 0..100 {
-        let tick_started = pacer.begin_tick();
-        match program.advance() {
-            SchedulerStatus::Progressed => pacer.finish_tick(tick_started),
-            SchedulerStatus::WaitingUntil(deadline) => {
-                pacer.reset_schedule();
-                let delay = program.duration_until(deadline);
-                pacer.wait_for_scheduler(delay);
-            }
-            SchedulerStatus::Complete => break,
-        }
-    }
-
-    assert!(program.is_complete());
-    assert_eq!(
-        program
-            .state()
-            .list_by_id(":YULw@c(j{pVxkwY@MM$")
-            .unwrap()
-            .contents(),
-        "9 4 11 12 7"
-    );
+    assert_eq!(program.advance(), SchedulerStatus::Progressed);
     assert_eq!(
         program
             .state()
             .get_by_id("`jEk@4|i[#Fk?(8x)AV.-my variable"),
-        Some(&ScratchValue::Number(7.0))
+        Some(&ScratchValue::Text("0".to_owned()))
     );
-    assert_eq!(program.state().clone_count(), 1);
+    assert_eq!(program.advance(), SchedulerStatus::Progressed);
+    assert_eq!(
+        program
+            .state()
+            .get_by_id("`jEk@4|i[#Fk?(8x)AV.-my variable"),
+        Some(&ScratchValue::Text("0".to_owned()))
+    );
+
+    let deadline = loop {
+        match program.advance() {
+            SchedulerStatus::Progressed => {}
+            SchedulerStatus::WaitingUntil(deadline) => break deadline,
+            SchedulerStatus::Complete => panic!("broadcast fixture completed before message2"),
+        }
+    };
+    clock.0.set(deadline);
+    assert_eq!(program.advance(), SchedulerStatus::Progressed);
+    assert_eq!(program.advance(), SchedulerStatus::Progressed);
+    assert_eq!(
+        program
+            .state()
+            .get_by_id("`jEk@4|i[#Fk?(8x)AV.-my variable"),
+        Some(&ScratchValue::Number(1.0))
+    );
+
+    for _ in 0..20 {
+        assert_eq!(program.advance(), SchedulerStatus::Progressed);
+    }
+    assert_eq!(
+        program
+            .state()
+            .get_by_id("`jEk@4|i[#Fk?(8x)AV.-my variable"),
+        Some(&ScratchValue::Number(96.0))
+    );
+    assert_eq!(program.active_script_count(), 1);
 }
 
 #[test]

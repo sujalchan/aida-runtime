@@ -84,6 +84,7 @@ pub enum ScriptStatus {
     Yield,
     WaitUntil(u64),
     Complete,
+    Broadcast { message: usize, wait: bool },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,11 +102,20 @@ pub trait ResumableScript {
     fn target_instance(&self) -> usize {
         0
     }
+    fn broadcast_receiver(&self) -> Option<(usize, usize, usize)> {
+        None
+    }
+    fn restart_for_broadcast(&mut self) {}
 }
 
 pub struct ScriptScheduler<S> {
     scripts: Vec<S>,
     wake_at: Vec<Option<u64>>,
+    script_ids: Vec<u64>,
+    joins: Vec<Option<Vec<u64>>>,
+    has_waiting_senders: bool,
+    next_script_id: u64,
+    pending_broadcast: Option<(u64, usize, bool)>,
     next: usize,
     clock: Box<dyn Clock>,
 }
@@ -116,8 +126,14 @@ impl<S: ResumableScript> ScriptScheduler<S> {
     }
 
     pub fn with_clock(scripts: Vec<S>, clock: Box<dyn Clock>) -> Self {
+        let script_count = scripts.len();
         Self {
             wake_at: vec![None; scripts.len()],
+            script_ids: (0..script_count as u64).collect(),
+            joins: vec![None; script_count],
+            has_waiting_senders: false,
+            next_script_id: script_count as u64,
+            pending_broadcast: None,
             scripts,
             next: 0,
             clock,
@@ -152,11 +168,25 @@ impl<S: ResumableScript> ScriptScheduler<S> {
         let mut now = None;
         for offset in 0..self.scripts.len() {
             let index = (self.next + offset) % self.scripts.len();
+            let join_finished = if self.has_waiting_senders {
+                if let Some(waiting) = &self.joins[index] {
+                    let finished = waiting.iter().all(|id| !self.script_ids.contains(id));
+                    if finished {
+                        self.joins[index] = None;
+                        self.has_waiting_senders = self.joins.iter().any(Option::is_some);
+                    }
+                    finished
+                } else {
+                    true
+                }
+            } else {
+                true
+            };
             let is_runnable = match self.wake_at[index] {
-                None => true,
+                None => join_finished,
                 Some(deadline) => deadline <= *now.get_or_insert_with(|| self.clock.now_millis()),
             };
-            if is_runnable {
+            if is_runnable && join_finished {
                 self.next = index;
                 state.set_current_instance(self.scripts[index].target_instance());
                 let status = self.scripts[index].step(state, self.clock.as_ref());
@@ -172,11 +202,19 @@ impl<S: ResumableScript> ScriptScheduler<S> {
                     ScriptStatus::Complete => {
                         self.scripts.remove(index);
                         self.wake_at.remove(index);
+                        self.script_ids.remove(index);
+                        self.joins.remove(index);
+                        self.has_waiting_senders = self.joins.iter().any(Option::is_some);
                         self.next = if self.scripts.is_empty() {
                             0
                         } else {
                             index % self.scripts.len()
                         };
+                    }
+                    ScriptStatus::Broadcast { message, wait } => {
+                        self.wake_at[index] = None;
+                        self.pending_broadcast = Some((self.script_ids[index], message, wait));
+                        self.next = (index + 1) % self.scripts.len();
                     }
                 }
                 return SchedulerStatus::Progressed;
@@ -187,6 +225,11 @@ impl<S: ResumableScript> ScriptScheduler<S> {
 
     /// stop active scripts and start a fresh matching event set.
     pub fn restart(&mut self, scripts: Vec<S>) {
+        self.next_script_id = scripts.len() as u64;
+        self.script_ids = (0..scripts.len() as u64).collect();
+        self.joins = vec![None; scripts.len()];
+        self.has_waiting_senders = false;
+        self.pending_broadcast = None;
         self.scripts = scripts;
         self.wake_at = vec![None; self.scripts.len()];
         self.next = 0;
@@ -200,6 +243,9 @@ impl<S: ResumableScript> ScriptScheduler<S> {
         for script in scripts {
             self.scripts.push(script);
             self.wake_at.push(None);
+            self.script_ids.push(self.next_script_id);
+            self.next_script_id += 1;
+            self.joins.push(None);
         }
     }
 
@@ -209,6 +255,8 @@ impl<S: ResumableScript> ScriptScheduler<S> {
             if self.scripts[index].target_instance() == target_instance {
                 self.scripts.remove(index);
                 self.wake_at.remove(index);
+                self.script_ids.remove(index);
+                self.joins.remove(index);
                 if index < self.next {
                     self.next -= 1;
                 }
@@ -221,6 +269,50 @@ impl<S: ResumableScript> ScriptScheduler<S> {
         } else {
             self.next %= self.scripts.len();
         }
+        self.has_waiting_senders = self.joins.iter().any(Option::is_some);
+    }
+
+    /// start matching receivers and return identities for broadcast-and-wait.
+    pub fn broadcast(&mut self, sender: u64, candidates: Vec<S>, wait: bool) {
+        let mut receiver_ids = Vec::new();
+        for candidate in candidates {
+            let Some(key) = candidate.broadcast_receiver() else {
+                continue;
+            };
+            let existing = self
+                .scripts
+                .iter()
+                .position(|script| script.broadcast_receiver() == Some(key));
+            let id = if let Some(index) = existing {
+                self.scripts[index].restart_for_broadcast();
+                self.wake_at[index] = None;
+                self.joins[index] = None;
+                let restarted_id = self.next_script_id;
+                self.next_script_id += 1;
+                self.script_ids[index] = restarted_id;
+                restarted_id
+            } else {
+                let id = self.next_script_id;
+                self.next_script_id += 1;
+                self.scripts.push(candidate);
+                self.wake_at.push(None);
+                self.script_ids.push(id);
+                self.joins.push(None);
+                id
+            };
+            receiver_ids.push(id);
+        }
+        if wait && !receiver_ids.is_empty() && !receiver_ids.contains(&sender) {
+            if let Some(index) = self.script_ids.iter().position(|id| *id == sender) {
+                self.joins[index] = Some(receiver_ids);
+                self.has_waiting_senders = true;
+            }
+        }
+        self.has_waiting_senders = self.joins.iter().any(Option::is_some);
+    }
+
+    pub fn take_broadcast(&mut self) -> Option<(u64, usize, bool)> {
+        self.pending_broadcast.take()
     }
 
     pub fn duration_until(&self, deadline: u64) -> std::time::Duration {
@@ -1231,5 +1323,262 @@ mod tests {
         state.set_current_instance(second);
         assert_eq!(state.get(1), &ScratchValue::Number(115.0));
         assert_eq!(state.get(0), &ScratchValue::Number(102.0));
+    }
+
+    enum BroadcastTestScript {
+        Sender { pc: u8 },
+        Receiver { hat: usize, instance: usize, pc: u8 },
+        Rebroadcast { pc: u8 },
+    }
+
+    impl ResumableScript for BroadcastTestScript {
+        fn step(&mut self, state: &mut ScratchState, clock: &dyn Clock) -> ScriptStatus {
+            match self {
+                Self::Sender { pc } if *pc == 0 => {
+                    *pc = 1;
+                    ScriptStatus::Broadcast {
+                        message: 1,
+                        wait: true,
+                    }
+                }
+                Self::Sender { pc } => {
+                    assert_eq!(*pc, 1);
+                    state.set(2, true.into());
+                    ScriptStatus::Complete
+                }
+                Self::Receiver { pc, .. } if *pc == 0 => {
+                    *pc = 1;
+                    ScriptStatus::WaitUntil(clock.now_millis().saturating_add(5))
+                }
+                Self::Receiver { instance, pc, .. } => {
+                    assert_eq!(*pc, 1);
+                    state.set_current_instance(*instance);
+                    increment(state, 0);
+                    increment(state, 1);
+                    ScriptStatus::Complete
+                }
+                Self::Rebroadcast { pc } if *pc == 0 => {
+                    *pc = 1;
+                    ScriptStatus::Yield
+                }
+                Self::Rebroadcast { pc } if *pc == 1 => {
+                    *pc = 2;
+                    ScriptStatus::Broadcast {
+                        message: 1,
+                        wait: false,
+                    }
+                }
+                Self::Rebroadcast { .. } => ScriptStatus::Complete,
+            }
+        }
+
+        fn target_instance(&self) -> usize {
+            match self {
+                Self::Sender { .. } => 0,
+                Self::Receiver { instance, .. } => *instance,
+                Self::Rebroadcast { .. } => 0,
+            }
+        }
+
+        fn broadcast_receiver(&self) -> Option<(usize, usize, usize)> {
+            match self {
+                Self::Receiver { hat, instance, .. } => Some((1, *hat, *instance)),
+                Self::Sender { .. } => None,
+                Self::Rebroadcast { .. } => None,
+            }
+        }
+
+        fn restart_for_broadcast(&mut self) {
+            if let Self::Receiver { pc, .. } = self {
+                *pc = 0;
+            }
+        }
+    }
+
+    #[test]
+    fn broadcast_and_wait_joins_multiple_waiting_receivers_on_original_and_clone() {
+        let mut state = ScratchState::with_metadata(
+            vec![0.0.into(), 0.0.into(), false.into()],
+            vec![
+                ScratchVariableMetadata::for_target("shared", "shared", "Stage", 0, true),
+                ScratchVariableMetadata::for_target("local", "local", "Sprite1", 1, false),
+                ScratchVariableMetadata::for_target("done", "done", "Stage", 0, true),
+            ],
+        );
+        state.register_target(0, "Stage", true);
+        state.register_target(1, "Sprite1", false);
+        let original = state.original_instance(1).unwrap();
+        let clone = state.create_clone(original, 1, 300).unwrap();
+        let clock = ManualClock::new();
+        let mut scheduler = ScriptScheduler::with_clock(
+            vec![BroadcastTestScript::Sender { pc: 0 }],
+            Box::new(clock.clone()),
+        );
+
+        assert_eq!(
+            scheduler.advance(&mut state),
+            super::SchedulerStatus::Progressed
+        );
+        let (sender, message, wait) = scheduler.take_broadcast().unwrap();
+        assert_eq!(message, 1);
+        scheduler.broadcast(
+            sender,
+            vec![
+                BroadcastTestScript::Receiver {
+                    hat: 1,
+                    instance: original,
+                    pc: 0,
+                },
+                BroadcastTestScript::Receiver {
+                    hat: 1,
+                    instance: clone,
+                    pc: 0,
+                },
+            ],
+            wait,
+        );
+        assert_eq!(
+            scheduler.advance(&mut state),
+            super::SchedulerStatus::Progressed
+        );
+        assert_eq!(
+            scheduler.advance(&mut state),
+            super::SchedulerStatus::Progressed
+        );
+        assert_eq!(
+            scheduler.advance(&mut state),
+            super::SchedulerStatus::WaitingUntil(5)
+        );
+
+        clock.set(5);
+        while scheduler.advance(&mut state) != super::SchedulerStatus::Complete {}
+        assert_eq!(state.get(0), &ScratchValue::Number(2.0));
+        assert_eq!(state.get(2), &ScratchValue::Boolean(true));
+        state.set_current_instance(original);
+        assert_eq!(state.get(1), &ScratchValue::Number(1.0));
+        state.set_current_instance(clone);
+        assert_eq!(state.get(1), &ScratchValue::Number(1.0));
+    }
+
+    #[test]
+    fn broadcast_and_wait_with_no_receivers_does_not_suspend_the_sender() {
+        let mut state = ScratchState::new(vec![0.0.into(), 0.0.into(), false.into()]);
+        let mut scheduler = ScriptScheduler::new(vec![BroadcastTestScript::Sender { pc: 0 }]);
+        assert_eq!(
+            scheduler.advance(&mut state),
+            super::SchedulerStatus::Progressed
+        );
+        let (sender, _, wait) = scheduler.take_broadcast().unwrap();
+        scheduler.broadcast(sender, Vec::new(), wait);
+        assert_eq!(
+            scheduler.advance(&mut state),
+            super::SchedulerStatus::Progressed
+        );
+        assert_eq!(
+            scheduler.advance(&mut state),
+            super::SchedulerStatus::Complete
+        );
+    }
+
+    #[test]
+    fn deleting_a_receiving_clone_releases_its_waiting_sender() {
+        let mut state = ScratchState::with_metadata(
+            vec![0.0.into(), 0.0.into(), false.into()],
+            vec![
+                ScratchVariableMetadata::for_target("shared", "shared", "Stage", 0, true),
+                ScratchVariableMetadata::for_target("local", "local", "Sprite1", 1, false),
+                ScratchVariableMetadata::for_target("done", "done", "Stage", 0, true),
+            ],
+        );
+        state.register_target(0, "Stage", true);
+        state.register_target(1, "Sprite1", false);
+        let original = state.original_instance(1).unwrap();
+        let clone = state.create_clone(original, 1, 300).unwrap();
+        let mut scheduler = ScriptScheduler::new(vec![BroadcastTestScript::Sender { pc: 0 }]);
+
+        assert_eq!(
+            scheduler.advance(&mut state),
+            super::SchedulerStatus::Progressed
+        );
+        let (sender, _, wait) = scheduler.take_broadcast().unwrap();
+        scheduler.broadcast(
+            sender,
+            vec![BroadcastTestScript::Receiver {
+                hat: 1,
+                instance: clone,
+                pc: 0,
+            }],
+            wait,
+        );
+        scheduler.remove_target_scripts(clone);
+        assert_eq!(
+            scheduler.advance(&mut state),
+            super::SchedulerStatus::Progressed
+        );
+        assert_eq!(
+            scheduler.advance(&mut state),
+            super::SchedulerStatus::Complete
+        );
+    }
+
+    #[test]
+    fn restarting_a_receiver_releases_waiters_holding_its_previous_thread() {
+        let mut state = ScratchState::new(vec![0.0.into(), 0.0.into(), false.into()]);
+        let mut scheduler = ScriptScheduler::with_clock(
+            vec![
+                BroadcastTestScript::Sender { pc: 0 },
+                BroadcastTestScript::Receiver {
+                    hat: 1,
+                    instance: 0,
+                    pc: 0,
+                },
+                BroadcastTestScript::Rebroadcast { pc: 0 },
+            ],
+            Box::new(ManualClock::new()),
+        );
+
+        assert_eq!(
+            scheduler.advance(&mut state),
+            super::SchedulerStatus::Progressed
+        );
+        let (sender, _, wait) = scheduler.take_broadcast().unwrap();
+        scheduler.broadcast(
+            sender,
+            vec![BroadcastTestScript::Receiver {
+                hat: 1,
+                instance: 0,
+                pc: 0,
+            }],
+            wait,
+        );
+        assert_eq!(
+            scheduler.advance(&mut state),
+            super::SchedulerStatus::Progressed
+        );
+        assert_eq!(
+            scheduler.advance(&mut state),
+            super::SchedulerStatus::Progressed
+        );
+        assert_eq!(
+            scheduler.advance(&mut state),
+            super::SchedulerStatus::Progressed
+        );
+        let (rebroadcaster, _, wait) = scheduler.take_broadcast().unwrap();
+        assert!(!wait);
+        scheduler.broadcast(
+            rebroadcaster,
+            vec![BroadcastTestScript::Receiver {
+                hat: 1,
+                instance: 0,
+                pc: 0,
+            }],
+            false,
+        );
+
+        assert_eq!(
+            scheduler.advance(&mut state),
+            super::SchedulerStatus::Progressed
+        );
+        assert_eq!(state.get(2), &ScratchValue::Boolean(true));
     }
 }
