@@ -24,8 +24,8 @@ pub use tick::run_tick;
 pub use value::{
     BubbleKind, BubbleSnapshot, LayerSnapshot, ListSnapshot, ObservableEvent, RuntimeInputEvent,
     RuntimeSnapshot, ScratchInput, ScratchListMetadata, ScratchState, ScratchValue,
-    ScratchValueView, ScratchVariableMetadata, VariableSnapshot, list_snapshot_key,
-    variable_snapshot_key,
+    ScratchValueView, ScratchVariableMetadata, SpriteFenceGeometry, VariableSnapshot,
+    list_snapshot_key, variable_snapshot_key,
 };
 
 #[derive(Clone)]

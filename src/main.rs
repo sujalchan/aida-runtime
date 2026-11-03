@@ -59,6 +59,13 @@ fn main() {
 
 fn run_headless(options: RunOptions) -> Result<(), String> {
     let mut program = program::GeneratedProgram::new();
+    if let Some(project_path) = options.project.as_ref() {
+        let loaded = load_sb3(project_path, "resources/projects")
+            .map_err(|error| format!("failed to load project: {error}"))?;
+        for (target, geometry) in graphics::fence_geometries(&loaded.project, &loaded.assets_dir) {
+            program.set_target_fence_geometry(target, geometry);
+        }
+    }
     let (log_sender, log_receiver) = if options.log_observables {
         let (sender, receiver) = mpsc::channel();
         (Some(sender), Some(receiver))
@@ -87,6 +94,7 @@ fn run_graphical(options: RunOptions) -> Result<(), String> {
         .ok_or_else(|| "--graphical requires --project <file.sb3>".to_owned())?;
     let loaded = load_sb3(project_path, "resources/projects")
         .map_err(|error| format!("failed to load project: {error}"))?;
+    let fence_geometries = graphics::fence_geometries(&loaded.project, &loaded.assets_dir);
     let project = Arc::new(loaded.project);
     let window_title = project_window_title(project_path, options.hd_pen_mode);
 
@@ -118,6 +126,9 @@ fn run_graphical(options: RunOptions) -> Result<(), String> {
         .name("aida-scratch-execution".to_owned())
         .spawn(move || {
             let mut program = program::GeneratedProgram::new();
+            for (target, geometry) in fence_geometries {
+                program.set_target_fence_geometry(target, geometry);
+            }
             program.set_observable_event_sink(observable_sender);
             publish_snapshot(
                 &program,

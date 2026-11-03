@@ -219,6 +219,49 @@ fn broadcast_fixture_returns_between_rounds_and_publishes_monitor_changes() {
 }
 
 #[test]
+fn motion_point_fixture_runs_each_clone_on_its_own_target_and_position() {
+    let clock = TestClock(Rc::new(Cell::new(0)));
+    let mut program = GeneratedProgram::new_with_clock(Box::new(clock.clone()));
+    let mut snapshot = RuntimeSnapshot::default();
+
+    for tick in 0..100 {
+        program.begin_tick();
+        match program.advance_frame() {
+            SchedulerStatus::Progressed => {}
+            SchedulerStatus::WaitingUntil(deadline) => clock.0.set(deadline),
+            SchedulerStatus::Complete => break,
+        }
+        snapshot = program.observable_snapshot(tick);
+    }
+
+    let layer = |target: &str, original: bool| {
+        snapshot
+            .layers
+            .iter()
+            .find(|layer| layer.target == target && layer.original == original)
+            .unwrap_or_else(|| panic!("missing {target} {original:?} layer: {:?}", snapshot.layers))
+    };
+    assert_eq!(
+        (layer("Sprite1", true).x, layer("Sprite1", true).y),
+        (240.0, 0.0)
+    );
+    assert_eq!(
+        (layer("Sprite2", true).x, layer("Sprite2", true).y),
+        (-240.0, 0.0)
+    );
+    assert_eq!(
+        (layer("Sprite1", false).x, layer("Sprite1", false).y),
+        (0.0, -180.0)
+    );
+    assert_eq!(
+        (layer("Sprite2", false).x, layer("Sprite2", false).y),
+        (0.0, 180.0)
+    );
+    assert_eq!(layer("Sprite1", false).size, 100.0);
+    assert_eq!(layer("Sprite2", false).size, 100.0);
+}
+
+#[test]
 fn broadcast_fixture_restarts_the_receiver_and_waits_for_the_restarted_run() {
     let clock = TestClock(Rc::new(Cell::new(0)));
     let mut program = GeneratedProgram::new_with_clock(Box::new(clock.clone()));

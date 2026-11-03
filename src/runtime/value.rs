@@ -20,6 +20,10 @@ fn add_to_scratch_value(value: &mut ScratchValue, change: f64) {
     }
 }
 
+fn scratch_direction(direction: f64) -> f64 {
+    direction - (((direction + 179.0) / 360.0).floor() * 360.0)
+}
+
 /// input collected by the presentation thread and consumed by generated code.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RuntimeInputEvent {
@@ -158,6 +162,7 @@ pub struct ScratchState {
     current_instance: usize,
     pending_clones: Vec<usize>,
     target_names: Vec<(usize, String, bool)>,
+    fence_geometry: Vec<Option<SpriteFenceGeometry>>,
     event_sink: Option<Sender<ObservableEvent>>,
     input: RuntimeInputState,
     redraw_requested: bool,
@@ -208,7 +213,18 @@ pub struct LayerSnapshot {
     pub original: bool,
     pub x: f64,
     pub y: f64,
+    pub direction: f64,
+    pub size: f64,
+    pub visible: bool,
     pub bubble: Option<BubbleSnapshot>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SpriteFenceGeometry {
+    pub width: f64,
+    pub height: f64,
+    pub rotation_center_x: f64,
+    pub rotation_center_y: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -264,6 +280,9 @@ struct ScratchTargetInstance {
     is_stage: bool,
     x: f64,
     y: f64,
+    direction: f64,
+    size: f64,
+    visible: bool,
     values: Vec<Option<ScratchValue>>,
     lists: Vec<Option<ScratchList>>,
     bubble: Option<SpeechBubble>,
@@ -513,6 +532,9 @@ impl ScratchState {
                 is_stage: false,
                 x: 0.0,
                 y: 0.0,
+                direction: 90.0,
+                size: 100.0,
+                visible: true,
                 values: Vec::new(),
                 lists: Vec::new(),
                 bubble: None,
@@ -520,6 +542,7 @@ impl ScratchState {
             current_instance: 0,
             pending_clones: Vec::new(),
             target_names: Vec::new(),
+            fence_geometry: Vec::new(),
             event_sink: None,
             input: RuntimeInputState::default(),
             redraw_requested: false,
@@ -549,6 +572,9 @@ impl ScratchState {
                 is_stage: false,
                 x: 0.0,
                 y: 0.0,
+                direction: 90.0,
+                size: 100.0,
+                visible: true,
                 values: Vec::new(),
                 lists: Vec::new(),
                 bubble: None,
@@ -556,6 +582,7 @@ impl ScratchState {
             current_instance: 0,
             pending_clones: Vec::new(),
             target_names: Vec::new(),
+            fence_geometry: Vec::new(),
             event_sink: None,
             input: RuntimeInputState::default(),
             redraw_requested: false,
@@ -590,6 +617,9 @@ impl ScratchState {
                 is_stage: false,
                 x: 0.0,
                 y: 0.0,
+                direction: 90.0,
+                size: 100.0,
+                visible: true,
                 values: Vec::new(),
                 lists: Vec::new(),
                 bubble: None,
@@ -597,6 +627,7 @@ impl ScratchState {
             current_instance: 0,
             pending_clones: Vec::new(),
             target_names: Vec::new(),
+            fence_geometry: Vec::new(),
             event_sink: None,
             input: RuntimeInputState::default(),
             redraw_requested: false,
@@ -914,6 +945,9 @@ impl ScratchState {
                     original: instance.original,
                     x: instance.x,
                     y: instance.y,
+                    direction: instance.direction,
+                    size: instance.size,
+                    visible: instance.visible,
                     bubble: instance.bubble.as_ref().map(|bubble| BubbleSnapshot {
                         kind: bubble.kind,
                         text: bubble.text.clone(),
@@ -1046,37 +1080,129 @@ impl ScratchState {
         }
     }
 
-    pub fn set_xy(&mut self, x: f64, y: f64) {
-        if !self.instances[self.current_instance].is_stage {
+    pub fn set_target_fence_geometry(&mut self, target: usize, geometry: SpriteFenceGeometry) {
+        if self.fence_geometry.len() <= target {
+            self.fence_geometry.resize(target + 1, None);
+        }
+        self.fence_geometry[target] = Some(geometry);
+    }
+
+    pub fn set_original_visual(&mut self, target: usize, direction: f64, size: f64, visible: bool) {
+        if let Some(instance) = self
+            .instances
+            .iter_mut()
+            .find(|instance| instance.target == target && instance.original && !instance.is_stage)
+        {
+            if direction.is_finite() {
+                instance.direction = scratch_direction(direction);
+            }
+            instance.size = size.max(0.0);
+            instance.visible = visible;
+        }
+    }
+
+    pub fn direction(&self) -> f64 {
+        self.instances[self.current_instance].direction
+    }
+
+    pub fn direction_for_instance(&self, instance: usize) -> Option<f64> {
+        self.instances
+            .get(instance)
+            .filter(|target| target.alive)
+            .map(|target| target.direction)
+    }
+
+    pub fn set_direction(&mut self, direction: f64) {
+        if direction.is_finite() && !self.instances[self.current_instance].is_stage {
+            let direction = scratch_direction(direction);
             let instance = &mut self.instances[self.current_instance];
-            let changed = instance.x != x || instance.y != y;
-            instance.x = x;
-            instance.y = y;
-            if changed {
+            if instance.direction != direction {
+                instance.direction = direction;
                 self.request_redraw();
             }
         }
     }
 
-    pub fn change_x_by(&mut self, dx: f64) {
+    pub fn set_xy(&mut self, x: f64, y: f64) {
+        if self.instances[self.current_instance].is_stage {
+            return;
+        }
+        let (x, y) = self.fenced_position(self.current_instance, x, y);
         let instance = &mut self.instances[self.current_instance];
-        if !instance.is_stage {
-            let old_x = instance.x;
-            instance.x += dx;
-            if old_x != instance.x {
-                self.request_redraw();
-            }
+        let changed = instance.x != x || instance.y != y;
+        instance.x = x;
+        instance.y = y;
+        if changed {
+            self.request_redraw();
+        }
+    }
+
+    fn fenced_position(&self, instance_id: usize, x: f64, y: f64) -> (f64, f64) {
+        let instance = &self.instances[instance_id];
+        let Some(geometry) = self.fence_geometry.get(instance.target).copied().flatten() else {
+            return (x, y);
+        };
+        let radians = (90.0 - instance.direction).to_radians();
+        let cos = radians.cos();
+        let sin = radians.sin();
+        let scale = instance.size / 100.0;
+        let points = [
+            (-geometry.rotation_center_x, geometry.rotation_center_y),
+            (
+                geometry.width - geometry.rotation_center_x,
+                geometry.rotation_center_y,
+            ),
+            (
+                -geometry.rotation_center_x,
+                geometry.rotation_center_y - geometry.height,
+            ),
+            (
+                geometry.width - geometry.rotation_center_x,
+                geometry.rotation_center_y - geometry.height,
+            ),
+        ];
+        let mut min_x = f64::INFINITY;
+        let mut max_x = f64::NEG_INFINITY;
+        let mut min_y = f64::INFINITY;
+        let mut max_y = f64::NEG_INFINITY;
+        for (local_x, local_y) in points {
+            let tx = (local_x * cos - local_y * sin) * scale + instance.x;
+            let ty = (local_x * sin + local_y * cos) * scale + instance.y;
+            min_x = min_x.min(tx);
+            max_x = max_x.max(tx);
+            min_y = min_y.min(ty);
+            max_y = max_y.max(ty);
+        }
+        let inset = (((max_x - min_x).min(max_y - min_y) / 2.0).floor()).max(0.0);
+        let margin = 15.0_f64.min(inset);
+        let fence_x = 240.0 - margin;
+        let fence_y = 180.0 - margin;
+        let dx = x - instance.x;
+        let dy = y - instance.y;
+        let mut fenced_x = x;
+        let mut fenced_y = y;
+        if max_x + dx < -fence_x {
+            fenced_x = (instance.x - (fence_x + max_x)).ceil();
+        } else if min_x + dx > fence_x {
+            fenced_x = (instance.x + (fence_x - min_x)).floor();
+        }
+        if max_y + dy < -fence_y {
+            fenced_y = (instance.y - (fence_y + max_y)).ceil();
+        } else if min_y + dy > fence_y {
+            fenced_y = (instance.y + (fence_y - min_y)).floor();
+        }
+        (fenced_x, fenced_y)
+    }
+
+    pub fn change_x_by(&mut self, dx: f64) {
+        if let Some((x, y)) = self.position(self.current_instance) {
+            self.set_xy(x + dx, y);
         }
     }
 
     pub fn change_y_by(&mut self, dy: f64) {
-        let instance = &mut self.instances[self.current_instance];
-        if !instance.is_stage {
-            let old_y = instance.y;
-            instance.y += dy;
-            if old_y != instance.y {
-                self.request_redraw();
-            }
+        if let Some((x, y)) = self.position(self.current_instance) {
+            self.set_xy(x, y + dy);
         }
     }
 
@@ -1104,6 +1230,9 @@ impl ScratchState {
             is_stage,
             x: 0.0,
             y: 0.0,
+            direction: 90.0,
+            size: 100.0,
+            visible: true,
             values: vec![None; self.values.len()],
             lists: vec![None; self.lists.len()],
             bubble: None,
@@ -1172,6 +1301,9 @@ impl ScratchState {
             is_stage: false,
             x: self.instances[source_instance].x,
             y: self.instances[source_instance].y,
+            direction: self.instances[source_instance].direction,
+            size: self.instances[source_instance].size,
+            visible: self.instances[source_instance].visible,
             values: vec![None; self.values.len()],
             lists: vec![None; self.lists.len()],
             bubble: None,
@@ -1362,7 +1494,7 @@ impl ScratchState {
 mod tests {
     use super::{
         BubbleKind, ObservableEvent, RuntimeInputEvent, ScratchListMetadata, ScratchState,
-        ScratchValue, ScratchVariableMetadata,
+        ScratchValue, ScratchVariableMetadata, SpriteFenceGeometry,
     };
     use crate::runtime::{ScratchList, scratch_to_number};
 
@@ -1498,6 +1630,110 @@ mod tests {
         state.register_target(0, "Stage", true);
         state.register_target(1, "Sprite", false);
         state
+    }
+
+    fn fenced_state(width: f64, height: f64) -> ScratchState {
+        let mut state = ScratchState::new(Vec::new());
+        state.register_target(1, "Sprite", false);
+        state.set_target_fence_geometry(
+            1,
+            SpriteFenceGeometry {
+                width,
+                height,
+                rotation_center_x: width / 2.0,
+                rotation_center_y: height / 2.0,
+            },
+        );
+        state.set_current_instance(state.original_instance(1).unwrap());
+        state
+    }
+
+    #[test]
+    fn sprite_fencing_uses_costume_bounds_at_all_four_stage_edges() {
+        let mut state = fenced_state(100.0, 60.0);
+        state.set_xy(300.0, 0.0);
+        assert_eq!(state.position(state.current_instance()), Some((275.0, 0.0)));
+        state.set_xy(-300.0, 0.0);
+        assert_eq!(
+            state.position(state.current_instance()),
+            Some((-275.0, 0.0))
+        );
+        state.set_xy(0.0, 250.0);
+        assert_eq!(state.position(state.current_instance()), Some((0.0, 195.0)));
+        state.set_xy(0.0, -250.0);
+        assert_eq!(
+            state.position(state.current_instance()),
+            Some((0.0, -195.0))
+        );
+    }
+
+    #[test]
+    fn sprite_fencing_uses_reduced_margin_for_small_costumes_and_rotation() {
+        let mut small = fenced_state(10.0, 8.0);
+        small.set_xy(300.0, 0.0);
+        assert_eq!(small.position(small.current_instance()), Some((241.0, 0.0)));
+
+        let mut rotated = fenced_state(100.0, 60.0);
+        rotated.set_direction(0.0);
+        rotated.set_xy(300.0, 250.0);
+        assert_eq!(
+            rotated.position(rotated.current_instance()),
+            Some((255.0, 215.0))
+        );
+    }
+
+    #[test]
+    fn motion_set_x_and_y_use_scratch_numbers_and_preserve_the_other_axis() {
+        let mut state = fenced_state(100.0, 60.0);
+        state.set_xy(7.0, 8.0);
+        let (_, y) = state.position(state.current_instance()).unwrap();
+        state.set_xy(scratch_to_number("12"), y);
+        assert_eq!(state.position(state.current_instance()), Some((12.0, 8.0)));
+        let (x, _) = state.position(state.current_instance()).unwrap();
+        state.set_xy(x, scratch_to_number("not a number"));
+        assert_eq!(state.position(state.current_instance()), Some((12.0, 0.0)));
+
+        let original = state.current_instance();
+        let clone = state.create_clone(original, 1, 300).unwrap();
+        state.set_current_instance(clone);
+        let (x, y) = state.position(clone).unwrap();
+        state.set_xy(x, scratch_to_number("-4"));
+        assert_eq!(state.position(clone), Some((12.0, -4.0)));
+        assert_eq!(state.position(original), Some((12.0, 0.0)));
+        assert_eq!(y, 0.0);
+    }
+
+    #[test]
+    fn clone_motion_and_visual_state_are_instance_local_and_fenced() {
+        let mut state = fenced_state(100.0, 60.0);
+        let original = state.current_instance();
+        state.set_xy(10.0, 20.0);
+        state.set_direction(0.0);
+        let clone = state.create_clone(original, 1, 300).unwrap();
+        state.set_current_instance(clone);
+        state.set_xy(300.0, 0.0);
+        state.set_direction(180.0);
+        assert_eq!(state.position(original), Some((10.0, 20.0)));
+        assert_eq!(state.direction_for_instance(original), Some(0.0));
+        assert_eq!(state.position(clone), Some((255.0, 0.0)));
+        assert_eq!(state.direction_for_instance(clone), Some(180.0));
+        let layers = state.observable_snapshot(0).layers;
+        assert_eq!(
+            layers
+                .iter()
+                .find(|layer| layer.instance_id == clone)
+                .unwrap()
+                .direction,
+            180.0
+        );
+        assert_eq!(layers.len(), 2);
+        state.delete_current_clone();
+        assert_eq!(state.observable_snapshot(1).layers.len(), 1);
+        state.set_current_instance(original);
+        let second = state.create_clone(original, 1, 300).unwrap();
+        state.remove_clones();
+        assert_eq!(state.observable_snapshot(2).layers.len(), 1);
+        assert!(!state.instance_is_alive(second));
     }
 
     #[test]

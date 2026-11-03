@@ -499,6 +499,10 @@ impl VariableLayer {
         Some((index, width_changed))
     }
 
+    pub(crate) fn has_monitor_value_key(&self, key: &str) -> bool {
+        self.monitors.iter().any(|monitor| monitor.value_key == key)
+    }
+
     pub(crate) fn set_monitor_list(
         &mut self,
         key: &str,
@@ -1190,8 +1194,11 @@ mod tests {
 
     #[test]
     fn list_monitors_draw_above_scalar_monitors() {
-        let list = VariableMonitor::new("items", "1", 0.0, 0.0)
-            .with_list_items(vec!["one".to_owned()], 110.0, 100.0);
+        let list = VariableMonitor::new("items", "1", 0.0, 0.0).with_list_items(
+            vec!["one".to_owned()],
+            110.0,
+            100.0,
+        );
         let scalar = VariableMonitor::new("score", "1", 0.0, 0.0);
         let layer = VariableLayer::new(vec![list, scalar]).unwrap();
 
@@ -1277,6 +1284,14 @@ mod tests {
         assert!(layer.take_dirty_gpu_shapes().is_empty());
         assert_eq!(layer.take_dirty_gpu_texts(), vec![0]);
         assert_eq!(layer.glyph_atlas_revision(), revision);
+
+        layer.take_dirty_gpu_texts();
+        assert_eq!(
+            layer.set_monitor_value("timer", "12.3456788".to_owned()),
+            None
+        );
+        assert!(layer.take_dirty_gpu_shapes().is_empty());
+        assert!(layer.take_dirty_gpu_texts().is_empty());
     }
 
     #[test]
@@ -1408,5 +1423,3 @@ mod tests {
         assert_eq!(layer.glyph_atlas_revision(), high_scale_revision);
     }
 }
-
-

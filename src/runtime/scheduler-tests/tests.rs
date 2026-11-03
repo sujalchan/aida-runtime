@@ -526,11 +526,13 @@ fn stop_all_clears_scripts_clones_and_broadcast_and_wait_joins() {
     assert_eq!(state.clone_count(), 0);
     assert!(state.take_pending_clones().is_empty());
     assert!(state.redraw_requested());
-    assert!(state
-        .observable_snapshot(0)
-        .layers
-        .iter()
-        .all(|layer| layer.bubble.is_none()));
+    assert!(
+        state
+            .observable_snapshot(0)
+            .layers
+            .iter()
+            .all(|layer| layer.bubble.is_none())
+    );
     assert!(scheduler.take_broadcast().is_none());
     assert_eq!(message, 7);
 }

@@ -302,11 +302,7 @@ impl VariableLayer {
         };
         let value_y = if compact { 0.0 } else { 4.0 };
         let value_height = if compact { m.height } else { 26.0 };
-        let value_radius = if compact {
-            7.0
-        } else {
-            MONITOR_VALUE_RADIUS
-        };
+        let value_radius = if compact { 7.0 } else { MONITOR_VALUE_RADIUS };
         if build_shapes && !compact {
             push_monitor_instance(
                 &mut shapes,
@@ -474,7 +470,9 @@ impl VariableLayer {
         let shown_items = items
             .iter()
             .take(visible_count)
-            .map(|item| fit_monitor_text(&self.regular_font, item, width - 38.0, LIST_ROW_FONT_SIZE))
+            .map(|item| {
+                fit_monitor_text(&self.regular_font, item, width - 38.0, LIST_ROW_FONT_SIZE)
+            })
             .collect::<Vec<_>>();
         let shown_name = fit_monitor_text(
             &self.bold_font,
@@ -586,22 +584,14 @@ impl VariableLayer {
             }
         }
         if build_text {
-            let header_baseline = super::canvas::centered_baseline(
-                &self.bold_font,
-                LIST_HEADER_FONT_SIZE,
-                12.5,
-            );
+            let header_baseline =
+                super::canvas::centered_baseline(&self.bold_font, LIST_HEADER_FONT_SIZE, 12.5);
             self.push_glyph_instances_at_size(
                 &mut glyphs,
                 &shown_name,
                 true,
                 id,
-                centered_glyph_start(
-                    &self.bold_font,
-                    &shown_name,
-                    LIST_HEADER_FONT_SIZE,
-                    width,
-                ),
+                centered_glyph_start(&self.bold_font, &shown_name, LIST_HEADER_FONT_SIZE, width),
                 header_baseline,
                 width,
                 LIST_HEADER_FONT_SIZE,
@@ -679,8 +669,7 @@ impl VariableLayer {
             let length_width =
                 super::text_width(&self.bold_font, &shown_length, LIST_LENGTH_FONT_SIZE);
             let equals_x = width - LIST_FOOTER_SIDE_PADDING - equals_width;
-            let length_x =
-                (LIST_FOOTER_SIDE_PADDING + plus_width + equals_x - length_width) * 0.5;
+            let length_x = (LIST_FOOTER_SIDE_PADDING + plus_width + equals_x - length_width) * 0.5;
             self.push_glyph_instances_at_size(
                 &mut glyphs,
                 &shown_length,
@@ -736,15 +725,7 @@ impl VariableLayer {
     ) {
         let size = if bold { 18.0 } else { 19.0 };
         self.push_glyph_instances_at_size(
-            out,
-            text,
-            bold,
-            monitor_id,
-            start_x,
-            baseline,
-            _max_width,
-            size,
-            color,
+            out, text, bold, monitor_id, start_x, baseline, _max_width, size, color,
         );
     }
 
@@ -1417,14 +1398,14 @@ mod tests {
     use super::{
         BUBBLE_BODY_CORNER_RADIUS, BUBBLE_BORDER, BUBBLE_BORDER_WIDTH, BUBBLE_FONT_SIZE,
         BUBBLE_SPEECH_TAIL_EXTENT, BUBBLE_TAIL_CORNER_CLEARANCE, BubbleRenderInput,
-        LIST_CONTENT_TOP, LIST_EMPTY_TOP_PADDING, LIST_FOOTER_SIDE_PADDING,
-        LIST_HEADER_FONT_SIZE, LIST_HEADER_HORIZONTAL_PADDING, LIST_ROW_FONT_SIZE,
-        LIST_LENGTH_FONT_SIZE, LIST_ROW_RADIUS, LIST_ROW_VALUE_X, MONITOR_FRAME_RADIUS,
-        MONITOR_SHAPE_BOTTOM_ROUNDED, MONITOR_SHAPE_TOP_ROUNDED, MONITOR_VALUE_RADIUS,
-        SCRATCH_WIDTH, VariableLayer, linear_rgba, scaled_px_bounds,
+        LIST_CONTENT_TOP, LIST_EMPTY_TOP_PADDING, LIST_FOOTER_SIDE_PADDING, LIST_HEADER_FONT_SIZE,
+        LIST_HEADER_HORIZONTAL_PADDING, LIST_LENGTH_FONT_SIZE, LIST_ROW_FONT_SIZE, LIST_ROW_RADIUS,
+        LIST_ROW_VALUE_X, MONITOR_FRAME_RADIUS, MONITOR_SHAPE_BOTTOM_ROUNDED,
+        MONITOR_SHAPE_TOP_ROUNDED, MONITOR_VALUE_RADIUS, SCRATCH_WIDTH, VariableLayer, linear_rgba,
+        scaled_px_bounds,
     };
-    use crate::runtime::{BubbleKind, BubbleSnapshot};
     use crate::graphics::variables::{MonitorKind, VariableMonitor};
+    use crate::runtime::{BubbleKind, BubbleSnapshot};
 
     #[test]
     fn list_monitor_frame_matches_scalar_border_and_keeps_rounded_value_rows() {
@@ -1472,18 +1453,11 @@ mod tests {
             64.0 - LIST_HEADER_HORIZONTAL_PADDING * 2.0,
             LIST_HEADER_FONT_SIZE,
         );
-        let plus_width = crate::graphics::variables::text_width(
-            &layer.bold_font,
-            "+",
-            LIST_LENGTH_FONT_SIZE,
-        );
-        let equals_width = crate::graphics::variables::text_width(
-            &layer.bold_font,
-            "=",
-            LIST_LENGTH_FONT_SIZE,
-        );
-        let footer_text_width =
-            64.0 - LIST_FOOTER_SIDE_PADDING * 2.0 - plus_width - equals_width;
+        let plus_width =
+            crate::graphics::variables::text_width(&layer.bold_font, "+", LIST_LENGTH_FONT_SIZE);
+        let equals_width =
+            crate::graphics::variables::text_width(&layer.bold_font, "=", LIST_LENGTH_FONT_SIZE);
+        let footer_text_width = 64.0 - LIST_FOOTER_SIDE_PADDING * 2.0 - plus_width - equals_width;
         let length = super::fit_monitor_text(
             &layer.bold_font,
             "length 123456789",
@@ -1504,14 +1478,10 @@ mod tests {
                 LIST_LENGTH_FONT_SIZE
             ) <= footer_text_width
         );
-        let title_ink = super::glyph_text_x_bounds(&layer.bold_font, "items", LIST_HEADER_FONT_SIZE)
-            .unwrap();
-        let title_start = super::centered_glyph_start(
-            &layer.bold_font,
-            "items",
-            LIST_HEADER_FONT_SIZE,
-            120.0,
-        );
+        let title_ink =
+            super::glyph_text_x_bounds(&layer.bold_font, "items", LIST_HEADER_FONT_SIZE).unwrap();
+        let title_start =
+            super::centered_glyph_start(&layer.bold_font, "items", LIST_HEADER_FONT_SIZE, 120.0);
         assert!(((title_start + (title_ink.0 + title_ink.1) * 0.5) - 60.0).abs() < 0.01);
         let (_, list_glyphs) = layer
             .build_gpu_monitor_instances_for_id(1, false, true)

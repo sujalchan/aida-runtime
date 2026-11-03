@@ -84,15 +84,14 @@ fn load_project_costumes(
         .iter()
         .enumerate()
         .map(|(index, costume)| {
-            let asset_id = if costume.md5ext.is_empty() {
-                format!("{}::{}", target.name, costume.name)
-            } else {
-                costume.md5ext.clone()
-            };
+            let asset_id = costume.identity().to_owned();
             let sprite = if let Some(sprite) = sources.get(&asset_id) {
                 Arc::clone(sprite)
             } else {
-                let bytes = std::fs::read(assets_dir.join(&costume.md5ext)).map_err(|error| {
+                let archive_path = costume
+                    .archive_path()
+                    .ok_or_else(|| format!("costume `{}` has no asset path", costume.name))?;
+                let bytes = std::fs::read(assets_dir.join(archive_path)).map_err(|error| {
                     format!("failed to read costume `{}`: {error}", costume.name)
                 })?;
                 let sprite = Arc::new(Sprite::from_bytes(&bytes).map_err(|error| {
@@ -122,11 +121,14 @@ fn load_project_backdrops(
         .costumes
         .iter()
         .map(|costume| {
-            let asset_id = costume.md5ext.clone();
+            let asset_id = costume.identity().to_owned();
             let sprite = if let Some(sprite) = sources.get(&asset_id) {
                 Arc::clone(sprite)
             } else {
-                let bytes = std::fs::read(assets_dir.join(&costume.md5ext)).map_err(|error| {
+                let archive_path = costume
+                    .archive_path()
+                    .ok_or_else(|| format!("backdrop `{}` has no asset path", costume.name))?;
+                let bytes = std::fs::read(assets_dir.join(archive_path)).map_err(|error| {
                     format!("failed to read backdrop `{}`: {error}", costume.name)
                 })?;
                 let sprite = Arc::new(Sprite::from_bytes(&bytes).map_err(|error| {
@@ -149,11 +151,15 @@ fn project_monitors(project: &aida_ast::parser::ScratchProject) -> Vec<VariableM
         .map(|monitor| {
             let id = monitor.id.as_str();
             let target = project.targets.iter().find(|target| {
+                let is_reporter =
+                    monitor.opcode != "data_variable" && monitor.opcode != "data_listcontents";
+                let owns_monitor =
+                    target.variables.contains_key(id) || target.lists.contains_key(id);
                 monitor
                     .sprite_name
                     .as_deref()
                     .map_or(target.is_stage, |sprite| target.name == sprite)
-                    && (target.variables.contains_key(id) || target.lists.contains_key(id))
+                    && (owns_monitor || is_reporter)
             });
             let variable = target.and_then(|target| target.variables.get(id));
             let list = target.and_then(|target| target.lists.get(id));
@@ -183,6 +189,13 @@ fn project_monitors(project: &aida_ast::parser::ScratchProject) -> Vec<VariableM
                     target.map_or("", |target| target.name.as_str()),
                     base_name
                 )
+            } else if kind == MonitorKind::Reporter && target.is_some_and(|target| !target.is_stage)
+            {
+                format!(
+                    "{}: {}",
+                    target.unwrap().name,
+                    monitor_label(&monitor.opcode, &monitor.params)
+                )
             } else if kind == MonitorKind::ScalarVariable || kind == MonitorKind::List {
                 base_name.to_owned()
             } else {
@@ -208,8 +221,22 @@ fn project_monitors(project: &aida_ast::parser::ScratchProject) -> Vec<VariableM
                         id,
                         (!target.is_stage).then_some(target_index),
                     )
+                } else if target.is_stage && monitor.opcode == "looks_backdropnumbername" {
+                    match monitor
+                        .params
+                        .get("NUMBER_NAME")
+                        .and_then(serde_json::Value::as_str)
+                    {
+                        Some("number") => "__stage/backdrop/number".to_owned(),
+                        _ => "__stage/backdrop/name".to_owned(),
+                    }
                 } else {
-                    format!("__reporter/{}/{}", monitor.opcode, monitor.id)
+                    sprite_reporter_key(&target.name, &monitor.opcode).unwrap_or_else(|| {
+                        format!(
+                            "__reporter/{}/{}/{}",
+                            target.name, monitor.opcode, monitor.id
+                        )
+                    })
                 }
             } else {
                 match monitor.opcode.as_str() {
@@ -308,6 +335,180 @@ mod monitor_project_tests {
         assert_eq!(monitors[4].kind, MonitorKind::Reporter);
         assert_eq!(monitors[4].category, MonitorCategory::Operators);
         assert_eq!(monitors[4].display_mode, MonitorDisplayMode::ValueOnly);
+    }
+
+    #[test]
+    fn motion_reporter_monitors_keep_sprite_target_and_label() {
+        let project: aida_ast::parser::ScratchProject = serde_json::from_str(
+            r#"{"targets":[
+                {"name":"Stage","isStage":true},
+                {"name":"Sprite1","isStage":false},
+                {"name":"Sprite2","isStage":false}],
+              "monitors":[
+                {"id":"x1","mode":"default","opcode":"motion_xposition","params":{},"spriteName":"Sprite1","value":12,"visible":true},
+                {"id":"y1","mode":"default","opcode":"motion_yposition","params":{},"spriteName":"Sprite1","value":-4,"visible":true},
+                {"id":"d1","mode":"default","opcode":"motion_direction","params":{},"spriteName":"Sprite1","value":45,"visible":true},
+                {"id":"x2","mode":"default","opcode":"motion_xposition","params":{},"spriteName":"Sprite2","value":99,"visible":true}] }"#,
+        )
+        .unwrap();
+        let monitors = project_monitors(&project);
+        assert_eq!(monitors[0].name, "Sprite1: x position");
+        assert_eq!(monitors[1].name, "Sprite1: y position");
+        assert_eq!(monitors[2].name, "Sprite1: direction");
+        assert_eq!(monitors[3].name, "Sprite2: x position");
+        assert_eq!(monitors[0].value_key, "__sprite/Sprite1/x");
+        assert_eq!(monitors[1].value_key, "__sprite/Sprite1/y");
+        assert_eq!(monitors[2].value_key, "__sprite/Sprite1/direction");
+        assert_eq!(monitors[3].value_key, "__sprite/Sprite2/x");
+
+        let mut state = crate::runtime::ScratchState::new(Vec::new());
+        state.register_target(0, "Stage", true);
+        state.register_target(1, "Sprite1", false);
+        state.register_target(2, "Sprite2", false);
+        let sprite1 = state.original_instance(1).unwrap();
+        state.set_current_instance(sprite1);
+        state.set_xy(12.0, -4.0);
+        state.set_direction(45.0);
+        let sprite2 = state.original_instance(2).unwrap();
+        state.set_current_instance(sprite2);
+        state.set_xy(99.0, 0.0);
+        let snapshot = state.observable_snapshot(1);
+        for monitor in &monitors[..3] {
+            let target_property = monitor.value_key.rsplit('/').next().unwrap();
+            let sprite = snapshot
+                .layers
+                .iter()
+                .find(|layer| layer.target == "Sprite1")
+                .unwrap();
+            let actual = match target_property {
+                "x" => sprite.x,
+                "y" => sprite.y,
+                "direction" => sprite.direction,
+                _ => unreachable!(),
+            };
+            let expected = match target_property {
+                "x" => 12.0,
+                "y" => -4.0,
+                "direction" => 45.0,
+                _ => unreachable!(),
+            };
+            assert_eq!(actual, expected);
+        }
+        assert_eq!(
+            snapshot
+                .layers
+                .iter()
+                .find(|layer| layer.target == "Sprite2")
+                .unwrap()
+                .x,
+            99.0
+        );
+    }
+
+    #[test]
+    fn looks_size_monitor_keeps_sprite_ownership_and_uses_snapshot_key() {
+        let project: aida_ast::parser::ScratchProject = serde_json::from_str(
+            r#"{"targets":[
+                {"name":"Stage","isStage":true},
+                {"name":"Sprite1","isStage":false},
+                {"name":"Sprite2","isStage":false}],
+              "monitors":[
+                {"id":"size1","mode":"default","opcode":"looks_size","params":{},"spriteName":"Sprite1","value":100,"visible":true},
+                {"id":"size2","mode":"default","opcode":"looks_size","params":{},"spriteName":"Sprite2","value":100,"visible":true}] }"#,
+        )
+        .unwrap();
+        let monitors = project_monitors(&project);
+        assert_eq!(monitors[0].name, "Sprite1: size");
+        assert_eq!(monitors[1].name, "Sprite2: size");
+        assert_eq!(monitors[0].value_key, "__sprite/Sprite1/size");
+        assert_eq!(monitors[1].value_key, "__sprite/Sprite2/size");
+        assert_eq!(monitors[0].category, MonitorCategory::Looks);
+
+        let mut state = crate::runtime::ScratchState::new(Vec::new());
+        state.register_target(0, "Stage", true);
+        state.register_target(1, "Sprite1", false);
+        state.register_target(2, "Sprite2", false);
+        state.set_original_visual(1, 90.0, 135.0, true);
+        state.set_original_visual(2, 90.0, 75.0, true);
+        let snapshot = state.observable_snapshot(1);
+        assert_eq!(
+            snapshot
+                .layers
+                .iter()
+                .find(|layer| layer.target == "Sprite1")
+                .unwrap()
+                .size,
+            135.0
+        );
+        assert_eq!(
+            snapshot
+                .layers
+                .iter()
+                .find(|layer| layer.target == "Sprite2")
+                .unwrap()
+                .size,
+            75.0
+        );
+    }
+
+    #[test]
+    fn motion_point_fixture_monitor_records_read_sprite1_state() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../aida-ast/tests/src/motion-point-test.sb3"
+        );
+        let json = aida_ast::extractor::read_project_json(path).unwrap();
+        let project = aida_ast::parser::parse_project(&json).unwrap();
+        let monitors = project_monitors(&project);
+        let expected = [
+            (
+                "motion_xposition",
+                "Sprite1: x position",
+                "__sprite/Sprite1/x",
+                0.0,
+            ),
+            (
+                "motion_yposition",
+                "Sprite1: y position",
+                "__sprite/Sprite1/y",
+                0.0,
+            ),
+            (
+                "motion_direction",
+                "Sprite1: direction",
+                "__sprite/Sprite1/direction",
+                90.0,
+            ),
+        ];
+        let mut state = crate::runtime::ScratchState::new(Vec::new());
+        for (target_index, target) in project.targets.iter().enumerate() {
+            state.register_target(target_index, target.name.clone(), target.is_stage);
+            state.set_original_xy(target_index, target.x, target.y);
+            state.set_original_visual(target_index, target.direction, target.size, target.visible);
+        }
+        let snapshot = state.observable_snapshot(0);
+        let sprite = snapshot
+            .layers
+            .iter()
+            .find(|layer| layer.target == "Sprite1")
+            .unwrap();
+        for (opcode, label, key, value) in expected {
+            let monitor = monitors
+                .iter()
+                .find(|monitor| monitor.value_key == key)
+                .unwrap();
+            assert_eq!(monitor.name, label);
+            assert!(project.monitors.iter().any(|record| {
+                record.opcode == opcode && record.sprite_name.as_deref() == Some("Sprite1")
+            }));
+            let observed = match opcode {
+                "motion_xposition" => sprite.x,
+                "motion_yposition" => sprite.y,
+                "motion_direction" => sprite.direction,
+                _ => unreachable!(),
+            };
+            assert_eq!(observed, value);
+        }
     }
 
     #[test]
@@ -437,6 +638,17 @@ fn project_value_text(value: &serde_json::Value) -> String {
         .as_str()
         .map(str::to_owned)
         .unwrap_or_else(|| value.to_string())
+}
+
+fn sprite_reporter_key(target_name: &str, opcode: &str) -> Option<String> {
+    let property = match opcode {
+        "motion_xposition" => "x",
+        "motion_yposition" => "y",
+        "motion_direction" => "direction",
+        "looks_size" => "size",
+        _ => return None,
+    };
+    Some(format!("__sprite/{target_name}/{property}"))
 }
 
 impl GraphicsState {
