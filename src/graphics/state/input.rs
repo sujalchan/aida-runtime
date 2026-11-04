@@ -269,6 +269,7 @@ impl GraphicsState {
             return Ok(());
         };
         let original = &self.sprites[original_index];
+        let draggable = original.draggable;
         let costumes = original.costumes.clone();
         let mut transform = original.transform;
         let current_costume = layer
@@ -303,6 +304,7 @@ impl GraphicsState {
             instance_id: layer.instance_id,
             original: false,
             layer_order,
+            draggable,
             costumes,
             current_costume,
             transform,
@@ -389,6 +391,35 @@ impl GraphicsState {
                 )
             })
             .collect()
+    }
+
+    // pick the topmost visible sprite or clone from its current costume alpha mask.
+    pub(crate) fn pick_sprite_at(&self, stage_point: (f32, f32)) -> Option<(usize, bool)> {
+        let candidates = self.sprites.iter().map(|sprite| {
+            let hit = sprite.transform.visible > 0.0
+                && sprite
+                    .costumes
+                    .get(sprite.current_costume)
+                    .and_then(|costume| {
+                        costume.mips.get(&costume.selected_mip).map(|mip| {
+                            costume_contains_point(
+                                &sprite.transform,
+                                costume.logical_size,
+                                (mip.texture.width, mip.texture.height),
+                                &mip.opaque_pixels,
+                                stage_point,
+                            )
+                        })
+                    })
+                    .unwrap_or(false);
+            (
+                sprite.instance_id,
+                sprite.transform.visible > 0.0,
+                sprite.draggable,
+                hit,
+            )
+        });
+        pick_topmost_visible_instance(candidates)
     }
 
     pub(crate) fn window(&self) -> &Window {
@@ -792,6 +823,17 @@ impl GraphicsState {
     }
 }
 
+// preserve back-to-front renderer order while ignoring transparent top layers.
+fn pick_topmost_visible_instance(
+    candidates: impl DoubleEndedIterator<Item = (usize, bool, bool, bool)>,
+) -> Option<(usize, bool)> {
+    candidates
+        .rev()
+        .find_map(|(instance, visible, draggable, hit)| {
+            (visible && hit).then_some((instance, draggable))
+        })
+}
+
 #[cfg(test)]
 mod clone_transform_tests {
     use super::{
@@ -930,6 +972,39 @@ fn costume_contains_point(
 #[cfg(test)]
 mod mouse_tests {
     use super::*;
+
+    #[test]
+    fn pointer_picking_uses_frontmost_opaque_instance_and_its_draggable_flag() {
+        let sprites = [(11, true, false, true), (12, true, true, true)];
+        assert_eq!(
+            pick_topmost_visible_instance(sprites.into_iter()),
+            Some((12, true))
+        );
+
+        let transparent_top = [(11, true, false, true), (12, true, true, false)];
+        assert_eq!(
+            pick_topmost_visible_instance(transparent_top.into_iter()),
+            Some((11, false))
+        );
+        assert_eq!(
+            pick_topmost_visible_instance([(11, false, false, true)].into_iter()),
+            None
+        );
+    }
+
+    #[test]
+    fn original_and_clone_hit_regions_keep_their_instance_identity() {
+        let parent_left_hit = [(1, true, false, true), (2, true, false, false)];
+        let clone_right_hit = [(1, true, false, false), (2, true, false, true)];
+        assert_eq!(
+            pick_topmost_visible_instance(parent_left_hit.into_iter()),
+            Some((1, false))
+        );
+        assert_eq!(
+            pick_topmost_visible_instance(clone_right_hit.into_iter()),
+            Some((2, false))
+        );
+    }
 
     #[test]
     fn mouse_touch_uses_costume_pixels_even_when_hidden() {

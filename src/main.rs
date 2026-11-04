@@ -68,6 +68,10 @@ fn run_headless(options: RunOptions) -> Result<(), String> {
     if let Some(project_path) = options.project.as_ref() {
         let loaded = load_sb3(project_path, "resources/projects")
             .map_err(|error| format!("failed to load project: {error}"))?;
+        if program::GeneratedProgram::uses_sound() {
+            let sounds = runtime::SoundLibrary::load_project(&loaded.project, &loaded.assets_dir)?;
+            program.set_sound_library(sounds);
+        }
         for (target, geometry) in graphics::fence_geometries(&loaded.project, &loaded.assets_dir) {
             program.set_target_fence_geometry(target, geometry);
         }
@@ -100,6 +104,14 @@ fn run_graphical(options: RunOptions) -> Result<(), String> {
         .ok_or_else(|| "--graphical requires --project <file.sb3>".to_owned())?;
     let loaded = load_sb3(project_path, "resources/projects")
         .map_err(|error| format!("failed to load project: {error}"))?;
+    let sound_library = if program::GeneratedProgram::uses_sound() {
+        Some(
+            runtime::SoundLibrary::load_project(&loaded.project, &loaded.assets_dir)
+                .map_err(|error| format!("failed to load sounds: {error}"))?,
+        )
+    } else {
+        None
+    };
     let fence_geometries = graphics::fence_geometries(&loaded.project, &loaded.assets_dir);
     let project = Arc::new(loaded.project);
     let window_title = project_window_title(project_path, options.hd_pen_mode);
@@ -130,10 +142,17 @@ fn run_graphical(options: RunOptions) -> Result<(), String> {
     let worker_notification_pending = Arc::clone(&notification_pending);
     let worker_options = options.clone();
     let worker_proxy = proxy.clone();
+    let worker_sound_library = sound_library;
     let worker = thread::Builder::new()
         .name("aida-scratch-execution".to_owned())
         .spawn(move || {
             let mut program = program::GeneratedProgram::new();
+            if let Some(sound_library) = worker_sound_library {
+                program.set_sound_library(sound_library);
+                if let Err(error) = program.enable_realtime_audio() {
+                    eprintln!("audio output unavailable; using the controlled playback clock: {error}");
+                }
+            }
             for (target, geometry) in fence_geometries {
                 program.set_target_fence_geometry(target, geometry);
             }
@@ -251,6 +270,10 @@ fn run_program(
                 pacer.wait_for_scheduler(program.duration_until(deadline));
             }
             SchedulerStatus::WaitingUntil(_) => pacer.finish_tick(tick_started),
+            SchedulerStatus::WaitingForSignal if pacing == PacingMode::Turbo => {
+                std::thread::sleep(Duration::from_millis(8));
+            }
+            SchedulerStatus::WaitingForSignal => pacer.finish_tick(tick_started),
             SchedulerStatus::Complete => break,
         }
     }
@@ -338,6 +361,16 @@ fn run_worker(
                     pacer.finish_tick(tick_started);
                 }
             }
+            SchedulerStatus::WaitingForSignal if pacing == PacingMode::Turbo => {
+                match stop.recv_timeout(Duration::from_millis(8)) {
+                    Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        stopped_externally = true;
+                        break;
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                }
+            }
+            SchedulerStatus::WaitingForSignal => pacer.finish_tick(tick_started),
             SchedulerStatus::Complete if test_mode => break,
             SchedulerStatus::Complete if pacing == PacingMode::Turbo => {
                 // keep the graphical input and monitor pump alive without a busy loop.

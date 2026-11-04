@@ -8,8 +8,9 @@ pub enum ScratchValue {
 }
 
 use super::{
-    PenColorParameter, PenColorState, PenCommand, PenDot, PenStroke, ScratchList,
-    scratch_number_operand, scratch_random, scratch_to_number,
+    PenColorParameter, PenColorState, PenCommand, PenDot, PenStroke, RealtimeAudio, ScratchList,
+    SoundLibrary, SoundParameters, SoundRuntime, scratch_number_operand, scratch_random,
+    scratch_to_number,
 };
 use std::collections::HashSet;
 use std::fmt::Debug;
@@ -35,6 +36,12 @@ fn scratch_direction(direction: f64) -> f64 {
     direction - (((direction + 179.0) / 360.0).floor() * 360.0)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScratchSoundEffect {
+    Pitch,
+    Pan,
+}
+
 /// input collected by the presentation thread and consumed by generated code.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RuntimeInputEvent {
@@ -48,6 +55,15 @@ pub enum RuntimeInputEvent {
     },
     MouseButton {
         pressed: bool,
+    },
+    // carry renderer-picked click targets to the scheduler without gpu state.
+    PointerButton {
+        pressed: bool,
+        inside_stage: bool,
+        target_instance: Option<usize>,
+        draggable: bool,
+        was_dragged: bool,
+        monitor_interaction: bool,
     },
     VariableValue {
         key: String,
@@ -69,6 +85,20 @@ pub enum RuntimeInputEvent {
         key: String,
         items: Vec<String>,
     },
+}
+
+// mirror Scratch's mouse-down versus mouse-up activation rule after renderer picking.
+pub fn pointer_click_activates(
+    pressed: bool,
+    inside_stage: bool,
+    draggable: bool,
+    was_dragged: bool,
+    monitor_interaction: bool,
+) -> bool {
+    inside_stage
+        && !was_dragged
+        && !monitor_interaction
+        && if draggable { !pressed } else { pressed }
 }
 
 enum ListMonitorEdit {
@@ -110,6 +140,7 @@ impl RuntimeInputState {
                 self.mouse_down = pressed;
                 (None, changed)
             }
+            RuntimeInputEvent::PointerButton { .. } => (None, false),
             RuntimeInputEvent::VariableValue { .. }
             | RuntimeInputEvent::ListAppend { .. }
             | RuntimeInputEvent::ListSetItem { .. }
@@ -229,7 +260,9 @@ pub struct ScratchState {
     project_timer_epoch: u64,
     project_timer_monitor_visible: bool,
     username: String,
+    loudness: f64,
     pending_pen_commands: Vec<PenCommand>,
+    sound_runtime: SoundRuntime,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -372,6 +405,9 @@ struct ScratchTargetInstance {
     pen_size: f64,
     costume_index: usize,
     fence_offsets: Option<CachedFenceOffsets>,
+    sound_pitch: f64,
+    sound_pan: f64,
+    volume: f64,
 }
 
 /// names and scope information for one shared-state slot.
@@ -473,7 +509,8 @@ impl ScratchState {
         self.presentation_requested = true;
     }
 
-    fn request_presentation(&mut self) {
+    /// request an observable snapshot without forcing a scheduler redraw.
+    pub fn request_presentation(&mut self) {
         self.presentation_requested = true;
     }
 
@@ -726,6 +763,9 @@ impl ScratchState {
                 pen_size: 1.0,
                 costume_index: 0,
                 fence_offsets: None,
+                sound_pitch: 0.0,
+                sound_pan: 0.0,
+                volume: 100.0,
             }],
             current_instance: 0,
             pending_clones: Vec::new(),
@@ -743,7 +783,9 @@ impl ScratchState {
             project_timer_epoch: 0,
             project_timer_monitor_visible: false,
             username: default_username(),
+            loudness: -1.0,
             pending_pen_commands: Vec::new(),
+            sound_runtime: SoundRuntime::default(),
         }
     }
 
@@ -777,6 +819,9 @@ impl ScratchState {
                 pen_size: 1.0,
                 costume_index: 0,
                 fence_offsets: None,
+                sound_pitch: 0.0,
+                sound_pan: 0.0,
+                volume: 100.0,
             }],
             current_instance: 0,
             pending_clones: Vec::new(),
@@ -794,7 +839,9 @@ impl ScratchState {
             project_timer_epoch: 0,
             project_timer_monitor_visible: false,
             username: default_username(),
+            loudness: -1.0,
             pending_pen_commands: Vec::new(),
+            sound_runtime: SoundRuntime::default(),
         }
     }
 
@@ -833,6 +880,9 @@ impl ScratchState {
                 pen_size: 1.0,
                 costume_index: 0,
                 fence_offsets: None,
+                sound_pitch: 0.0,
+                sound_pan: 0.0,
+                volume: 100.0,
             }],
             current_instance: 0,
             pending_clones: Vec::new(),
@@ -850,7 +900,9 @@ impl ScratchState {
             project_timer_epoch: 0,
             project_timer_monitor_visible: false,
             username: default_username(),
+            loudness: -1.0,
             pending_pen_commands: Vec::new(),
+            sound_runtime: SoundRuntime::default(),
         }
     }
 
@@ -1316,7 +1368,16 @@ impl ScratchState {
 
     /// microphone input is unavailable until AIDA has an audio input device.
     pub fn loudness(&self) -> f64 {
-        -1.0
+        self.loudness
+    }
+
+    /// set the latest audio input sample without polling from script execution.
+    pub fn set_loudness(&mut self, loudness: f64) {
+        let next = if loudness.is_finite() { loudness } else { -1.0 };
+        if self.loudness != next {
+            self.loudness = next;
+            self.request_presentation();
+        }
     }
 
     pub fn set_variable_visible(&mut self, slot: usize, visible: bool) {
@@ -1376,6 +1437,16 @@ impl ScratchState {
 
     pub fn current_target(&self) -> usize {
         self.instances[self.current_instance].target
+    }
+
+    pub fn set_original_volume(&mut self, target: usize, volume: f64) {
+        if let Some(instance) = self
+            .instances
+            .iter_mut()
+            .find(|instance| instance.target == target && instance.original)
+        {
+            instance.volume = scratch_to_number(volume).clamp(0.0, 100.0);
+        }
     }
 
     pub fn set_original_xy(&mut self, target: usize, x: f64, y: f64) {
@@ -1601,6 +1672,151 @@ impl ScratchState {
         self.request_redraw();
     }
 
+    pub fn set_sound_library(&mut self, library: SoundLibrary) {
+        self.sound_runtime.set_library(library);
+    }
+
+    pub fn set_realtime_audio(&mut self, output: RealtimeAudio) {
+        self.sound_runtime.set_output(output);
+    }
+
+    pub fn start_sound(&mut self, selector: ScratchValue, now_millis: u64) -> Option<u64> {
+        let instance = self.current_instance;
+        let target = self.instances.get(instance)?.target;
+        let parameters = self.sound_parameters(instance);
+        self.sound_runtime
+            .start(target, instance, selector, parameters, now_millis)
+    }
+
+    pub fn set_sound_effect(
+        &mut self,
+        effect: ScratchSoundEffect,
+        value: f64,
+        change: bool,
+        now_millis: u64,
+    ) {
+        let instance_id = self.current_instance;
+        let instance = &mut self.instances[instance_id];
+        let value = scratch_to_number(value);
+        match effect {
+            ScratchSoundEffect::Pitch => {
+                let next = if change {
+                    instance.sound_pitch + value
+                } else {
+                    value
+                };
+                instance.sound_pitch = next.clamp(-360.0, 360.0);
+            }
+            ScratchSoundEffect::Pan => {
+                let next = if change {
+                    instance.sound_pan + value
+                } else {
+                    value
+                };
+                instance.sound_pan = next.clamp(-100.0, 100.0);
+            }
+        }
+        let target = instance.target;
+        let parameters = self.sound_parameters(instance_id);
+        self.sound_runtime
+            .update_instance(target, instance_id, parameters, now_millis);
+    }
+
+    pub fn clear_sound_effects(&mut self, now_millis: u64) {
+        let instance_id = self.current_instance;
+        let instance = &mut self.instances[instance_id];
+        instance.sound_pitch = 0.0;
+        instance.sound_pan = 0.0;
+        let target = instance.target;
+        let parameters = self.sound_parameters(instance_id);
+        self.sound_runtime
+            .update_instance(target, instance_id, parameters, now_millis);
+    }
+
+    pub fn reset_sound_effects(&mut self, now_millis: u64) {
+        for instance_id in 0..self.instances.len() {
+            let instance = &mut self.instances[instance_id];
+            instance.sound_pitch = 0.0;
+            instance.sound_pan = 0.0;
+            let parameters = SoundParameters {
+                pitch: instance.sound_pitch,
+                pan: instance.sound_pan,
+                volume: instance.volume,
+            };
+            self.sound_runtime.update_instance(
+                instance.target,
+                instance_id,
+                parameters,
+                now_millis,
+            );
+        }
+    }
+
+    pub fn set_sound_volume(&mut self, value: f64, change: bool, now_millis: u64) {
+        let instance_id = self.current_instance;
+        let instance = &mut self.instances[instance_id];
+        let value = scratch_to_number(value);
+        let next = if change {
+            instance.volume + value
+        } else {
+            value
+        };
+        instance.volume = next.clamp(0.0, 100.0);
+        let target = instance.target;
+        let parameters = self.sound_parameters(instance_id);
+        self.sound_runtime
+            .update_instance(target, instance_id, parameters, now_millis);
+    }
+
+    pub fn sound_volume(&self) -> f64 {
+        self.instances[self.current_instance].volume
+    }
+
+    /// read a sprite or stage's original target volume for its reporter monitor.
+    pub fn sound_volume_for_target(&self, target: usize) -> f64 {
+        self.original_instance(target)
+            .map_or(100.0, |instance| self.instances[instance].volume)
+    }
+
+    pub fn stop_all_sounds(&mut self, now_millis: u64) {
+        self.sound_runtime.advance_to(now_millis);
+        self.sound_runtime.stop_all();
+    }
+
+    pub fn restart_sounds(&mut self, now_millis: u64) {
+        self.stop_all_sounds(now_millis);
+        self.reset_sound_effects(now_millis);
+    }
+
+    pub fn stop_project_sounds(&mut self, now_millis: u64) {
+        self.restart_sounds(now_millis);
+    }
+
+    pub fn advance_sounds(&mut self, now_millis: u64) {
+        self.sound_runtime.advance_to(now_millis);
+    }
+
+    pub fn drain_finished_sounds(&mut self) -> Vec<u64> {
+        self.sound_runtime.drain_completed()
+    }
+
+    pub fn has_active_sounds(&self) -> bool {
+        self.sound_runtime.has_active()
+    }
+
+    pub fn take_audio_events(&mut self) -> Vec<super::AudioEvent> {
+        self.sound_runtime.take_events()
+    }
+
+    fn sound_parameters(&self, instance: usize) -> SoundParameters {
+        let instance = &self.instances[instance];
+        SoundParameters {
+            pitch: instance.sound_pitch,
+            pan: instance.sound_pan,
+            volume: instance.volume,
+        }
+    }
+
     pub fn take_pending_pen_commands(&mut self) -> Vec<PenCommand> {
         std::mem::take(&mut self.pending_pen_commands)
     }
@@ -1814,6 +2030,9 @@ impl ScratchState {
             pen_size: 1.0,
             costume_index: 0,
             fence_offsets: None,
+            sound_pitch: 0.0,
+            sound_pan: 0.0,
+            volume: 100.0,
         });
         id
     }
@@ -1890,6 +2109,9 @@ impl ScratchState {
             pen_size: self.instances[source_instance].pen_size,
             costume_index: self.instances[source_instance].costume_index,
             fence_offsets: None,
+            sound_pitch: self.instances[source_instance].sound_pitch,
+            sound_pan: self.instances[source_instance].sound_pan,
+            volume: self.instances[source_instance].volume,
         };
         for (slot, metadata) in self.variables.iter().enumerate() {
             if !metadata.is_stage && metadata.target_index == target {
@@ -1959,10 +2181,13 @@ impl ScratchState {
     }
 
     pub fn delete_current_clone(&mut self) -> bool {
-        let instance = &mut self.instances[self.current_instance];
+        let instance_id = self.current_instance;
+        let instance = &self.instances[instance_id];
         if instance.original {
             return false;
         }
+        self.sound_runtime.stop_target(instance.target, instance_id);
+        let instance = &mut self.instances[instance_id];
         instance.alive = false;
         instance.values.clear();
         instance.lists.clear();
@@ -2081,10 +2306,103 @@ fn local_datetime() -> OffsetDateTime {
 mod tests {
     use super::{
         BubbleKind, ObservableEvent, PenDot, PenStroke, RuntimeInputEvent, ScratchListMetadata,
-        ScratchState, ScratchValue, ScratchVariableMetadata, SpriteFenceGeometry,
+        ScratchSoundEffect, ScratchState, ScratchValue, ScratchVariableMetadata,
+        SpriteFenceGeometry, pointer_click_activates,
     };
     use crate::runtime::PenCommand;
     use crate::runtime::{ScratchList, list_snapshot_key, scratch_to_number};
+
+    #[test]
+    fn pointer_click_timing_excludes_drags_overlays_and_outside_presses() {
+        assert!(pointer_click_activates(true, true, false, false, false));
+        assert!(!pointer_click_activates(false, true, false, false, false));
+        assert!(!pointer_click_activates(true, true, false, true, false));
+        assert!(!pointer_click_activates(true, false, false, false, false));
+        assert!(!pointer_click_activates(true, true, false, false, true));
+        assert!(!pointer_click_activates(true, true, true, false, false));
+        assert!(pointer_click_activates(false, true, true, false, false));
+        assert!(!pointer_click_activates(false, true, true, true, false));
+    }
+
+    #[test]
+    fn unavailable_loudness_is_negative_one_and_injectable_for_edge_hat_checks() {
+        let mut state = ScratchState::new(Vec::new());
+        assert_eq!(state.loudness(), -1.0);
+        assert!(state.loudness() > -10.0);
+        state.set_loudness(-14.5);
+        assert!(!(state.loudness() > -10.0));
+        state.set_loudness(f64::NAN);
+        assert_eq!(state.loudness(), -1.0);
+    }
+
+    #[test]
+    fn sound_effects_clamp_copy_to_clones_and_clear_without_resetting_volume() {
+        let mut state = ScratchState::new(Vec::new());
+        state.register_target(0, "Stage", true);
+        state.register_target(1, "Sprite1", false);
+        let original = state.original_instance(1).unwrap();
+        state.set_current_instance(original);
+        state.set_sound_effect(ScratchSoundEffect::Pitch, 500.0, true, 0);
+        state.set_sound_effect(ScratchSoundEffect::Pitch, 100.0, true, 0);
+        state.set_sound_effect(ScratchSoundEffect::Pitch, -500.0, true, 0);
+        state.set_sound_effect(ScratchSoundEffect::Pan, 150.0, true, 0);
+        state.set_sound_effect(ScratchSoundEffect::Pan, 150.0, true, 0);
+        state.set_sound_effect(ScratchSoundEffect::Pan, -150.0, true, 0);
+        state.set_sound_volume(90.0, false, 0);
+        state.set_sound_volume(100.0, true, 0);
+
+        let clone = state.create_clone(original, 1, 300).unwrap();
+        assert_eq!(state.instances[clone].sound_pitch, -140.0);
+        assert_eq!(state.instances[clone].sound_pan, -50.0);
+        assert_eq!(state.instances[clone].volume, 100.0);
+
+        state.set_current_instance(clone);
+        state.set_sound_effect(ScratchSoundEffect::Pitch, -500.0, false, 1);
+        state.set_sound_effect(ScratchSoundEffect::Pitch, -100.0, true, 1);
+        state.set_sound_effect(ScratchSoundEffect::Pan, 150.0, false, 1);
+        state.set_sound_effect(ScratchSoundEffect::Pan, 10.0, true, 1);
+        state.set_sound_effect(ScratchSoundEffect::Pan, -500.0, true, 1);
+        state.set_sound_volume(15.0, false, 1);
+        state.clear_sound_effects(1);
+        assert_eq!(state.instances[clone].sound_pitch, 0.0);
+        assert_eq!(state.instances[clone].sound_pan, 0.0);
+        assert_eq!(state.instances[clone].volume, 15.0);
+
+        state.set_current_instance(original);
+        assert_eq!(state.instances[original].sound_pitch, -140.0);
+        assert_eq!(state.instances[original].sound_pan, -50.0);
+        assert_eq!(state.instances[original].volume, 100.0);
+
+        state.restart_sounds(2);
+        assert_eq!(state.instances[original].sound_pitch, 0.0);
+        assert_eq!(state.instances[original].sound_pan, 0.0);
+        assert_eq!(state.instances[original].volume, 100.0);
+        assert_eq!(state.instances[clone].sound_pitch, 0.0);
+        assert_eq!(state.instances[clone].sound_pan, 0.0);
+        assert_eq!(state.instances[clone].volume, 15.0);
+    }
+
+    #[test]
+    fn project_volume_is_loaded_for_the_original_and_inherited_by_clones() {
+        let mut state = ScratchState::new(Vec::new());
+        state.register_target(0, "Stage", true);
+        state.register_target(1, "Sprite1", false);
+        state.set_original_volume(1, 42.0);
+        let original = state.original_instance(1).unwrap();
+        state.set_current_instance(original);
+        assert_eq!(state.sound_volume(), 42.0);
+        assert_eq!(state.sound_volume_for_target(1), 42.0);
+        assert_eq!(state.sound_volume_for_target(0), 100.0);
+
+        let clone = state.create_clone(original, 1, 300).unwrap();
+        state.set_current_instance(clone);
+        assert_eq!(state.sound_volume(), 42.0);
+        state.set_sound_volume(20.0, true, 0);
+        assert_eq!(state.sound_volume(), 62.0);
+        assert_eq!(state.sound_volume_for_target(1), 42.0);
+        state.set_current_instance(original);
+        assert_eq!(state.sound_volume(), 42.0);
+    }
 
     #[test]
     fn pen_commands_preserve_points_strokes_stamps_and_clear_order() {

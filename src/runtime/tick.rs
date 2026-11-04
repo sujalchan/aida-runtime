@@ -19,7 +19,9 @@ pub fn run_tick(
         last_status = advance_round();
         match last_status {
             SchedulerStatus::Progressed => {}
-            SchedulerStatus::WaitingUntil(_) | SchedulerStatus::Complete => return last_status,
+            SchedulerStatus::WaitingUntil(_)
+            | SchedulerStatus::WaitingForSignal
+            | SchedulerStatus::Complete => return last_status,
         }
         if mode != PacingMode::Turbo && redraw_requested() {
             return last_status;

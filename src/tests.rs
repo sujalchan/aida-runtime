@@ -314,9 +314,8 @@ fn think_fixture_resumes_timed_blocks_with_stage_progress_and_stops_in_order() {
         let frame_interval = Duration::from_secs_f64(1.0 / fps as f64);
 
         for frame in 0..=fps * 6 {
-            let now = Duration::from_nanos(
-                (u128::from(frame) * 1_000_000_000 / u128::from(fps)) as u64,
-            );
+            let now =
+                Duration::from_nanos((u128::from(frame) * 1_000_000_000 / u128::from(fps)) as u64);
             clock.0.set(now);
             program.begin_tick();
             let redraw_requested = std::cell::Cell::new(false);
@@ -371,11 +370,13 @@ fn think_fixture_resumes_timed_blocks_with_stage_progress_and_stops_in_order() {
                     ScratchValue::Number(2.0)
                 );
                 assert!(program.is_complete());
-                assert!(program
-                    .observable_snapshot(frame as usize)
-                    .layers
-                    .iter()
-                    .all(|layer| layer.bubble.is_none()));
+                assert!(
+                    program
+                        .observable_snapshot(frame as usize)
+                        .layers
+                        .iter()
+                        .all(|layer| layer.bubble.is_none())
+                );
                 let stopped_value = program.state().get_shared(0).clone();
                 assert_eq!(program.advance_frame(), SchedulerStatus::Complete);
                 assert_eq!(program.state().get_shared(0), &stopped_value);
@@ -399,6 +400,9 @@ fn motion_point_fixture_runs_each_clone_on_its_own_target_and_position() {
         match program.advance_frame() {
             SchedulerStatus::Progressed => {}
             SchedulerStatus::WaitingUntil(deadline) => clock.0.set(deadline),
+            SchedulerStatus::WaitingForSignal => {
+                panic!("non-sound motion fixture waited for audio")
+            }
             SchedulerStatus::Complete => break,
         }
         snapshot = program.observable_snapshot(tick);
@@ -454,6 +458,7 @@ fn broadcast_fixture_restarts_the_receiver_and_waits_for_the_restarted_run() {
         match program.advance() {
             SchedulerStatus::Progressed => {}
             SchedulerStatus::WaitingUntil(deadline) => break deadline,
+            SchedulerStatus::WaitingForSignal => panic!("broadcast fixture waited for audio"),
             SchedulerStatus::Complete => panic!("broadcast fixture completed before message2"),
         }
     };

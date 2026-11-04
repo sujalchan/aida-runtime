@@ -11,6 +11,7 @@ csv = "1.4"
 fontdb = "0.24"
 lyon = "1.0"
 pollster = "1.0.1"
+rodio = { version = "0.21.1", default-features = false, features = ["playback", "symphonia-adpcm", "symphonia-mp3", "symphonia-pcm", "symphonia-wav"] }
 resvg = "0.49.0"
 roxmltree = "0.21"
 serde = "1.0"

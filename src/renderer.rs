@@ -43,6 +43,9 @@ pub(crate) struct RendererApp {
     test_mode: bool,
     hd_pen_mode: bool,
     cursor_position: Option<PhysicalPosition<f64>>,
+    pointer_down_at: Option<PhysicalPosition<f64>>,
+    pointer_was_dragged: bool,
+    pointer_suppressed: bool,
     dragging_variable: bool,
     dragging_slider: bool,
     last_variable_click: Option<(Instant, PhysicalPosition<f64>)>,
@@ -89,6 +92,9 @@ impl RendererApp {
             test_mode,
             hd_pen_mode,
             cursor_position: None,
+            pointer_down_at: None,
+            pointer_was_dragged: false,
+            pointer_suppressed: false,
             dragging_variable: false,
             dragging_slider: false,
             last_variable_click: None,
@@ -197,6 +203,28 @@ impl RendererApp {
                 .as_ref()
                 .and_then(|graphics| graphics.window_to_stage(position))
         })
+    }
+
+    // send one resolved pointer edge; only the presentation thread performs sprite picking.
+    fn send_pointer_button(&self, pressed: bool, monitor_interaction: bool) {
+        let stage_pointer = self.stage_pointer();
+        let picked = if monitor_interaction {
+            None
+        } else {
+            stage_pointer.and_then(|point| {
+                self.graphics
+                    .as_ref()
+                    .and_then(|graphics| graphics.pick_sprite_at(point))
+            })
+        };
+        let _ = self.input_sender.send(RuntimeInputEvent::PointerButton {
+            pressed,
+            inside_stage: stage_pointer.is_some(),
+            target_instance: picked.map(|(instance, _)| instance),
+            draggable: picked.is_some_and(|(_, draggable)| draggable),
+            was_dragged: self.pointer_was_dragged,
+            monitor_interaction,
+        });
     }
 
     fn verify_expected_variables(&self) -> Result<(), String> {
@@ -403,6 +431,19 @@ impl ApplicationHandler<RendererEvent> for RendererApp {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor_position = Some(position);
+                // scratch gui promotes a held pointer to a drag after three css pixels.
+                if let Some(start) = self.pointer_down_at
+                    && !self.pointer_was_dragged
+                {
+                    let scale = self
+                        .graphics
+                        .as_ref()
+                        .map_or(1.0, |graphics| graphics.window().scale_factor());
+                    let threshold = 3.0 * scale;
+                    let dx = position.x - start.x;
+                    let dy = position.y - start.y;
+                    self.pointer_was_dragged = dx * dx + dy * dy > threshold * threshold;
+                }
                 let stage_pointer = self.stage_pointer();
                 if let Some((x, y)) = self
                     .graphics
@@ -532,12 +573,16 @@ impl ApplicationHandler<RendererEvent> for RendererApp {
 
                     match state {
                         ElementState::Pressed => {
+                            self.pointer_down_at = self.cursor_position;
+                            self.pointer_was_dragged = false;
+                            self.pointer_suppressed = false;
                             let menu_open = self.dev_mode
                                 && self
                                     .graphics
                                     .as_ref()
                                     .is_some_and(GraphicsState::context_menu_is_open);
                             if menu_open {
+                                self.pointer_suppressed = true;
                                 let mut list_action = None;
                                 if let Some(graphics) = self.graphics.as_mut() {
                                     match graphics.activate_variable_context_menu(stage_pointer) {
@@ -577,6 +622,7 @@ impl ApplicationHandler<RendererEvent> for RendererApp {
                                             self.dragging_variable = true;
                                         }
                                         if response.consumed {
+                                            self.pointer_suppressed = true;
                                             self.request_redraw();
                                             return;
                                         }
@@ -619,6 +665,7 @@ impl ApplicationHandler<RendererEvent> for RendererApp {
                                 }
 
                                 let hit_monitor = graphics.variable_monitor_at(x, y);
+                                self.pointer_suppressed |= hit_monitor;
                                 self.last_variable_click = if hit_monitor {
                                     self.cursor_position.map(|position| (now, position))
                                 } else {
@@ -653,6 +700,9 @@ impl ApplicationHandler<RendererEvent> for RendererApp {
                                         }
                                     }
                                 }
+                            }
+                            if !self.pointer_suppressed {
+                                self.send_pointer_button(true, false);
                             }
                         }
                         ElementState::Released => {
@@ -690,8 +740,15 @@ impl ApplicationHandler<RendererEvent> for RendererApp {
                                 }
                                 self.dragging_variable = false;
                                 self.dragging_slider = false;
+                                self.pointer_suppressed = true;
                                 self.request_redraw();
                             }
+                            if !self.pointer_suppressed {
+                                self.send_pointer_button(false, false);
+                            }
+                            self.pointer_down_at = None;
+                            self.pointer_was_dragged = false;
+                            self.pointer_suppressed = false;
                         }
                     }
                 } else if button == MouseButton::Right

@@ -5,6 +5,7 @@ mod pacing;
 mod pen;
 mod random;
 mod scheduler;
+mod sound;
 mod tick;
 mod value;
 
@@ -18,16 +19,22 @@ pub use pacing::{PacingMechanism, PacingMode, SystemPacingMechanism, TickPacer};
 pub use pen::PenColorState;
 #[allow(unused_imports)]
 pub use random::{ScratchRandom, scratch_random};
+#[allow(unused_imports)]
+pub use scheduler::EdgeHatState;
 pub use scheduler::{
     Clock, ResumableScript, SchedulerStatus, ScriptScheduler, ScriptStatus, WarpBudget,
 };
+pub use sound::{AudioEvent, RealtimeAudio, SoundLibrary};
+pub(crate) use sound::{SoundParameters, SoundRuntime};
 pub use tick::run_tick;
+#[allow(unused_imports)]
+pub use value::pointer_click_activates;
 #[allow(unused_imports)]
 pub use value::{
     BubbleKind, BubbleSnapshot, LayerSnapshot, ListSnapshot, ObservableEvent, ReporterSnapshot,
-    RuntimeInputEvent, RuntimeSnapshot, ScratchInput, ScratchListMetadata, ScratchState,
-    ScratchValue, ScratchValueView, ScratchVariableMetadata, SpriteFenceGeometry, VariableSnapshot,
-    list_snapshot_key, variable_snapshot_key,
+    RuntimeInputEvent, RuntimeSnapshot, ScratchInput, ScratchListMetadata, ScratchSoundEffect,
+    ScratchState, ScratchValue, ScratchValueView, ScratchVariableMetadata, SpriteFenceGeometry,
+    VariableSnapshot, list_snapshot_key, variable_snapshot_key,
 };
 
 #[derive(Clone, Debug, PartialEq)]

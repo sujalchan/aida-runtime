@@ -13,7 +13,35 @@
 // limitations under the License.
 
 use super::ScratchState;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
+
+/// keep each compiled edge hat's last predicate value per target instance.
+#[derive(Debug, Default)]
+pub struct EdgeHatState {
+    previous: HashMap<(usize, usize), bool>,
+}
+
+impl EdgeHatState {
+    /// return true only when a hat's predicate changes from false to true.
+    pub fn rising_edge(&mut self, hat: usize, instance: usize, active: bool) -> bool {
+        !self
+            .previous
+            .insert((hat, instance), active)
+            .unwrap_or(false)
+            && active
+    }
+
+    /// clear predicate history when Scratch starts a new project run.
+    pub fn clear(&mut self) {
+        self.previous.clear();
+    }
+
+    /// discard clone history once the corresponding runtime instance is gone.
+    pub fn retain_live_instances(&mut self, mut is_alive: impl FnMut(usize) -> bool) {
+        self.previous.retain(|(_, instance), _| is_alive(*instance));
+    }
+}
 
 pub trait Clock {
     fn now_millis(&self) -> u64;
@@ -84,6 +112,8 @@ pub enum ScriptStatus {
     Yield,
     /// suspend until the scheduler clock reaches the deadline; the scheduler will not step the script earlier.
     WaitUntil(u64),
+    /// suspend until a runtime event completes the supplied wait token.
+    WaitForSignal(u64),
     Complete,
     StopAll,
     StopOtherScripts,
@@ -99,6 +129,8 @@ pub enum SchedulerStatus {
     Progressed,
     /// all active scripts are waiting until the given clock time.
     WaitingUntil(u64),
+    /// every active script is suspended on an external runtime event.
+    WaitingForSignal,
     /// no active scripts remain.
     Complete,
 }
@@ -113,11 +145,21 @@ pub trait ResumableScript {
         None
     }
     fn restart_for_broadcast(&mut self) {}
+    /// identify an active edge hat so the scheduler does not start duplicates.
+    fn edge_hat_key(&self) -> Option<(usize, usize)> {
+        None
+    }
+    /// identify click hats that restart when the same target is clicked again.
+    fn click_hat_key(&self) -> Option<(usize, usize)> {
+        None
+    }
 }
 
 pub struct ScriptScheduler<S> {
     scripts: Vec<S>,
     wake_at: Vec<Option<u64>>,
+    waiting_for: Vec<Option<u64>>,
+    completed_signals: HashSet<u64>,
     script_ids: Vec<u64>,
     joins: Vec<Option<Vec<u64>>>,
     has_waiting_senders: bool,
@@ -136,6 +178,8 @@ impl<S: ResumableScript> ScriptScheduler<S> {
         let script_count = scripts.len();
         Self {
             wake_at: vec![None; scripts.len()],
+            waiting_for: vec![None; scripts.len()],
+            completed_signals: HashSet::new(),
             script_ids: (0..script_count as u64).collect(),
             joins: vec![None; script_count],
             has_waiting_senders: false,
@@ -156,6 +200,9 @@ impl<S: ResumableScript> ScriptScheduler<S> {
                     if deadline > now {
                         std::thread::sleep(std::time::Duration::from_millis(deadline - now));
                     }
+                }
+                SchedulerStatus::WaitingForSignal => {
+                    std::thread::sleep(std::time::Duration::from_millis(8))
                 }
                 SchedulerStatus::Complete => return,
             }
@@ -189,15 +236,12 @@ impl<S: ResumableScript> ScriptScheduler<S> {
             } else {
                 true
             };
-            let is_runnable = match self.wake_at[index] {
-                None => join_finished,
-                Some(deadline) => deadline <= *now.get_or_insert_with(|| self.clock.now_millis()),
-            };
-            if is_runnable && join_finished {
+            let is_runnable = self.is_runnable(index, &mut now) && join_finished;
+            if is_runnable {
                 return self.run_script_at(index, state);
             }
         }
-        SchedulerStatus::WaitingUntil(self.wake_at.iter().flatten().copied().min().unwrap())
+        self.idle_status()
     }
 
     /// return script ids in the order the scheduler would consider them.
@@ -226,13 +270,13 @@ impl<S: ResumableScript> ScriptScheduler<S> {
         }
         for offset in 0..self.scripts.len() {
             let index = (self.next + offset) % self.scripts.len();
-            if self.wake_at[index].is_none() {
+            if self.waiting_for[index].is_none() && self.wake_at[index].is_none() {
                 output.push(self.script_ids[index]);
             }
         }
         for offset in 0..self.scripts.len() {
             let index = (self.next + offset) % self.scripts.len();
-            if self.wake_at[index].is_some() {
+            if self.waiting_for[index].is_some() || self.wake_at[index].is_some() {
                 output.push(self.script_ids[index]);
             }
         }
@@ -271,8 +315,8 @@ impl<S: ResumableScript> ScriptScheduler<S> {
         } else {
             true
         };
-        let is_runnable =
-            self.wake_at[index].is_none_or(|deadline| deadline <= self.clock.now_millis());
+        let mut now = None;
+        let is_runnable = self.is_runnable(index, &mut now);
         (join_finished && is_runnable).then(|| self.run_script_at(index, state))
     }
 
@@ -280,12 +324,43 @@ impl<S: ResumableScript> ScriptScheduler<S> {
     pub fn idle_status(&self) -> SchedulerStatus {
         if self.scripts.is_empty() {
             SchedulerStatus::Complete
+        } else if let Some(deadline) = self.wake_at.iter().flatten().copied().min() {
+            SchedulerStatus::WaitingUntil(deadline)
+        } else if self.waiting_for.iter().any(Option::is_some) {
+            SchedulerStatus::WaitingForSignal
         } else {
-            SchedulerStatus::WaitingUntil(self.wake_at.iter().flatten().copied().min().unwrap())
+            SchedulerStatus::WaitingForSignal
+        }
+    }
+
+    fn is_runnable(&self, index: usize, now: &mut Option<u64>) -> bool {
+        if let Some(signal) = self.waiting_for[index] {
+            return self.completed_signals.contains(&signal);
+        }
+        match self.wake_at[index] {
+            None => true,
+            Some(deadline) => deadline <= *now.get_or_insert_with(|| self.clock.now_millis()),
+        }
+    }
+
+    /// wake every script suspended on a completed runtime signal.
+    pub fn signal(&mut self, signal: u64) {
+        if self.waiting_for.contains(&Some(signal)) {
+            self.completed_signals.insert(signal);
         }
     }
 
     fn run_script_at(&mut self, mut index: usize, state: &mut ScratchState) -> SchedulerStatus {
+        if let Some(signal) = self.waiting_for[index].take() {
+            if !self
+                .waiting_for
+                .iter()
+                .any(|waiting| *waiting == Some(signal))
+            {
+                self.completed_signals.remove(&signal);
+            }
+        }
+        self.wake_at[index] = None;
         self.next = index;
         state.set_current_instance(self.scripts[index].target_instance());
         let mut status = self.scripts[index].step(state, self.clock.as_ref());
@@ -309,6 +384,12 @@ impl<S: ResumableScript> ScriptScheduler<S> {
             }
             ScriptStatus::WaitUntil(deadline) => {
                 self.wake_at[index] = Some(deadline);
+                self.waiting_for[index] = None;
+                self.next = (index + 1) % self.scripts.len();
+            }
+            ScriptStatus::WaitForSignal(signal) => {
+                self.wake_at[index] = None;
+                self.waiting_for[index] = Some(signal);
                 self.next = (index + 1) % self.scripts.len();
             }
             ScriptStatus::Complete => {
@@ -316,6 +397,7 @@ impl<S: ResumableScript> ScriptScheduler<S> {
                 self.wake_at.remove(index);
                 self.script_ids.remove(index);
                 self.joins.remove(index);
+                self.waiting_for.remove(index);
                 self.has_waiting_senders = self.joins.iter().any(Option::is_some);
                 self.next = if self.scripts.is_empty() {
                     0
@@ -330,6 +412,7 @@ impl<S: ResumableScript> ScriptScheduler<S> {
             ScriptStatus::StopOtherScripts => unreachable!(),
             ScriptStatus::Broadcast { message, wait } => {
                 self.wake_at[index] = None;
+                self.waiting_for[index] = None;
                 self.pending_broadcast = Some((self.script_ids[index], message, wait));
                 self.next = (index + 1) % self.scripts.len();
             }
@@ -338,10 +421,13 @@ impl<S: ResumableScript> ScriptScheduler<S> {
     }
 
     pub fn stop_all(&mut self, state: &mut ScratchState) {
+        state.stop_project_sounds(self.clock.now_millis());
         state.clear_speech_bubbles();
         state.remove_clones();
         self.scripts.clear();
         self.wake_at.clear();
+        self.waiting_for.clear();
+        self.completed_signals.clear();
         self.script_ids.clear();
         self.joins.clear();
         self.has_waiting_senders = false;
@@ -358,6 +444,8 @@ impl<S: ResumableScript> ScriptScheduler<S> {
         self.pending_broadcast = None;
         self.scripts = scripts;
         self.wake_at = vec![None; self.scripts.len()];
+        self.waiting_for = vec![None; self.scripts.len()];
+        self.completed_signals.clear();
         self.next = 0;
     }
 
@@ -370,6 +458,7 @@ impl<S: ResumableScript> ScriptScheduler<S> {
         for script in scripts {
             self.scripts.push(script);
             self.wake_at.push(None);
+            self.waiting_for.push(None);
             self.script_ids.push(self.next_script_id);
             self.next_script_id += 1;
             self.joins.push(None);
@@ -379,12 +468,55 @@ impl<S: ResumableScript> ScriptScheduler<S> {
         }
     }
 
+    /// start edge hats only when that hat has no active thread for its target.
+    pub fn start_edge_hats(&mut self, candidates: impl IntoIterator<Item = S>) {
+        let mut starters = Vec::new();
+        for candidate in candidates {
+            let Some(key) = candidate.edge_hat_key() else {
+                continue;
+            };
+            if !self
+                .scripts
+                .iter()
+                .any(|script| script.edge_hat_key() == Some(key))
+            {
+                starters.push(candidate);
+            }
+        }
+        self.add_scripts(starters);
+    }
+
+    /// start click hats, replacing any still-running thread for the same hat.
+    pub fn start_click_hats(&mut self, candidates: impl IntoIterator<Item = S>) {
+        for candidate in candidates {
+            let Some(key) = candidate.click_hat_key() else {
+                continue;
+            };
+            if let Some(index) = self
+                .scripts
+                .iter()
+                .position(|script| script.click_hat_key() == Some(key))
+            {
+                self.scripts[index] = candidate;
+                self.wake_at[index] = None;
+                self.waiting_for[index] = None;
+                self.joins[index] = None;
+                self.script_ids[index] = self.next_script_id;
+                self.next_script_id += 1;
+            } else {
+                self.add_scripts(std::iter::once(candidate));
+            }
+        }
+        self.has_waiting_senders = self.joins.iter().any(Option::is_some);
+    }
+
     pub fn remove_target_scripts(&mut self, target_instance: usize) {
         let mut index = 0;
         while index < self.scripts.len() {
             if self.scripts[index].target_instance() == target_instance {
                 self.scripts.remove(index);
                 self.wake_at.remove(index);
+                self.waiting_for.remove(index);
                 self.script_ids.remove(index);
                 self.joins.remove(index);
                 if index < self.next {
@@ -410,6 +542,7 @@ impl<S: ResumableScript> ScriptScheduler<S> {
             {
                 self.scripts.remove(index);
                 self.wake_at.remove(index);
+                self.waiting_for.remove(index);
                 self.script_ids.remove(index);
                 self.joins.remove(index);
                 if index < self.next {
@@ -436,6 +569,7 @@ impl<S: ResumableScript> ScriptScheduler<S> {
             let id = if let Some(index) = existing {
                 self.scripts[index].restart_for_broadcast();
                 self.wake_at[index] = None;
+                self.waiting_for[index] = None;
                 self.joins[index] = None;
                 let restarted_id = self.next_script_id;
                 self.next_script_id += 1;
@@ -446,6 +580,7 @@ impl<S: ResumableScript> ScriptScheduler<S> {
                 self.next_script_id += 1;
                 self.scripts.push(candidate);
                 self.wake_at.push(None);
+                self.waiting_for.push(None);
                 self.script_ids.push(id);
                 self.joins.push(None);
                 id

@@ -1,8 +1,286 @@
-use super::{Clock, ResumableScript, ScriptScheduler, ScriptStatus, WarpBudget};
+use super::{Clock, EdgeHatState, ResumableScript, ScriptScheduler, ScriptStatus, WarpBudget};
 use crate::runtime::{
-    BubbleKind, ScratchState, ScratchValue, ScratchVariableMetadata, scratch_bool, scratch_round,
-    scratch_to_number,
+    BubbleKind, RuntimeInputEvent, ScratchState, ScratchValue, ScratchVariableMetadata,
+    pointer_click_activates, scratch_bool, scratch_round, scratch_to_number,
 };
+
+#[test]
+fn edge_hat_state_fires_once_per_rising_edge_and_tracks_each_instance() {
+    let mut edges = EdgeHatState::default();
+    assert!(edges.rising_edge(4, 10, true));
+    assert!(!edges.rising_edge(4, 10, true));
+    assert!(!edges.rising_edge(4, 10, false));
+    assert!(edges.rising_edge(4, 10, true));
+    assert!(edges.rising_edge(4, 11, true));
+
+    edges.retain_live_instances(|instance| instance == 10);
+    assert!(!edges.rising_edge(4, 10, true));
+    assert!(edges.rising_edge(4, 11, true));
+    edges.clear();
+    assert!(edges.rising_edge(4, 10, true));
+}
+
+struct SignalWaitScript {
+    waiting: bool,
+    steps: u8,
+    slot: usize,
+}
+
+impl ResumableScript for SignalWaitScript {
+    fn step(&mut self, state: &mut ScratchState, _clock: &dyn Clock) -> ScriptStatus {
+        let next = crate::runtime::scratch_to_number(state.get(self.slot)) + 1.0;
+        state.set(self.slot, next.into());
+        self.steps += 1;
+        if self.waiting && self.steps == 1 {
+            ScriptStatus::WaitForSignal(91)
+        } else {
+            ScriptStatus::Complete
+        }
+    }
+}
+
+#[test]
+fn external_audio_wait_suspends_only_its_thread_and_resumes_on_its_signal() {
+    let mut state = ScratchState::new(vec![0.0.into(), 0.0.into()]);
+    let mut scheduler = ScriptScheduler::new(vec![
+        SignalWaitScript {
+            waiting: true,
+            steps: 0,
+            slot: 0,
+        },
+        SignalWaitScript {
+            waiting: false,
+            steps: 0,
+            slot: 1,
+        },
+    ]);
+
+    assert_eq!(
+        scheduler.advance(&mut state),
+        super::SchedulerStatus::Progressed
+    );
+    assert_eq!(state.get(0), &ScratchValue::Number(1.0));
+    assert_eq!(
+        scheduler.advance(&mut state),
+        super::SchedulerStatus::Progressed
+    );
+    assert_eq!(state.get(1), &ScratchValue::Number(1.0));
+    assert_eq!(
+        scheduler.advance(&mut state),
+        super::SchedulerStatus::WaitingForSignal
+    );
+    assert_eq!(scheduler.active_scripts(), 1);
+    assert_eq!(
+        scheduler.idle_status(),
+        super::SchedulerStatus::WaitingForSignal
+    );
+
+    scheduler.signal(91);
+    assert_eq!(
+        scheduler.advance(&mut state),
+        super::SchedulerStatus::Progressed
+    );
+    assert_eq!(state.get(0), &ScratchValue::Number(2.0));
+    assert_eq!(scheduler.active_scripts(), 0);
+    assert_eq!(scheduler.idle_status(), super::SchedulerStatus::Complete);
+}
+
+// exercise generic hat scheduling without coupling the runtime to Scratch opcodes.
+struct EventHatScript {
+    key: (usize, usize),
+    edge: bool,
+    record_instance: bool,
+    steps: u8,
+}
+
+impl ResumableScript for EventHatScript {
+    fn step(&mut self, state: &mut ScratchState, _clock: &dyn Clock) -> ScriptStatus {
+        if self.record_instance {
+            state.set_shared(0, (state.current_instance() as f64).into());
+            return ScriptStatus::Complete;
+        }
+        state.set(
+            0,
+            (crate::runtime::scratch_to_number(state.get(0)) + 1.0).into(),
+        );
+        self.steps += 1;
+        if self.steps == 1 {
+            ScriptStatus::Yield
+        } else {
+            ScriptStatus::Complete
+        }
+    }
+
+    fn target_instance(&self) -> usize {
+        self.key.1
+    }
+
+    fn edge_hat_key(&self) -> Option<(usize, usize)> {
+        self.edge.then_some(self.key)
+    }
+
+    fn click_hat_key(&self) -> Option<(usize, usize)> {
+        (!self.edge).then_some(self.key)
+    }
+}
+
+fn dispatch_pointer_event(
+    scheduler: &mut ScriptScheduler<EventHatScript>,
+    event: RuntimeInputEvent,
+) {
+    let RuntimeInputEvent::PointerButton {
+        pressed,
+        inside_stage,
+        target_instance,
+        draggable,
+        was_dragged,
+        monitor_interaction,
+    } = event
+    else {
+        return;
+    };
+    if pointer_click_activates(
+        pressed,
+        inside_stage,
+        draggable,
+        was_dragged,
+        monitor_interaction,
+    ) {
+        let instance = target_instance.unwrap_or(0);
+        scheduler.start_click_hats([EventHatScript {
+            key: (8, instance),
+            edge: false,
+            record_instance: true,
+            steps: 0,
+        }]);
+    }
+}
+
+#[test]
+fn edge_hat_threads_do_not_duplicate_and_clicks_restart_the_same_target_hat() {
+    let mut state = ScratchState::new(vec![0.0.into()]);
+    let mut scheduler = ScriptScheduler::new(Vec::<EventHatScript>::new());
+    let edge = || EventHatScript {
+        key: (2, 0),
+        edge: true,
+        record_instance: false,
+        steps: 0,
+    };
+    scheduler.start_edge_hats([edge()]);
+    scheduler.start_edge_hats([edge()]);
+    assert_eq!(scheduler.active_scripts(), 1);
+    scheduler.advance(&mut state);
+    scheduler.advance(&mut state);
+    assert_eq!(scheduler.active_scripts(), 0);
+
+    let mut scheduler = ScriptScheduler::new(Vec::<EventHatScript>::new());
+    let click = || EventHatScript {
+        key: (3, 0),
+        edge: false,
+        record_instance: false,
+        steps: 0,
+    };
+    scheduler.start_click_hats([click()]);
+    scheduler.advance(&mut state);
+    assert_eq!(state.get(0), &ScratchValue::Number(3.0));
+    scheduler.start_click_hats([click()]);
+    assert_eq!(scheduler.active_scripts(), 1);
+    scheduler.advance(&mut state);
+    assert_eq!(state.get(0), &ScratchValue::Number(4.0));
+}
+
+#[test]
+fn timer_edge_can_start_after_idle_and_rearms_after_a_timer_reset() {
+    let mut state = ScratchState::new(vec![0.0.into()]);
+    state.reset_project_timer(500);
+    let mut edges = EdgeHatState::default();
+    let mut scheduler = ScriptScheduler::new(Vec::<EventHatScript>::new());
+    assert_eq!(scheduler.idle_status(), super::SchedulerStatus::Complete);
+
+    let poll_timer = |now_millis,
+                      state: &ScratchState,
+                      edges: &mut EdgeHatState,
+                      scheduler: &mut ScriptScheduler<EventHatScript>| {
+        let active = state.project_timer_seconds(now_millis) > 10.0;
+        if edges.rising_edge(9, 0, active) {
+            scheduler.start_edge_hats([EventHatScript {
+                key: (9, 0),
+                edge: true,
+                record_instance: false,
+                steps: 0,
+            }]);
+        }
+    };
+    poll_timer(10_500, &state, &mut edges, &mut scheduler);
+    assert_eq!(scheduler.active_scripts(), 0);
+    poll_timer(10_501, &state, &mut edges, &mut scheduler);
+    assert_eq!(scheduler.active_scripts(), 1);
+    scheduler.advance(&mut state);
+    scheduler.advance(&mut state);
+    assert_eq!(scheduler.active_scripts(), 0);
+    poll_timer(10_502, &state, &mut edges, &mut scheduler);
+    assert_eq!(scheduler.active_scripts(), 0);
+
+    state.reset_project_timer(11_000);
+    poll_timer(11_000, &state, &mut edges, &mut scheduler);
+    assert_eq!(scheduler.active_scripts(), 0);
+    poll_timer(21_001, &state, &mut edges, &mut scheduler);
+    assert_eq!(scheduler.active_scripts(), 1);
+}
+
+// inject resolved pointer events through the same click predicate and scheduler path.
+#[test]
+fn pointer_events_route_stage_original_and_clone_clicks_to_distinct_instances() {
+    let mut state = ScratchState::new(vec![(-1.0).into()]);
+    state.register_target(0, "Stage", true);
+    state.register_target(1, "Sprite1", false);
+    let clone = state.create_clone(1, 1, 300).unwrap();
+
+    let mut scheduler = ScriptScheduler::new(Vec::<EventHatScript>::new());
+    dispatch_pointer_event(
+        &mut scheduler,
+        RuntimeInputEvent::PointerButton {
+            pressed: true,
+            inside_stage: true,
+            target_instance: None,
+            draggable: false,
+            was_dragged: false,
+            monitor_interaction: false,
+        },
+    );
+    scheduler.advance(&mut state);
+    assert_eq!(state.get_shared(0), &ScratchValue::Number(0.0));
+
+    let mut scheduler = ScriptScheduler::new(Vec::<EventHatScript>::new());
+    dispatch_pointer_event(
+        &mut scheduler,
+        RuntimeInputEvent::PointerButton {
+            pressed: true,
+            inside_stage: true,
+            target_instance: Some(1),
+            draggable: false,
+            was_dragged: false,
+            monitor_interaction: false,
+        },
+    );
+    scheduler.advance(&mut state);
+    assert_eq!(state.get_shared(0), &ScratchValue::Number(1.0));
+
+    let mut scheduler = ScriptScheduler::new(Vec::<EventHatScript>::new());
+    dispatch_pointer_event(
+        &mut scheduler,
+        RuntimeInputEvent::PointerButton {
+            pressed: true,
+            inside_stage: true,
+            target_instance: Some(clone),
+            draggable: false,
+            was_dragged: false,
+            monitor_interaction: false,
+        },
+    );
+    scheduler.advance(&mut state);
+    assert_eq!(state.get_shared(0), &ScratchValue::Number(clone as f64));
+}
 
 struct FirstScript {
     pc: u8,

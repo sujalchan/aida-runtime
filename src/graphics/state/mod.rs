@@ -219,6 +219,8 @@ struct SpriteRenderer {
     instance_id: usize,
     original: bool,
     layer_order: u32,
+    // retain target drag mode so click hats use the matching mouse edge.
+    draggable: bool,
     costumes: Vec<SpriteCostumeRenderer>,
     current_costume: usize,
     transform: SpriteTransform,
