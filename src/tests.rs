@@ -1,4 +1,4 @@
-use std::{cell::Cell, rc::Rc};
+use std::{cell::Cell, rc::Rc, time::Duration};
 
 use crate::{
     apply_input_batch, assert_expected_variables, enqueue_pen_commands, parse_run_options,
@@ -293,6 +293,99 @@ fn sensing_monitor_values_survive_stop_and_mouse_values_remain_live() {
         reporter.key == mouse_key && reporter.value == ScratchValue::Number(12.0)
     }));
     assert!(program.presentation_requested());
+}
+
+#[derive(Clone)]
+struct FrameClock(Rc<Cell<Duration>>);
+
+impl Clock for FrameClock {
+    fn now_millis(&self) -> u64 {
+        self.0.get().as_millis().min(u64::MAX as u128) as u64
+    }
+}
+
+#[test]
+fn think_fixture_resumes_timed_blocks_with_stage_progress_and_stops_in_order() {
+    // exact frame timestamps separate scheduler behavior from host timer jitter.
+    for fps in [30u64, 60] {
+        let clock = FrameClock(Rc::new(Cell::new(Duration::ZERO)));
+        let mut program = GeneratedProgram::new_with_clock(Box::new(clock.clone()));
+        let mode = PacingMode::from_fps(fps as f64).unwrap();
+        let frame_interval = Duration::from_secs_f64(1.0 / fps as f64);
+
+        for frame in 0..=fps * 6 {
+            let now = Duration::from_nanos(
+                (u128::from(frame) * 1_000_000_000 / u128::from(fps)) as u64,
+            );
+            clock.0.set(now);
+            program.begin_tick();
+            let redraw_requested = std::cell::Cell::new(false);
+            let status = crate::runtime::run_tick(
+                mode,
+                now,
+                frame_interval.mul_f64(0.75),
+                || clock.0.get(),
+                || redraw_requested.get(),
+                || {
+                    let status = program.advance_frame();
+                    redraw_requested.set(program.redraw_requested());
+                    status
+                },
+            );
+            if program.presentation_requested() {
+                program.presentation_consumed();
+            }
+
+            let value = program.state().get_shared(0).clone();
+            if frame == fps * 2 {
+                assert_eq!(value, ScratchValue::Number((fps * 2) as f64));
+                assert_eq!(
+                    program.state().backdrop_number_name(true),
+                    ScratchValue::Number(2.0)
+                );
+                let bubble = program
+                    .observable_snapshot(frame as usize)
+                    .layers
+                    .into_iter()
+                    .find(|layer| layer.target == "Sprite1")
+                    .and_then(|layer| layer.bubble)
+                    .expect("second timed think bubble is visible at its start");
+                assert_eq!(bubble.kind, crate::runtime::BubbleKind::Think);
+                assert!(bubble.text.starts_with("Lorem ipsum"));
+            } else if frame == fps * 4 {
+                assert_eq!(value, ScratchValue::Number((fps * 4) as f64));
+                let bubble = program
+                    .observable_snapshot(frame as usize)
+                    .layers
+                    .into_iter()
+                    .find(|layer| layer.target == "Sprite1")
+                    .and_then(|layer| layer.bubble)
+                    .expect("timed say bubble is visible at its start");
+                assert_eq!(bubble.kind, crate::runtime::BubbleKind::Say);
+                assert_eq!(bubble.text, "Hello!");
+            } else if frame == fps * 6 {
+                assert_eq!(status, SchedulerStatus::Complete);
+                assert_eq!(value, ScratchValue::Number((fps * 6 + 1) as f64));
+                assert_eq!(
+                    program.state().backdrop_number_name(true),
+                    ScratchValue::Number(2.0)
+                );
+                assert!(program.is_complete());
+                assert!(program
+                    .observable_snapshot(frame as usize)
+                    .layers
+                    .iter()
+                    .all(|layer| layer.bubble.is_none()));
+                let stopped_value = program.state().get_shared(0).clone();
+                assert_eq!(program.advance_frame(), SchedulerStatus::Complete);
+                assert_eq!(program.state().get_shared(0), &stopped_value);
+            }
+
+            if status == SchedulerStatus::Complete {
+                break;
+            }
+        }
+    }
 }
 
 #[test]
