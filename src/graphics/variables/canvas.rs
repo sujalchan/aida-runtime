@@ -90,6 +90,8 @@ pub(super) fn draw_context_menu(
             MonitorContextAction::LargeReadout => "large readout",
             MonitorContextAction::Slider => "slider",
             MonitorContextAction::ChangeSliderRange => "change slider range",
+            MonitorContextAction::ImportList => "import",
+            MonitorContextAction::ExportList => "export",
             MonitorContextAction::Hide => "hide",
             MonitorContextAction::Dismiss => "",
         };

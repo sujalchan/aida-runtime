@@ -201,7 +201,9 @@ fn project_monitors(project: &aida_ast::parser::ScratchProject) -> Vec<VariableM
             } else {
                 monitor_label(&monitor.opcode, &monitor.params)
             };
-            let value_key = if let Some(target) = target {
+            let value_key = if monitor.opcode == "sensing_timer" {
+                "timer".to_owned()
+            } else if let Some(target) = target {
                 let target_index = project
                     .targets
                     .iter()
@@ -278,9 +280,9 @@ fn project_monitors(project: &aida_ast::parser::ScratchProject) -> Vec<VariableM
             .with_value_key(value_key)
             .with_visibility(monitor.visible)
             .with_slider_range(monitor.slider_min, monitor.slider_max);
-            if let Some(list) = list {
-                result = result.with_list_items(
-                    list.items.iter().map(project_value_text).collect(),
+            if list.is_some() {
+                result = result.with_list_values(
+                    Arc::new(Vec::new()),
                     if monitor.width > 0.0 {
                         monitor.width as f32
                     } else {
@@ -559,6 +561,25 @@ mod monitor_project_tests {
         assert_eq!(monitors[0].value_key, "__stage/backdrop/number");
         assert_eq!(monitors[1].value_key, "__stage/backdrop/name");
     }
+
+    #[test]
+    fn current_period_monitor_labels_are_lowercase_units_without_current_prefix() {
+        for (period, expected) in [
+            ("YEAR", "year"),
+            ("MONTH", "month"),
+            ("DATE", "date"),
+            ("DAYOFWEEK", "day of week"),
+            ("HOUR", "hour"),
+            ("MINUTE", "minute"),
+            ("SECOND", "second"),
+        ] {
+            let params = std::collections::HashMap::from([(
+                "CURRENTMENU".to_owned(),
+                serde_json::Value::String(period.to_owned()),
+            )]);
+            assert_eq!(monitor_label("sensing_current", &params), expected);
+        }
+    }
 }
 
 fn monitor_category(opcode: &str, kind: super::MonitorKind) -> super::MonitorCategory {
@@ -603,6 +624,24 @@ fn monitor_label(
         };
         return format!("{subject} {detail}");
     }
+    if opcode == "sensing_current" {
+        return match params
+            .get("CURRENTMENU")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "year" => "year".to_owned(),
+            "month" => "month".to_owned(),
+            "date" => "date".to_owned(),
+            "dayofweek" => "day of week".to_owned(),
+            "hour" => "hour".to_owned(),
+            "minute" => "minute".to_owned(),
+            "second" => "second".to_owned(),
+            _ => "current".to_owned(),
+        };
+    }
     let label = match opcode {
         "motion_xposition" => "x position",
         "motion_yposition" => "y position",
@@ -612,7 +651,6 @@ fn monitor_label(
         "sensing_answer" => "answer",
         "sensing_loudness" => "loudness",
         "sensing_timer" => "timer",
-        "sensing_current" => "current",
         "sensing_mousex" => "mouse x",
         "sensing_mousey" => "mouse y",
         "sensing_mousedown" => "mouse down?",
@@ -625,19 +663,7 @@ fn monitor_label(
                 .map_or_else(|| opcode.to_owned(), |(_, rest)| rest.replace('_', " "));
         }
     };
-    if opcode == "sensing_current" {
-        if let Some(value) = params.get("CURRENTMENU") {
-            return format!("current {value}");
-        }
-    }
     label.to_owned()
-}
-
-fn project_value_text(value: &serde_json::Value) -> String {
-    value
-        .as_str()
-        .map(str::to_owned)
-        .unwrap_or_else(|| value.to_string())
 }
 
 fn sprite_reporter_key(target_name: &str, opcode: &str) -> Option<String> {
@@ -992,6 +1018,8 @@ impl GraphicsState {
         let (glyph_instance_pipeline, glyph_layout) =
             glyph_instance_pipeline(&device, config.format);
         let gpu_monitor_capacity = 8u64;
+        let gpu_shape_capacity = 1u64;
+        let gpu_glyph_capacity = 1u64;
         let monitor_transforms = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("variable monitor transforms"),
             size: gpu_monitor_capacity * 16,
@@ -1014,17 +1042,13 @@ impl GraphicsState {
         });
         let monitor_instances = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("variable monitor instances"),
-            size: gpu_monitor_capacity
-                * SHAPES_PER_MONITOR
-                * std::mem::size_of::<MonitorInstance>() as u64,
+            size: gpu_shape_capacity * std::mem::size_of::<MonitorInstance>() as u64,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let glyph_instances = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("variable glyph instances"),
-            size: gpu_monitor_capacity
-                * GLYPHS_PER_MONITOR
-                * std::mem::size_of::<GlyphInstance>() as u64,
+            size: gpu_glyph_capacity * std::mem::size_of::<GlyphInstance>() as u64,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -1168,6 +1192,9 @@ impl GraphicsState {
             sprite_indices,
             sprite_instance_indices,
             last_runtime_layers: Vec::new(),
+            project_timer_sample_millis: 0,
+            project_timer_sampled_at: Instant::now(),
+            project_timer_epoch: initial_snapshot.project_timer_epoch,
             sprite_transform_layout,
             variable_layer,
             fading_shadow_index: None,
@@ -1193,8 +1220,10 @@ impl GraphicsState {
             glyph_atlas_sampler,
             glyph_bind_group: glyph_atlas_bind_group,
             monitor_instances,
+            gpu_shape_capacity,
             gpu_monitor_capacity,
             glyph_instances,
+            gpu_glyph_capacity,
             monitor_transforms,
             glyph_metadata,
             glyph_metadata_capacity: 1,

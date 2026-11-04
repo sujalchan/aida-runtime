@@ -2,6 +2,8 @@ use super::{
     ScratchInput, ScratchValue, ScratchValueView, operators::to_text, scratch_equals,
     scratch_random, scratch_to_number,
 };
+use serde::de::{IgnoredAny, MapAccess, SeqAccess, Visitor};
+use std::{fmt, sync::Arc};
 
 pub const SCRATCH_LIST_LIMIT: usize = 200_000;
 
@@ -9,38 +11,59 @@ static EMPTY_ITEM: ScratchValue = ScratchValue::Text(String::new());
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ScratchList {
-    items: Vec<ScratchValue>,
+    items: Arc<Vec<ScratchValue>>,
 }
 
 impl ScratchList {
     pub fn new(items: Vec<ScratchValue>) -> Self {
-        Self { items }
+        Self {
+            items: Arc::new(items),
+        }
+    }
+
+    /// build a list from the compact json initializer emitted by aida-ast.
+    pub fn from_json(json: &str) -> Self {
+        let items: Vec<ScratchValue> = serde_json::from_str(json)
+            .expect("generated Scratch list initializer must contain a JSON array");
+        Self::new(items)
     }
 
     pub fn items(&self) -> &[ScratchValue] {
         &self.items
     }
 
+    pub fn shared_items(&self) -> Arc<Vec<ScratchValue>> {
+        Arc::clone(&self.items)
+    }
+
+    pub(crate) fn shares_storage_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.items, &other.items)
+    }
+
     pub fn add(&mut self, item: ScratchValue) -> bool {
         if self.items.len() >= SCRATCH_LIST_LIMIT {
             return false;
         }
-        self.items.push(item);
+        Arc::make_mut(&mut self.items).push(item);
         true
+    }
+
+    pub fn replace_all(&mut self, items: Vec<ScratchValue>) {
+        self.items = Arc::new(items);
     }
 
     pub fn delete(&mut self, index: impl ScratchInput) {
         match resolve_index(index, self.items.len(), true) {
-            ListIndex::All => self.items.clear(),
+            ListIndex::All => Arc::make_mut(&mut self.items).clear(),
             ListIndex::Item(index) => {
-                self.items.remove(index);
+                Arc::make_mut(&mut self.items).remove(index);
             }
             ListIndex::Invalid => {}
         }
     }
 
     pub fn delete_all(&mut self) {
-        self.items.clear();
+        Arc::make_mut(&mut self.items).clear();
     }
 
     pub fn insert(&mut self, item: ScratchValue, index: impl ScratchInput) {
@@ -51,15 +74,18 @@ impl ScratchList {
         if index >= SCRATCH_LIST_LIMIT {
             return;
         }
-        self.items.insert(index, item);
-        if self.items.len() > SCRATCH_LIST_LIMIT {
-            self.items.pop();
+        let items = Arc::make_mut(&mut self.items);
+        items.insert(index, item);
+        if items.len() > SCRATCH_LIST_LIMIT {
+            items.pop();
         }
     }
 
     pub fn replace(&mut self, index: impl ScratchInput, item: ScratchValue) {
         if let ListIndex::Item(index) = resolve_index(index, self.items.len(), false) {
-            self.items[index] = item;
+            if self.items[index] != item {
+                Arc::make_mut(&mut self.items)[index] = item;
+            }
         }
     }
 
@@ -99,6 +125,72 @@ impl ScratchList {
             output.push_str(&to_text(item.scratch_view()));
         }
         output
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ScratchValue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct ScratchValueVisitor;
+
+        impl<'de> Visitor<'de> for ScratchValueVisitor {
+            type Value = ScratchValue;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a Scratch list item")
+            }
+
+            fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E> {
+                Ok(ScratchValue::Boolean(value))
+            }
+
+            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E> {
+                Ok(ScratchValue::Number(value as f64))
+            }
+
+            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> {
+                Ok(ScratchValue::Number(value as f64))
+            }
+
+            fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E> {
+                Ok(ScratchValue::Number(value))
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(ScratchValue::Text(value.to_owned()))
+            }
+
+            fn visit_string<E>(self, value: String) -> Result<Self::Value, E> {
+                Ok(ScratchValue::Text(value))
+            }
+
+            fn visit_unit<E>(self) -> Result<Self::Value, E> {
+                Ok(ScratchValue::Number(0.0))
+            }
+
+            fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                while sequence.next_element::<IgnoredAny>()?.is_some() {}
+                Ok(ScratchValue::Number(0.0))
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+                Ok(ScratchValue::Number(0.0))
+            }
+        }
+
+        deserializer.deserialize_any(ScratchValueVisitor)
     }
 }
 
@@ -167,6 +259,35 @@ mod tests {
         assert_eq!(list.length(), 6);
         list.delete("all");
         assert!(list.items().is_empty());
+    }
+
+    #[test]
+    fn compact_initializer_preserves_supported_scratch_value_types() {
+        let list = ScratchList::from_json(r#"["text", 4.5, true, null, {"x": 1}]"#);
+        assert_eq!(
+            list.items(),
+            &[
+                ScratchValue::Text("text".into()),
+                ScratchValue::Number(4.5),
+                ScratchValue::Boolean(true),
+                ScratchValue::Number(0.0),
+                ScratchValue::Number(0.0),
+            ]
+        );
+    }
+
+    #[test]
+    fn shared_list_snapshots_use_copy_on_write_and_keep_clones_independent() {
+        let original = ScratchList::new(vec!["one".into(), "two".into()]);
+        let snapshot = original.shared_items();
+        let mut clone = original.clone();
+        assert!(original.shares_storage_with(&clone));
+
+        clone.replace(1.0_f64, "clone".into());
+        assert!(!original.shares_storage_with(&clone));
+        assert_eq!(original.get(1.0_f64), &ScratchValue::Text("one".into()));
+        assert_eq!(clone.get(1.0_f64), &ScratchValue::Text("clone".into()));
+        assert_eq!(snapshot[0], ScratchValue::Text("one".into()));
     }
 
     #[test]
@@ -242,6 +363,31 @@ mod tests {
     }
 
     #[test]
+    fn compact_initializer_keeps_large_list_values_and_final_index_accessible() {
+        let fixture = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../aida-ast/tests/src/monitor-tests-sensing.sb3"
+        );
+        let json = aida_ast::extractor::read_project_json(fixture).unwrap();
+        let project = aida_ast::parser::parse_project(&json).unwrap();
+        let source_items = project
+            .targets
+            .iter()
+            .flat_map(|target| target.lists.values())
+            .find(|list| list.items.len() == 200_000)
+            .expect("fixture should contain its complete 200,000-item list");
+        let serialized = serde_json::to_string(&source_items.items).unwrap();
+        let list = ScratchList::from_json(&serialized);
+
+        assert_eq!(list.length(), 200_000);
+        let source_number =
+            |index: usize| ScratchValue::Number(source_items.items[index].as_f64().unwrap());
+        assert_eq!(list.get(1.0_f64), &source_number(0));
+        assert_eq!(list.get(100_001.0_f64), &source_number(100_000));
+        assert_eq!(list.get("last"), &source_number(199_999));
+    }
+
+    #[test]
     #[ignore = "manual release-mode microbenchmark"]
     fn benchmark_vec_backed_list_operations() {
         use std::{hint::black_box, time::Instant};
@@ -283,7 +429,7 @@ mod tests {
             let edit_size = size + 10_000;
             for (label, position) in [("front", 1), ("middle", edit_size / 2), ("tail", edit_size)]
             {
-                let mut edit_list = ScratchList::new(list.items.clone());
+                let mut edit_list = ScratchList::new(list.items().to_vec());
                 let started = Instant::now();
                 for _ in 0..100 {
                     edit_list.insert(ScratchValue::Text("x".into()), position as f64);

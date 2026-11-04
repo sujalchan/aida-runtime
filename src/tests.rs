@@ -63,6 +63,22 @@ fn cli_selects_default_sixty_hertz_and_turbo_modes() {
 }
 
 #[test]
+fn cli_accepts_a_username_override_once() {
+    let options = parse_run_options(["--username".to_owned(), "AdaUser".to_owned()]).unwrap();
+    assert_eq!(options.username.as_deref(), Some("AdaUser"));
+    assert!(parse_run_options(["--username".to_owned()]).is_err());
+    assert!(
+        parse_run_options([
+            "--username".to_owned(),
+            "one".to_owned(),
+            "--username".to_owned(),
+            "two".to_owned(),
+        ])
+        .is_err()
+    );
+}
+
+#[test]
 fn cli_accepts_a_positive_scheduler_tick_limit() {
     let options = parse_run_options([
         "--turbo".to_owned(),
@@ -167,6 +183,7 @@ fn headless_variable_assertions_match_scoped_snapshot_keys() {
             target: "Sprite".to_owned(),
             instance_id: Some(2),
             value: ScratchValue::Number(9.0),
+            monitor_visible: true,
         }],
         ..RuntimeSnapshot::default()
     };
@@ -216,6 +233,39 @@ fn broadcast_fixture_returns_between_rounds_and_publishes_monitor_changes() {
         variable.id == "`jEk@4|i[#Fk?(8x)AV.-my variable"
             && variable.value == ScratchValue::Text("0".to_owned())
     }));
+}
+
+#[test]
+fn sensing_monitor_values_survive_stop_and_mouse_values_remain_live() {
+    let mut program = GeneratedProgram::new();
+    assert!(program.has_live_sensing_monitors());
+    program.apply_input(RuntimeInputEvent::MousePosition { x: 41.0, y: -17.0 });
+
+    let mouse_key = "__reporter/Stage/sensing_mousex/sensing_mousex";
+    let first = program.observable_snapshot(1);
+    assert!(first.reporters.iter().any(|reporter| {
+        reporter.key == mouse_key && reporter.value == ScratchValue::Number(41.0)
+    }));
+    let weekday = first
+        .reporters
+        .iter()
+        .find(|reporter| reporter.key == "__reporter/Stage/sensing_current/current_dayofweek")
+        .expect("weekday monitor is present");
+    assert!(matches!(weekday.value, ScratchValue::Number(value) if (1.0..=7.0).contains(&value)));
+
+    program.stop_all();
+    let stopped = program.observable_snapshot(2);
+    assert!(stopped.reporters.iter().any(|reporter| {
+        reporter.key == mouse_key && reporter.value == ScratchValue::Number(41.0)
+    }));
+
+    program.begin_tick();
+    program.apply_input(RuntimeInputEvent::MousePosition { x: 12.0, y: 8.0 });
+    let after_input = program.observable_snapshot(3);
+    assert!(after_input.reporters.iter().any(|reporter| {
+        reporter.key == mouse_key && reporter.value == ScratchValue::Number(12.0)
+    }));
+    assert!(program.presentation_requested());
 }
 
 #[test]

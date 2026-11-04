@@ -28,14 +28,12 @@ use super::pipelines::{
 use super::sprite::Sprite;
 use super::texture::{LAYER_FORMAT, RenderTexture};
 use super::variables::{
-    MonitorBounds, MonitorCategory, MonitorDisplayMode, MonitorKind, VariableLayer, VariableMonitor,
+    ListEditorInput, ListPointerResponse, MonitorBounds, MonitorCategory, MonitorDisplayMode,
+    MonitorKind, VariableLayer, VariableMonitor,
 };
 use super::viewport::StageViewport;
 use super::{SCRATCH_HEIGHT, SCRATCH_WIDTH};
 use crate::runtime::PenCommand;
-
-const SHAPES_PER_MONITOR: u64 = 16;
-const GLYPHS_PER_MONITOR: u64 = 256;
 
 pub(crate) enum RenderOutcome {
     Presented,
@@ -73,6 +71,9 @@ pub(crate) struct GraphicsState {
     sprite_indices: HashMap<String, usize>,
     sprite_instance_indices: HashMap<(usize, usize), usize>,
     last_runtime_layers: Vec<crate::runtime::LayerSnapshot>,
+    project_timer_sample_millis: u64,
+    project_timer_sampled_at: Instant,
+    project_timer_epoch: u64,
     variable_layer: VariableLayer,
     fading_shadow_index: Option<usize>,
     fading_shadow_bounds: Option<MonitorBounds>,
@@ -98,8 +99,10 @@ pub(crate) struct GraphicsState {
     glyph_atlas_sampler: wgpu::Sampler,
     glyph_bind_group: wgpu::BindGroup,
     monitor_instances: wgpu::Buffer,
+    gpu_shape_capacity: u64,
     gpu_monitor_capacity: u64,
     glyph_instances: wgpu::Buffer,
+    gpu_glyph_capacity: u64,
     monitor_transforms: wgpu::Buffer,
     glyph_metadata: wgpu::Buffer,
     glyph_metadata_capacity: u32,
@@ -314,6 +317,7 @@ mod gpu_variable_tests {
             monitor_id: 3,
             color: [1.0; 4],
             scale: 1.0,
+            clip_y: [0.0; 2],
         }
     }
 

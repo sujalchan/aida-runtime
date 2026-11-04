@@ -7,7 +7,13 @@ use super::menu::{
     CONTEXT_MENU_ROW_HEIGHT, CONTEXT_MENU_WIDTH, MonitorContextAction, SLIDER_RANGE_EDITOR_HEIGHT,
     SLIDER_RANGE_EDITOR_WIDTH,
 };
-use super::{GLYPH_ATLAS_MAX_SIZE, GlyphAtlasEntry};
+use super::{
+    GLYPH_ATLAS_MAX_SIZE, GlyphAtlasEntry, LIST_CONTENT_TOP, LIST_EMPTY_TOP_PADDING,
+    LIST_FOOTER_HEIGHT, LIST_FOOTER_SIDE_PADDING, LIST_HEADER_FONT_SIZE,
+    LIST_HEADER_HORIZONTAL_PADDING, LIST_LENGTH_FONT_SIZE, LIST_ROW_FONT_SIZE,
+    LIST_ROW_HEIGHT, LIST_ROW_INDEX_GAP, LIST_ROW_INDEX_X, LIST_ROW_TEXT_INSET,
+    LIST_SCROLLBAR_RIGHT_INSET, LIST_SCROLLBAR_WIDTH,
+};
 use super::{
     MonitorVisibility, SCRATCH_HEIGHT, SCRATCH_WIDTH, VariableLayer,
     canvas::{blur_shadow_alpha, draw_monitor_shadow},
@@ -22,18 +28,8 @@ const MONITOR_VALUE_RADIUS: f32 = 8.0;
 const LIST_ROW_RADIUS: f32 = 4.0;
 const MONITOR_FRAME_FILL: [u8; 4] = [229, 240, 255, 255];
 const MONITOR_FRAME_BORDER: [u8; 4] = [0, 0, 0, 38];
-const LIST_ROW_INDEX_X: f32 = 7.0;
-const LIST_ROW_VALUE_X: f32 = 20.0;
-const LIST_ROW_TEXT_INSET: f32 = 6.0;
-const LIST_CONTENT_TOP: f32 = 27.0;
-const LIST_EMPTY_TOP_PADDING: f32 = 6.0;
 const MONITOR_SHAPE_TOP_ROUNDED: f32 = 3.0;
 const MONITOR_SHAPE_BOTTOM_ROUNDED: f32 = 4.0;
-const LIST_ROW_FONT_SIZE: f32 = 12.0;
-const LIST_HEADER_FONT_SIZE: f32 = 14.0;
-const LIST_LENGTH_FONT_SIZE: f32 = 12.0;
-const LIST_HEADER_HORIZONTAL_PADDING: f32 = 12.0;
-const LIST_FOOTER_SIDE_PADDING: f32 = 7.0;
 
 pub(crate) struct BubbleRenderInput {
     pub(crate) bubble: BubbleSnapshot,
@@ -203,6 +199,7 @@ impl VariableLayer {
                                 monitor_id: bubble_id,
                                 color: linear_rgba(BUBBLE_DARK),
                                 scale: BUBBLE_FONT_SIZE / 19.0,
+                                clip_y: [0.0; 2],
                             });
                         }
                     }
@@ -460,18 +457,24 @@ impl VariableLayer {
         let monitor = &self.monitors[index];
         let id = monitor.gpu_id;
         let name = monitor.name.clone();
-        let items = monitor.list_items.clone();
+        let item_count = self.list_display_len(index);
         let width = monitor.width;
         let height = monitor.height;
         let category_color = monitor_color(monitor.category);
-        let visible_count = items
-            .len()
-            .min(((height - 52.0) / 24.0).floor().max(1.0) as usize);
-        let shown_items = items
+        let visible_rows = self.visible_list_rows(index);
+        let visible_count = visible_rows.len();
+        let scrollbar = self.list_scrollbar_geometry(index);
+        let shown_items = visible_rows
             .iter()
-            .take(visible_count)
-            .map(|item| {
-                fit_monitor_text(&self.regular_font, item, width - 38.0, LIST_ROW_FONT_SIZE)
+            .map(|(row_index, item)| {
+                let editing = self.list_editor.as_ref().is_some_and(|editor| {
+                    editor.monitor_index == index && editor.index == *row_index
+                });
+                // reserve the remaining row width for the value, leaving room for edit controls.
+                let editor_reserve = if editing { 34.0 } else { 18.0 };
+                let row_value_x = self.list_row_value_x(index, *row_index);
+                let max_width = width - row_value_x - editor_reserve;
+                fit_monitor_text(&self.regular_font, item, max_width, LIST_ROW_FONT_SIZE)
             })
             .collect::<Vec<_>>();
         let shown_name = fit_monitor_text(
@@ -480,7 +483,7 @@ impl VariableLayer {
             width - LIST_HEADER_HORIZONTAL_PADDING * 2.0,
             LIST_HEADER_FONT_SIZE,
         );
-        let length = format!("length {}", items.len());
+        let length = format!("length {item_count}");
         let plus_width = super::text_width(&self.bold_font, "+", LIST_LENGTH_FONT_SIZE);
         let equals_width = super::text_width(&self.bold_font, "=", LIST_LENGTH_FONT_SIZE);
         let footer_text_width =
@@ -498,17 +501,34 @@ impl VariableLayer {
             for ch in shown_length.chars().chain(['+', '=']) {
                 self.ensure_glyph_atlas(ch, true)?;
             }
-            if items.is_empty() {
+            if item_count == 0 {
                 for ch in "(empty)".chars() {
                     self.ensure_glyph_atlas(ch, false)?;
                 }
             }
             for (row, item) in shown_items.iter().enumerate() {
-                for ch in (row + 1).to_string().chars() {
+                let row_value_x = self.list_row_value_x(index, visible_rows[row].0);
+                let index_max_width = (row_value_x - LIST_ROW_INDEX_X - LIST_ROW_INDEX_GAP)
+                    .max(0.0);
+                let index_text = visible_rows[row].0.to_string();
+                let shown_index = fit_monitor_text(
+                    &self.bold_font,
+                    &index_text,
+                    index_max_width,
+                    LIST_ROW_FONT_SIZE,
+                );
+                // prepare every glyph used by the fitted label, including a possible ellipsis.
+                for ch in shown_index.chars() {
                     self.ensure_glyph_atlas(ch, true)?;
                 }
                 for ch in item.chars() {
                     self.ensure_glyph_atlas(ch, false)?;
+                }
+                if self.list_editor.as_ref().is_some_and(|editor| {
+                    editor.monitor_index == index && editor.index == visible_rows[row].0
+                }) {
+                    self.ensure_glyph_atlas('x', true)?;
+                    self.ensure_glyph_atlas('|', true)?;
                 }
             }
         }
@@ -546,11 +566,103 @@ impl VariableLayer {
                 MONITOR_SHAPE_TOP_ROUNDED,
                 MONITOR_FRAME_RADIUS - 1.0,
             ];
+            for row in 0..visible_count {
+                let y = LIST_CONTENT_TOP + row as f32 * 24.0;
+                if y >= height - LIST_FOOTER_HEIGHT {
+                    break;
+                }
+                let row_value_x = self.list_row_value_x(index, visible_rows[row].0);
+                // let this row's index determine how much width the value field receives.
+                push_monitor_instance(
+                    &mut shapes,
+                    id,
+                    row_value_x,
+                    y,
+                    (width - row_value_x - 6.0).max(0.0),
+                    22.0,
+                    LIST_ROW_RADIUS,
+                    1.0,
+                    category_color,
+                    [0, 0, 0, 38],
+                );
+                if let Some(editor) = self.list_editor.as_ref().filter(|editor| {
+                    editor.monitor_index == index
+                        && editor.select_all
+                        && editor.index == visible_rows[row].0
+                }) {
+                    let _ = editor;
+                    let selection_width = super::text_width(
+                        &self.regular_font,
+                        &shown_items[row],
+                        LIST_ROW_FONT_SIZE,
+                    )
+                    .min((width - row_value_x - LIST_ROW_TEXT_INSET - 28.0).max(0.0));
+                    if selection_width > 0.0 {
+                        push_monitor_instance(
+                            &mut shapes,
+                            id,
+                            row_value_x + LIST_ROW_TEXT_INSET,
+                            y + 2.0,
+                            selection_width,
+                            18.0,
+                            1.0,
+                            0.0,
+                            [63, 123, 220, 255],
+                            [63, 123, 220, 255],
+                        );
+                    }
+                }
+            }
+            // keep two reusable instances so hover only updates scrollbar data, not batch layout.
+            let track_y = LIST_CONTENT_TOP;
+            let track_height = (height - LIST_CONTENT_TOP - LIST_FOOTER_HEIGHT).max(1.0);
+            let track_x = width - LIST_SCROLLBAR_RIGHT_INSET - LIST_SCROLLBAR_WIDTH;
+            let thumb_height = scrollbar.map_or(track_height, |bar| bar.thumb_height);
+            let thumb_y = scrollbar.map_or(track_y, |bar| bar.thumb_y);
+            let scrollbar_visible =
+                scrollbar.is_some() && self.list_scrollbar_is_visible(index);
+            let track_alpha = if scrollbar_visible { 42 } else { 0 };
+            let thumb_alpha = if scrollbar_visible { 190 } else { 0 };
+            let track_color = [82, 93, 117, track_alpha];
+            let thumb_color = [82, 93, 117, thumb_alpha];
+            let track_instance = shapes.len();
+            push_monitor_instance(
+                &mut shapes,
+                id,
+                track_x,
+                track_y,
+                LIST_SCROLLBAR_WIDTH,
+                track_height,
+                LIST_SCROLLBAR_WIDTH * 0.5,
+                0.0,
+                track_color,
+                track_color,
+            );
+            // premultiply these translucent colors for the monitor pipeline's blend mode.
+            shapes[track_instance].fill = premultiplied_linear_rgba(track_color);
+            shapes[track_instance].border = premultiplied_linear_rgba(track_color);
+            let thumb_instance = shapes.len();
+            push_monitor_instance(
+                &mut shapes,
+                id,
+                track_x + 0.5,
+                thumb_y,
+                LIST_SCROLLBAR_WIDTH - 1.0,
+                thumb_height,
+                (LIST_SCROLLBAR_WIDTH - 1.0) * 0.5,
+                0.0,
+                thumb_color,
+                thumb_color,
+            );
+            // keep the track first so its edge stays behind the thumb.
+            shapes[thumb_instance].fill = premultiplied_linear_rgba(thumb_color);
+            shapes[thumb_instance].border = premultiplied_linear_rgba(thumb_color);
+            // draw the footer after the rows so it covers the partial bottom row.
             push_monitor_instance(
                 &mut shapes,
                 id,
                 1.0,
-                height - 22.0,
+                height - LIST_FOOTER_HEIGHT,
                 width - 2.0,
                 21.0,
                 MONITOR_FRAME_RADIUS - 1.0,
@@ -564,24 +676,6 @@ impl VariableLayer {
                 MONITOR_SHAPE_BOTTOM_ROUNDED,
                 MONITOR_FRAME_RADIUS - 1.0,
             ];
-            for row in 0..visible_count {
-                let y = LIST_CONTENT_TOP + row as f32 * 24.0;
-                if y + 22.0 > height - 22.0 {
-                    break;
-                }
-                push_monitor_instance(
-                    &mut shapes,
-                    id,
-                    LIST_ROW_VALUE_X,
-                    y,
-                    (width - LIST_ROW_VALUE_X - 6.0).max(20.0),
-                    22.0,
-                    LIST_ROW_RADIUS,
-                    1.0,
-                    category_color,
-                    [0, 0, 0, 38],
-                );
-            }
         }
         if build_text {
             let header_baseline =
@@ -599,20 +693,37 @@ impl VariableLayer {
             );
             for (row, item) in shown_items.iter().enumerate() {
                 let y = LIST_CONTENT_TOP + row as f32 * 24.0;
-                if y + 22.0 > height - 22.0 {
+                let footer_top = height - LIST_FOOTER_HEIGHT;
+                let visible_height = (footer_top - y).clamp(0.0, LIST_ROW_HEIGHT);
+                if visible_height <= 0.0 {
                     break;
                 }
-                let index_text = (row + 1).to_string();
-                let baseline =
-                    super::canvas::centered_baseline(&self.bold_font, LIST_ROW_FONT_SIZE, y + 11.0);
+                let row_glyph_start = glyphs.len();
+                let index_text = visible_rows[row].0.to_string();
+                let row_value_x = self.list_row_value_x(index, visible_rows[row].0);
+                let index_max_width = (row_value_x - LIST_ROW_INDEX_X - LIST_ROW_INDEX_GAP)
+                    .max(0.0);
+                // keep narrow monitors from drawing index glyphs into the value column.
+                let shown_index = fit_monitor_text(
+                    &self.bold_font,
+                    &index_text,
+                    index_max_width,
+                    LIST_ROW_FONT_SIZE,
+                );
+                let row_center_y = y + 11.0;
+                let baseline = super::canvas::centered_baseline(
+                    &self.bold_font,
+                    LIST_ROW_FONT_SIZE,
+                    row_center_y,
+                );
                 self.push_glyph_instances_at_size(
                     &mut glyphs,
-                    &index_text,
+                    &shown_index,
                     true,
                     id,
                     LIST_ROW_INDEX_X,
                     baseline,
-                    20.0,
+                    index_max_width,
                     LIST_ROW_FONT_SIZE,
                     [82, 93, 117, 255],
                 );
@@ -621,18 +732,58 @@ impl VariableLayer {
                     item,
                     false,
                     id,
-                    LIST_ROW_VALUE_X + LIST_ROW_TEXT_INSET,
+                    row_value_x + LIST_ROW_TEXT_INSET,
                     super::canvas::centered_baseline(
                         &self.regular_font,
                         LIST_ROW_FONT_SIZE,
-                        y + 11.0,
+                        row_center_y,
                     ),
-                    width - LIST_ROW_VALUE_X - LIST_ROW_TEXT_INSET - 12.0,
+                    width - row_value_x - LIST_ROW_TEXT_INSET - 12.0,
                     LIST_ROW_FONT_SIZE,
                     [255, 255, 255, 255],
                 );
+                if let Some(editor) = self.list_editor.as_ref().filter(|editor| {
+                    editor.monitor_index == index && editor.index == visible_rows[row].0
+                }) {
+                    if !editor.select_all {
+                        let prefix = editor.text.get(..editor.caret).unwrap_or_default();
+                        let caret_x = row_value_x
+                            + LIST_ROW_TEXT_INSET
+                            + super::text_width(&self.regular_font, prefix, LIST_ROW_FONT_SIZE);
+                        self.push_glyph_instances_at_size(
+                            &mut glyphs,
+                            "|",
+                            true,
+                            id,
+                            caret_x,
+                            super::canvas::centered_baseline(
+                                &self.regular_font,
+                                LIST_ROW_FONT_SIZE,
+                                row_center_y,
+                            ),
+                            4.0,
+                            LIST_ROW_FONT_SIZE,
+                            [82, 93, 117, 255],
+                        );
+                    }
+                    self.push_glyph_instances_at_size(
+                        &mut glyphs,
+                        "x",
+                        true,
+                        id,
+                        width - 19.0,
+                        baseline,
+                        12.0,
+                        LIST_ROW_FONT_SIZE,
+                        [82, 93, 117, 255],
+                    );
+                }
+                // clip the partial row at the footer after keeping its text in the visible slice.
+                for glyph in &mut glyphs[row_glyph_start..] {
+                    glyph.clip_y = [y, footer_top];
+                }
             }
-            if items.is_empty() {
+            if item_count == 0 {
                 let empty = "(empty)";
                 self.push_glyph_instances_at_size(
                     &mut glyphs,
@@ -694,6 +845,39 @@ impl VariableLayer {
             );
         }
         Ok((shapes, glyphs))
+    }
+
+    pub(super) fn visible_list_rows(&self, index: usize) -> Vec<(usize, String)> {
+        let Some(monitor) = self.monitors.get(index) else {
+            return Vec::new();
+        };
+        if monitor.kind != super::MonitorKind::List {
+            return Vec::new();
+        }
+        let display_len = self.list_display_len(index);
+        let start = monitor
+            .list_scroll_offset
+            .min(monitor.max_list_scroll_offset(display_len));
+        let end = display_len.min(start + monitor.list_row_capacity());
+        (start..end)
+            .map(|list_index| {
+                let value = self
+                    .list_editor
+                    .as_ref()
+                    .filter(|editor| {
+                        editor.monitor_index == index && editor.index == list_index + 1
+                    })
+                    .map(|editor| editor.text.clone())
+                    .or_else(|| {
+                        monitor
+                            .list_items
+                            .get(list_index)
+                            .map(crate::runtime::scratch_string)
+                    })
+                    .unwrap_or_default();
+                (list_index + 1, value)
+            })
+            .collect()
     }
 
     pub(crate) fn build_gpu_monitor_instances_for_id(
@@ -766,6 +950,7 @@ impl VariableLayer {
                         monitor_id,
                         color: linear_rgba(color),
                         scale: size / atlas_font_size,
+                        clip_y: [0.0; 2],
                     });
                 }
             }
@@ -935,6 +1120,8 @@ impl VariableLayer {
                     MonitorContextAction::LargeReadout => "large readout",
                     MonitorContextAction::Slider => "slider",
                     MonitorContextAction::ChangeSliderRange => "change slider range",
+                    MonitorContextAction::ImportList => "import",
+                    MonitorContextAction::ExportList => "export",
                     MonitorContextAction::Hide => "hide",
                     MonitorContextAction::Dismiss => "",
                 })
@@ -1091,7 +1278,12 @@ fn monitor_color(category: super::MonitorCategory) -> [u8; 4] {
     }
 }
 
-fn fit_monitor_text(font: &ab_glyph::FontArc, text: &str, max_width: f32, size: f32) -> String {
+pub(super) fn fit_monitor_text(
+    font: &ab_glyph::FontArc,
+    text: &str,
+    max_width: f32,
+    size: f32,
+) -> String {
     let max_width = max_width.max(1.0);
     let mut fitted = String::new();
     for ch in text.chars() {
@@ -1225,6 +1417,15 @@ fn linear_rgba(color: [u8; 4]) -> [f32; 4] {
         linear(color[2]),
         color[3] as f32 / 255.0,
     ]
+}
+
+fn premultiplied_linear_rgba(color: [u8; 4]) -> [f32; 4] {
+    let mut rgba = linear_rgba(color);
+    let alpha = rgba[3];
+    for channel in &mut rgba[..3] {
+        *channel *= alpha;
+    }
+    rgba
 }
 
 fn wrap_bubble_text(font: &ab_glyph::FontArc, text: &str, max_width: f32) -> Vec<String> {
@@ -1400,11 +1601,10 @@ mod tests {
         BUBBLE_SPEECH_TAIL_EXTENT, BUBBLE_TAIL_CORNER_CLEARANCE, BubbleRenderInput,
         LIST_CONTENT_TOP, LIST_EMPTY_TOP_PADDING, LIST_FOOTER_SIDE_PADDING, LIST_HEADER_FONT_SIZE,
         LIST_HEADER_HORIZONTAL_PADDING, LIST_LENGTH_FONT_SIZE, LIST_ROW_FONT_SIZE, LIST_ROW_RADIUS,
-        LIST_ROW_VALUE_X, MONITOR_FRAME_RADIUS, MONITOR_SHAPE_BOTTOM_ROUNDED,
-        MONITOR_SHAPE_TOP_ROUNDED, MONITOR_VALUE_RADIUS, SCRATCH_WIDTH, VariableLayer, linear_rgba,
-        scaled_px_bounds,
+        MONITOR_FRAME_RADIUS, MONITOR_SHAPE_BOTTOM_ROUNDED, MONITOR_SHAPE_TOP_ROUNDED,
+        MONITOR_VALUE_RADIUS, SCRATCH_WIDTH, VariableLayer, linear_rgba, scaled_px_bounds,
     };
-    use crate::graphics::variables::{MonitorKind, VariableMonitor};
+    use crate::graphics::variables::{LIST_ROW_VALUE_X, MonitorKind, VariableMonitor};
     use crate::runtime::{BubbleKind, BubbleSnapshot};
 
     #[test]
@@ -1440,12 +1640,12 @@ mod tests {
             .unwrap()
             .0;
         assert_eq!(list_shapes[1].params[0], MONITOR_FRAME_RADIUS - 1.0);
-        assert_eq!(list_shapes[2].params[0], MONITOR_FRAME_RADIUS - 1.0);
         assert_eq!(list_shapes[1].shape[2], MONITOR_SHAPE_TOP_ROUNDED);
-        assert_eq!(list_shapes[2].shape[2], MONITOR_SHAPE_BOTTOM_ROUNDED);
-        assert_eq!(list_shapes[3].params[0], LIST_ROW_RADIUS);
-        assert_eq!(list_shapes[3].rect[0], LIST_ROW_VALUE_X);
-        assert_eq!(list_shapes[3].rect[2], 120.0 - LIST_ROW_VALUE_X - 6.0);
+        assert_eq!(list_shapes.last().unwrap().params[0], MONITOR_FRAME_RADIUS - 1.0);
+        assert_eq!(list_shapes.last().unwrap().shape[2], MONITOR_SHAPE_BOTTOM_ROUNDED);
+        assert_eq!(list_shapes[2].params[0], LIST_ROW_RADIUS);
+        assert_eq!(list_shapes[2].rect[0], LIST_ROW_VALUE_X);
+        assert_eq!(list_shapes[2].rect[2], 120.0 - LIST_ROW_VALUE_X - 6.0);
 
         let header = super::fit_monitor_text(
             &layer.bold_font,
@@ -1513,6 +1713,27 @@ mod tests {
         );
         assert!((empty_glyphs[5].local_position[0] - empty_text_start).abs() < f32::EPSILON);
         assert!((empty_glyphs[5].local_position[1] - empty_text_baseline).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn full_stage_list_monitor_builds_unpadded_gpu_instances_for_all_visible_rows() {
+        let long_item = "1234567890".repeat(10);
+        let items = vec![long_item; 200];
+        let monitor = VariableMonitor::new("large list", "", 0.0, 0.0)
+            .with_kind(MonitorKind::List)
+            .with_list_items(
+                items,
+                SCRATCH_WIDTH as f32 / 0.65,
+                super::SCRATCH_HEIGHT as f32 / 0.65,
+            );
+        let mut layer = VariableLayer::new(vec![monitor]).unwrap();
+        let (shapes, glyphs) = layer
+            .build_gpu_monitor_instances_for_id(0, true, true)
+            .unwrap();
+
+        assert!(shapes.len() > 16);
+        assert!(glyphs.len() > 256);
+        assert!(glyphs.len() < 4096);
     }
 
     #[test]

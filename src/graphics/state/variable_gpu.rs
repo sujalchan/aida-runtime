@@ -14,29 +14,13 @@ impl GraphicsState {
             .chain(&transform_ids)
             .copied()
             .max();
-        let mut grew = false;
+        let mut transforms_grew = false;
         if let Some(id) = largest_id.filter(|id| *id as u64 >= self.gpu_monitor_capacity) {
             self.gpu_monitor_capacity = (id as u64 + 1).next_power_of_two();
             self.monitor_transforms = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("variable monitor transforms"),
                 size: self.gpu_monitor_capacity * 16,
                 usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            self.monitor_instances = self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("variable monitor instances"),
-                size: self.gpu_monitor_capacity
-                    * SHAPES_PER_MONITOR
-                    * std::mem::size_of::<MonitorInstance>() as u64,
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            self.glyph_instances = self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("variable glyph instances"),
-                size: self.gpu_monitor_capacity
-                    * GLYPHS_PER_MONITOR
-                    * std::mem::size_of::<GlyphInstance>() as u64,
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
             self.monitor_transform_bind_group =
@@ -49,7 +33,7 @@ impl GraphicsState {
                     }],
                 });
             self.recreate_glyph_bind_group();
-            grew = true;
+            transforms_grew = true;
         }
 
         let mut update_ids: Vec<_> = shape_ids.iter().chain(&text_ids).copied().collect();
@@ -66,12 +50,6 @@ impl GraphicsState {
                 update_text,
             ) {
                 Ok((shapes, glyphs)) => {
-                    if shapes.len() as u64 > SHAPES_PER_MONITOR
-                        || glyphs.len() as u64 > GLYPHS_PER_MONITOR
-                    {
-                        eprintln!("variable monitor {id} exceeds its reserved GPU instance region");
-                        continue;
-                    }
                     let batch = self.monitor_batches.entry(id).or_default();
                     if update_shapes {
                         changed_shapes.push((id, changed_instance_ranges(&batch.0, &shapes)));
@@ -86,7 +64,40 @@ impl GraphicsState {
             }
         }
 
-        if grew {
+        let required_shape_instances = self
+            .monitor_batches
+            .values()
+            .map(|(shapes, _)| shapes.len() as u64)
+            .sum::<u64>();
+        let mut shape_buffer_grew = false;
+        if required_shape_instances > self.gpu_shape_capacity {
+            self.gpu_shape_capacity = required_shape_instances.next_power_of_two();
+            self.monitor_instances = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("variable monitor instances"),
+                size: self.gpu_shape_capacity * std::mem::size_of::<MonitorInstance>() as u64,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            shape_buffer_grew = true;
+        }
+        let required_glyph_instances = self
+            .monitor_batches
+            .values()
+            .map(|(_, glyphs)| glyphs.len() as u64)
+            .sum::<u64>();
+        let mut glyph_buffer_grew = false;
+        if required_glyph_instances > self.gpu_glyph_capacity {
+            self.gpu_glyph_capacity = required_glyph_instances.next_power_of_two();
+            self.glyph_instances = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("variable glyph instances"),
+                size: self.gpu_glyph_capacity * std::mem::size_of::<GlyphInstance>() as u64,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            glyph_buffer_grew = true;
+        }
+
+        if transforms_grew {
             let transforms = (0..self.gpu_monitor_capacity as u32)
                 .map(|id| self.variable_layer.gpu_monitor_transform(id))
                 .collect::<Vec<_>>();
@@ -163,7 +174,7 @@ impl GraphicsState {
         self.rebuild_variable_draw_batches(
             &changed_shapes,
             &changed_glyphs,
-            grew,
+            shape_buffer_grew || glyph_buffer_grew,
             transforms_changed || !changed_shapes.is_empty(),
         );
     }

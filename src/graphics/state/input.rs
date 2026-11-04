@@ -2,6 +2,26 @@ use super::*;
 use crate::graphics::variables::SliderRangeEditorInput;
 use crate::runtime::SpriteSensingCostume;
 use crate::runtime::{RuntimeInputEvent, RuntimeSnapshot, ScratchValue};
+use std::sync::Arc;
+
+fn timer_sample_for_snapshot(
+    current_epoch: u64,
+    current_millis: u64,
+    sampled_at: Instant,
+    incoming_epoch: u64,
+    incoming_millis: u64,
+    now: Instant,
+) -> (u64, u64) {
+    if incoming_epoch != current_epoch {
+        return (incoming_epoch, incoming_millis);
+    }
+    let estimated = current_millis.saturating_add(
+        now.saturating_duration_since(sampled_at)
+            .as_millis()
+            .min(u64::MAX as u128) as u64,
+    );
+    (current_epoch, incoming_millis.max(estimated))
+}
 
 fn apply_runtime_layer_transform(
     transform: &mut super::SpriteTransform,
@@ -45,17 +65,59 @@ fn sprite_monitor_updates(
     updates
 }
 
+fn is_live_sensing_reporter(key: &str) -> bool {
+    [
+        "/sensing_current/",
+        "/sensing_dayssince2000/",
+        "/sensing_mousex/",
+        "/sensing_mousey/",
+        "/sensing_mousedown/",
+    ]
+    .iter()
+    .any(|category| key.contains(category))
+}
+
 impl GraphicsState {
     // feed the renderer display cache from the scheduler's canonical snapshot.
     pub(crate) fn sync_runtime_snapshot(
         &mut self,
         snapshot: &RuntimeSnapshot,
     ) -> Result<bool, String> {
+        let timer_sampled_at = Instant::now();
+        (self.project_timer_epoch, self.project_timer_sample_millis) = timer_sample_for_snapshot(
+            self.project_timer_epoch,
+            self.project_timer_sample_millis,
+            self.project_timer_sampled_at,
+            snapshot.project_timer_epoch,
+            snapshot.project_timer_millis,
+            timer_sampled_at,
+        );
+        self.project_timer_sampled_at = timer_sampled_at;
+        let mut monitor_visibility_changed = false;
+        for variable in &snapshot.variables {
+            monitor_visibility_changed |= self
+                .variable_layer
+                .set_monitor_visibility(&variable.key, variable.monitor_visible)
+                .is_some();
+        }
+        for list in &snapshot.lists {
+            monitor_visibility_changed |= self
+                .variable_layer
+                .set_monitor_visibility(&list.key, list.visible)
+                .is_some();
+        }
         let mut updates = snapshot
             .variables
             .iter()
             .map(|value| (value.key.clone(), scratch_value_text(&value.value)))
             .collect::<Vec<_>>();
+        updates.extend(
+            snapshot
+                .reporters
+                .iter()
+                .filter(|reporter| !is_live_sensing_reporter(&reporter.key))
+                .map(|reporter| (reporter.key.clone(), scratch_value_text(&reporter.value))),
+        );
         updates.push((
             "__stage/backdrop/name".to_owned(),
             snapshot.backdrop_name.clone(),
@@ -68,10 +130,7 @@ impl GraphicsState {
         for list in &snapshot.lists {
             lists_changed |= self
                 .variable_layer
-                .set_monitor_list(
-                    &list.key,
-                    list.items.iter().map(scratch_value_text).collect(),
-                )
+                .set_monitor_list(&list.key, Arc::clone(&list.items))
                 .is_some_and(|(_, visible_changed)| visible_changed);
         }
         updates.extend(sprite_monitor_updates(
@@ -134,7 +193,68 @@ impl GraphicsState {
             self.sync_bubble_gpu_data(snapshot)?;
             self.last_runtime_layers.clone_from(&snapshot.layers);
         }
-        Ok(monitors_changed || lists_changed || layers_changed || backdrop_changed)
+        Ok(monitors_changed
+            || monitor_visibility_changed
+            || lists_changed
+            || layers_changed
+            || backdrop_changed)
+    }
+
+    pub(crate) fn has_visible_live_monitor(&self) -> bool {
+        self.variable_layer.has_visible_monitor_value_key("timer")
+            || [
+                "/sensing_current/",
+                "/sensing_dayssince2000/",
+                "/sensing_mousex/",
+                "/sensing_mousey/",
+                "/sensing_mousedown/",
+            ]
+            .iter()
+            .any(|category| {
+                self.variable_layer
+                    .has_visible_monitor_key_containing(category)
+            })
+    }
+
+    pub(crate) fn refresh_live_monitors(
+        &mut self,
+        snapshot: &RuntimeSnapshot,
+        now: Instant,
+        mouse_position: Option<(f64, f64)>,
+    ) -> Result<bool, String> {
+        let mut updates = Vec::new();
+        for reporter in &snapshot.reporters {
+            if is_live_sensing_reporter(&reporter.key)
+                && self
+                    .variable_layer
+                    .has_visible_monitor_value_key(&reporter.key)
+            {
+                let live_mouse_value = mouse_position.and_then(|(x, y)| {
+                    if reporter.key.contains("/sensing_mousex/") {
+                        Some(x)
+                    } else if reporter.key.contains("/sensing_mousey/") {
+                        Some(y)
+                    } else {
+                        None
+                    }
+                });
+                updates.push((
+                    reporter.key.clone(),
+                    live_mouse_value.map_or_else(
+                        || scratch_value_text(&reporter.value),
+                        |value| scratch_value_text(&ScratchValue::Number(value)),
+                    ),
+                ));
+            }
+        }
+        if self.variable_layer.has_visible_monitor_value_key("timer") {
+            let elapsed = now.saturating_duration_since(self.project_timer_sampled_at);
+            let millis = self
+                .project_timer_sample_millis
+                .saturating_add(elapsed.as_millis().min(u64::MAX as u128) as u64);
+            updates.push(("timer".to_owned(), format!("{:.3}", millis as f64 / 1000.0)));
+        }
+        self.write_changed_monitors(&updates)
     }
 
     fn add_clone_renderer(&mut self, layer: &crate::runtime::LayerSnapshot) -> Result<(), String> {
@@ -290,6 +410,12 @@ impl GraphicsState {
         ))
     }
 
+    pub(crate) fn window_scroll_pixels_to_list_rows(&self, pixels: f64) -> f32 {
+        self.viewport.map_or(0.0, |viewport| {
+            (pixels * SCRATCH_HEIGHT as f64 / viewport.height as f64 / 24.0) as f32
+        })
+    }
+
     // begin dragging a monitor and update its gpu shadow state
     pub(crate) fn begin_variable_drag(&mut self, x: f32, y: f32) -> Result<bool, String> {
         if !self.dev_mode {
@@ -341,6 +467,55 @@ impl GraphicsState {
             self.refresh_variable_monitor(index)?;
         }
         Ok(true)
+    }
+
+    pub(crate) fn scroll_list_monitor(
+        &mut self,
+        x: f32,
+        y: f32,
+        rows: f32,
+    ) -> Result<bool, String> {
+        if self.variable_layer.scroll_list_at(x, y, rows).is_none() {
+            return Ok(false);
+        }
+        self.write_ui_composite_parameters();
+        Ok(true)
+    }
+
+    pub(crate) fn update_list_scrollbar_hover(
+        &mut self,
+        pointer: Option<(f32, f32)>,
+    ) -> Result<bool, String> {
+        if !self.variable_layer.update_list_scrollbar_hover(pointer) {
+            return Ok(false);
+        }
+        self.write_ui_composite_parameters();
+        Ok(true)
+    }
+
+    pub(crate) fn handle_list_pointer(
+        &mut self,
+        x: f32,
+        y: f32,
+    ) -> Result<ListPointerResponse, String> {
+        let response = self.variable_layer.handle_list_pointer(x, y);
+        self.write_ui_composite_parameters();
+        Ok(response)
+    }
+
+    pub(crate) fn list_item_editor_is_open(&self) -> bool {
+        self.variable_layer.list_editor_is_open()
+    }
+
+    pub(crate) fn edit_list_item(
+        &mut self,
+        input: ListEditorInput<'_>,
+    ) -> (bool, Vec<RuntimeInputEvent>) {
+        let result = self.variable_layer.edit_list_item(input);
+        if result.0 {
+            self.write_ui_composite_parameters();
+        }
+        result
     }
 
     // cycle the clicked monitor mode; the gpu geometry is refreshed on draw
@@ -408,19 +583,19 @@ impl GraphicsState {
     pub(crate) fn activate_variable_context_menu(
         &mut self,
         pointer: Option<(f32, f32)>,
-    ) -> Result<bool, String> {
+    ) -> Result<Option<super::super::variables::ListMonitorFileAction>, String> {
         if !self.dev_mode {
-            return Ok(false);
+            return Ok(None);
         }
-        let Some((_index, _old_bounds, _action)) =
-            self.variable_layer.activate_context_menu(pointer)
+        let Some((index, _old_bounds, action)) = self.variable_layer.activate_context_menu(pointer)
         else {
-            return Ok(false);
+            return Ok(None);
         };
+        let file_action = self.variable_layer.list_file_action(index, action);
         self.variable_layer
             .upload_to(&self.queue, &self.ui_texture)?;
         self.write_ui_composite_parameters();
-        Ok(true)
+        Ok(file_action)
     }
 
     pub(crate) fn edit_variable_slider_range(
@@ -610,7 +785,10 @@ impl GraphicsState {
 
 #[cfg(test)]
 mod clone_transform_tests {
-    use super::{SpriteTransform, apply_runtime_layer_transform, sprite_monitor_updates};
+    use super::{
+        SpriteTransform, apply_runtime_layer_transform, sprite_monitor_updates,
+        timer_sample_for_snapshot,
+    };
     use crate::graphics::variables::{VariableLayer, VariableMonitor};
     use crate::runtime::LayerSnapshot;
 
@@ -681,6 +859,20 @@ mod clone_transform_tests {
         assert_eq!(
             updates,
             vec![("__sprite/Sprite1/size".to_owned(), "125".to_owned())]
+        );
+    }
+
+    #[test]
+    fn stale_snapshot_after_resize_does_not_rewind_timer_but_reset_epoch_does() {
+        let start = std::time::Instant::now();
+        let later = start + std::time::Duration::from_secs(2);
+        assert_eq!(
+            timer_sample_for_snapshot(4, 5_000, start, 4, 5_000, later),
+            (4, 7_000)
+        );
+        assert_eq!(
+            timer_sample_for_snapshot(4, 7_000, later, 5, 0, later),
+            (5, 0)
         );
     }
 }

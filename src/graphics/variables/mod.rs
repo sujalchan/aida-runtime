@@ -1,8 +1,10 @@
 use std::{
     collections::{HashMap, HashSet},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
+use crate::runtime::{RuntimeInputEvent, ScratchValue};
 use ab_glyph::{Font, FontArc, OutlineCurve, ScaleFont};
 use fontdb::{Database, Family, Query, Weight};
 use lyon::{
@@ -19,6 +21,8 @@ mod canvas;
 mod gpu;
 mod menu;
 
+use gpu::fit_monitor_text;
+
 pub(crate) use gpu::BubbleRenderInput;
 
 pub(crate) use menu::SliderRangeEditorInput;
@@ -29,6 +33,84 @@ const STAGE_HALF_HEIGHT: f32 = SCRATCH_HEIGHT as f32 * 0.5;
 const VALUE_HORIZONTAL_PADDING: f32 = 24.0;
 const SCALAR_MONITOR_SCALE: f32 = 0.55;
 const LIST_MONITOR_SCALE: f32 = 0.65;
+const LIST_ROW_HEIGHT: f32 = 24.0;
+const LIST_FOOTER_HEIGHT: f32 = 22.0;
+const LIST_RESIZE_HANDLE_SIZE: f32 = 22.0;
+const LIST_SCROLLBAR_WIDTH: f32 = 5.0;
+const LIST_SCROLLBAR_RIGHT_INSET: f32 = 2.0;
+const LIST_SCROLLBAR_MIN_THUMB_HEIGHT: f32 = 16.0;
+pub(super) const LIST_ROW_INDEX_X: f32 = 7.0;
+pub(super) const LIST_ROW_VALUE_X: f32 = 20.0;
+pub(super) const LIST_ROW_TEXT_INSET: f32 = 6.0;
+// keep a small gutter between the index column and the orange value field.
+pub(super) const LIST_ROW_INDEX_GAP: f32 = 2.0;
+// allow for glyph overhang and floating-point rounding in the index width.
+const LIST_ROW_INDEX_CLEARANCE: f32 = 1.5;
+pub(super) const LIST_CONTENT_TOP: f32 = 27.0;
+pub(super) const LIST_EMPTY_TOP_PADDING: f32 = 6.0;
+pub(super) const LIST_ROW_FONT_SIZE: f32 = 12.0;
+pub(super) const LIST_HEADER_FONT_SIZE: f32 = 14.0;
+pub(super) const LIST_LENGTH_FONT_SIZE: f32 = 12.0;
+pub(super) const LIST_HEADER_HORIZONTAL_PADDING: f32 = 12.0;
+pub(super) const LIST_FOOTER_SIDE_PADDING: f32 = 7.0;
+
+pub(crate) enum ListEditorInput<'a> {
+    Text(&'a str),
+    Backspace,
+    Delete,
+    Left,
+    Right,
+    Home,
+    End,
+    Commit,
+    Cancel,
+}
+
+pub(crate) struct ListPointerResponse {
+    pub(crate) consumed: bool,
+    pub(crate) resizing: bool,
+    pub(crate) scrollbar_dragging: bool,
+    pub(crate) events: Vec<RuntimeInputEvent>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ListScrollbarGeometry {
+    track_x: f32,
+    track_y: f32,
+    track_width: f32,
+    track_height: f32,
+    thumb_y: f32,
+    thumb_height: f32,
+}
+
+pub(crate) enum ListMonitorFileAction {
+    Import { key: String },
+    Export { file_name: String, contents: String },
+}
+
+struct ListItemEditor {
+    monitor_index: usize,
+    index: usize,
+    text: String,
+    caret: usize,
+    select_all: bool,
+    appended: bool,
+    dirty: bool,
+}
+
+struct ListResize {
+    monitor_index: usize,
+    pointer_x: f32,
+    pointer_y: f32,
+    width: f32,
+    height: f32,
+}
+
+#[derive(Clone, Copy)]
+struct ListScrollbarDrag {
+    monitor_index: usize,
+    pointer_offset: f32,
+}
 
 pub(crate) struct VariableMonitor {
     gpu_id: u32,
@@ -43,7 +125,9 @@ pub(crate) struct VariableMonitor {
     pub(super) display_mode: MonitorDisplayMode,
     pub(super) category: MonitorCategory,
     pub(super) kind: MonitorKind,
-    list_items: Vec<String>,
+    list_items: Arc<Vec<ScratchValue>>,
+    list_scroll_offset: usize,
+    list_scroll_remainder: f32,
     visibility: MonitorVisibility,
     label_width: f32,
     value_width: f32,
@@ -127,7 +211,9 @@ impl VariableMonitor {
             display_mode: MonitorDisplayMode::Expanded,
             category: MonitorCategory::Variables,
             kind: MonitorKind::ScalarVariable,
-            list_items: Vec::new(),
+            list_items: Arc::new(Vec::new()),
+            list_scroll_offset: 0,
+            list_scroll_remainder: 0.0,
             visibility: MonitorVisibility::Visible,
             label_width: 0.0,
             value_width: 66.0,
@@ -159,10 +245,24 @@ impl VariableMonitor {
     }
 
     pub(crate) fn with_list_items(mut self, items: Vec<String>, width: f32, height: f32) -> Self {
+        self.list_items = Arc::new(items.into_iter().map(ScratchValue::Text).collect());
+        self.with_list_size(width, height)
+    }
+
+    pub(crate) fn with_list_values(
+        mut self,
+        items: Arc<Vec<ScratchValue>>,
+        width: f32,
+        height: f32,
+    ) -> Self {
+        self.list_items = items;
+        self.with_list_size(width, height)
+    }
+
+    fn with_list_size(mut self, width: f32, height: f32) -> Self {
         self.kind = MonitorKind::List;
         self.category = MonitorCategory::Lists;
         self.display_mode = MonitorDisplayMode::List;
-        self.list_items = items;
         self.width = width.max(64.0);
         self.height = height.max(68.0);
         self
@@ -187,6 +287,29 @@ impl VariableMonitor {
         self.slider_max = max;
         self
     }
+
+    fn list_row_capacity(&self) -> usize {
+        // include the next row when its top edge fits above the footer.
+        ((self.height - (LIST_CONTENT_TOP + LIST_FOOTER_HEIGHT)) / LIST_ROW_HEIGHT)
+            .ceil()
+            .max(1.0) as usize
+    }
+
+    fn list_scroll_row_capacity(&self) -> usize {
+        ((self.height - (LIST_CONTENT_TOP + LIST_FOOTER_HEIGHT)) / LIST_ROW_HEIGHT)
+            .floor()
+            .max(1.0) as usize
+    }
+
+    fn max_list_scroll_offset(&self, list_len: usize) -> usize {
+        list_len.saturating_sub(self.list_scroll_row_capacity())
+    }
+
+    fn visible_list_row_count(&self, list_len: usize) -> usize {
+        list_len
+            .saturating_sub(self.list_scroll_offset)
+            .min(self.list_row_capacity())
+    }
 }
 
 pub(crate) struct VariableLayer {
@@ -197,6 +320,10 @@ pub(crate) struct VariableLayer {
     glyph_meshes: HashMap<(char, bool), Vec<[Point; 3]>>,
     value_digit_width: f32,
     dragging: Option<(usize, f32, f32)>,
+    list_editor: Option<ListItemEditor>,
+    list_resize: Option<ListResize>,
+    list_scrollbar_hovered: Option<usize>,
+    list_scrollbar_drag: Option<ListScrollbarDrag>,
     slider_dragging: Option<usize>,
     slider_hovered: Option<usize>,
     slider_thumb_hovered: Option<usize>,
@@ -322,6 +449,10 @@ impl VariableLayer {
             glyph_meshes: HashMap::new(),
             value_digit_width,
             dragging: None,
+            list_editor: None,
+            list_resize: None,
+            list_scrollbar_hovered: None,
+            list_scrollbar_drag: None,
             slider_dragging: None,
             slider_hovered: None,
             slider_thumb_hovered: None,
@@ -503,26 +634,571 @@ impl VariableLayer {
         self.monitors.iter().any(|monitor| monitor.value_key == key)
     }
 
+    pub(crate) fn has_visible_monitor_value_key(&self, key: &str) -> bool {
+        self.monitors.iter().any(|monitor| {
+            monitor.value_key == key && monitor.visibility == MonitorVisibility::Visible
+        })
+    }
+
+    pub(crate) fn has_visible_monitor_key_containing(&self, text: &str) -> bool {
+        self.monitors.iter().any(|monitor| {
+            monitor.value_key.contains(text) && monitor.visibility == MonitorVisibility::Visible
+        })
+    }
+
     pub(crate) fn set_monitor_list(
         &mut self,
         key: &str,
-        items: Vec<String>,
+        items: Arc<Vec<ScratchValue>>,
     ) -> Option<(usize, bool)> {
         let index = self
             .monitors
             .iter()
             .position(|monitor| monitor.value_key == key)?;
-        let monitor = &mut self.monitors[index];
-        if monitor.kind != MonitorKind::List || monitor.list_items == items {
+        if self.monitors[index].kind != MonitorKind::List
+            || Arc::ptr_eq(&self.monitors[index].list_items, &items)
+        {
             return Some((index, false));
         }
-        monitor.list_items = items;
-        if monitor.visibility == MonitorVisibility::Visible {
-            self.mark_gpu_monitor(index);
+        let old_display_len = self.list_display_len(index);
+        let old_visible_count =
+            self.monitors[index].visible_list_row_count(old_display_len);
+        let old_visible_start = self.monitors[index]
+            .list_scroll_offset
+            .min(self.monitors[index].max_list_scroll_offset(old_display_len));
+        self.monitors[index].list_items = items;
+        let displayed_len = self.list_display_len(index);
+        self.monitors[index].list_scroll_offset = self.monitors[index]
+            .list_scroll_offset
+            .min(self.monitors[index].max_list_scroll_offset(displayed_len));
+        self.monitors[index].list_scroll_remainder = 0.0;
+        // update row and scrollbar geometry when list size or the visible range changes.
+        let shapes_changed = old_display_len != displayed_len
+            || old_visible_count
+            != self.monitors[index].visible_list_row_count(displayed_len)
+            || old_visible_start
+                != self.monitors[index]
+                    .list_scroll_offset
+                    .min(self.monitors[index].max_list_scroll_offset(displayed_len));
+        if self.monitors[index].visibility == MonitorVisibility::Visible {
+            if shapes_changed {
+                self.mark_gpu_shapes(index);
+            }
+            self.mark_gpu_text(index);
             Some((index, true))
         } else {
             Some((index, false))
         }
+    }
+
+    fn list_scrollbar_geometry(&self, index: usize) -> Option<ListScrollbarGeometry> {
+        let monitor = self.monitors.get(index)?;
+        if monitor.kind != MonitorKind::List {
+            return None;
+        }
+        let list_len = self.list_display_len(index);
+        let track_y = LIST_CONTENT_TOP;
+        let track_height = monitor.height - LIST_CONTENT_TOP - LIST_FOOTER_HEIGHT;
+        let content_height = list_len as f32 * LIST_ROW_HEIGHT;
+        let max_offset = monitor.max_list_scroll_offset(list_len);
+        if track_height <= 0.0 || content_height <= track_height || max_offset == 0 {
+            return None;
+        }
+        let thumb_height = (track_height * track_height / content_height)
+            .max(LIST_SCROLLBAR_MIN_THUMB_HEIGHT)
+            .min(track_height);
+        let thumb_travel = track_height - thumb_height;
+        let scroll_progress = monitor.list_scroll_offset.min(max_offset) as f32 / max_offset as f32;
+        Some(ListScrollbarGeometry {
+            track_x: monitor.width - LIST_SCROLLBAR_RIGHT_INSET - LIST_SCROLLBAR_WIDTH,
+            track_y,
+            track_width: LIST_SCROLLBAR_WIDTH,
+            track_height,
+            thumb_y: track_y + thumb_travel * scroll_progress,
+            thumb_height,
+        })
+    }
+
+    fn list_scrollbar_is_visible(&self, index: usize) -> bool {
+        self.list_scrollbar_hovered == Some(index)
+            || self
+                .list_scrollbar_drag
+                .as_ref()
+                .is_some_and(|drag| drag.monitor_index == index)
+    }
+
+    pub(crate) fn update_list_scrollbar_hover(&mut self, pointer: Option<(f32, f32)>) -> bool {
+        let next = pointer
+            .and_then(|(x, y)| self.hit_test(x, y))
+            .filter(|&index| self.monitors[index].kind == MonitorKind::List);
+        if next == self.list_scrollbar_hovered {
+            return false;
+        }
+        let previous = self.list_scrollbar_hovered;
+        self.list_scrollbar_hovered = next;
+        let mut visual_change = false;
+        if let Some(previous) = previous
+            && self.list_scrollbar_geometry(previous).is_some()
+        {
+            self.mark_gpu_shapes(previous);
+            visual_change = true;
+        }
+        if let Some(next) = next
+            && self.list_scrollbar_geometry(next).is_some()
+        {
+            self.mark_gpu_shapes(next);
+            visual_change = true;
+        }
+        visual_change
+    }
+
+    fn set_list_scroll_offset(&mut self, index: usize, offset: usize) -> bool {
+        let list_len = self.list_display_len(index);
+        let monitor = &mut self.monitors[index];
+        let next_offset = offset.min(monitor.max_list_scroll_offset(list_len));
+        if next_offset == monitor.list_scroll_offset {
+            return false;
+        }
+        monitor.list_scroll_offset = next_offset;
+        monitor.list_scroll_remainder = 0.0;
+        // update visible rows and the thumb without touching offscreen list values.
+        self.mark_gpu_shapes(index);
+        self.mark_gpu_text(index);
+        true
+    }
+
+    pub(crate) fn scroll_list_at(&mut self, x: f32, y: f32, rows: f32) -> Option<usize> {
+        let index = self.hit_test(x, y)?;
+        let displayed_len = self.list_display_len(index);
+        let monitor = self.monitors.get_mut(index)?;
+        if monitor.kind != MonitorKind::List || !rows.is_finite() || rows == 0.0 {
+            return None;
+        }
+        let accumulated = monitor.list_scroll_remainder + rows;
+        let whole_rows = accumulated.trunc() as isize;
+        monitor.list_scroll_remainder = accumulated - whole_rows as f32;
+        if whole_rows == 0 {
+            return None;
+        }
+        let max_offset = monitor.max_list_scroll_offset(displayed_len);
+        let offset = (monitor.list_scroll_offset as isize + whole_rows)
+            .clamp(0, max_offset as isize) as usize;
+        if offset == monitor.list_scroll_offset {
+            monitor.list_scroll_remainder = 0.0;
+            return None;
+        }
+        monitor.list_scroll_offset = offset;
+        // each visible index can shift its own value field, so refresh both instance sets.
+        self.mark_gpu_shapes(index);
+        self.mark_gpu_text(index);
+        Some(index)
+    }
+
+    pub(crate) fn list_editor_is_open(&self) -> bool {
+        self.list_editor.is_some()
+    }
+
+    pub(crate) fn handle_list_pointer(&mut self, x: f32, y: f32) -> ListPointerResponse {
+        let mut events = Vec::new();
+        let Some(index) = self.hit_test(x, y) else {
+            self.commit_list_editor(&mut events);
+            return ListPointerResponse {
+                consumed: false,
+                resizing: false,
+                scrollbar_dragging: false,
+                events,
+            };
+        };
+        if self.monitors[index].kind != MonitorKind::List {
+            self.commit_list_editor(&mut events);
+            return ListPointerResponse {
+                consumed: false,
+                resizing: false,
+                scrollbar_dragging: false,
+                events,
+            };
+        }
+
+        let monitor = &self.monitors[index];
+        let local_x = (x - monitor.x) / monitor.scale;
+        let local_y = (monitor.y - y) / monitor.scale;
+        let width = monitor.width;
+        let height = monitor.height;
+
+        if local_y < 24.0 {
+            self.commit_list_editor(&mut events);
+            return ListPointerResponse {
+                consumed: false,
+                resizing: false,
+                scrollbar_dragging: false,
+                events,
+            };
+        }
+
+        if local_x >= width - LIST_RESIZE_HANDLE_SIZE && local_y >= height - LIST_RESIZE_HANDLE_SIZE
+        {
+            self.commit_list_editor(&mut events);
+            self.list_resize = Some(ListResize {
+                monitor_index: index,
+                pointer_x: x,
+                pointer_y: y,
+                width,
+                height,
+            });
+            return ListPointerResponse {
+                consumed: true,
+                resizing: true,
+                scrollbar_dragging: false,
+                events,
+            };
+        }
+
+        if let Some(scrollbar) = self.list_scrollbar_geometry(index)
+            && (scrollbar.track_x..=scrollbar.track_x + scrollbar.track_width).contains(&local_x)
+            && (scrollbar.track_y..=scrollbar.track_y + scrollbar.track_height).contains(&local_y)
+        {
+            self.commit_list_editor(&mut events);
+            if self.list_scrollbar_hovered != Some(index) {
+                if let Some(previous) = self.list_scrollbar_hovered.replace(index) {
+                    self.mark_gpu_shapes(previous);
+                }
+                self.mark_gpu_shapes(index);
+            }
+            if (scrollbar.thumb_y..=scrollbar.thumb_y + scrollbar.thumb_height)
+                .contains(&local_y)
+            {
+                self.list_scrollbar_drag = Some(ListScrollbarDrag {
+                    monitor_index: index,
+                    pointer_offset: local_y - scrollbar.thumb_y,
+                });
+                self.mark_gpu_shapes(index);
+                return ListPointerResponse {
+                    consumed: true,
+                    resizing: false,
+                    scrollbar_dragging: true,
+                    events,
+                };
+            }
+            let page = self.monitors[index]
+                .list_scroll_row_capacity()
+                .saturating_sub(1)
+                .max(1);
+            let current = self.monitors[index].list_scroll_offset;
+            let next = if local_y < scrollbar.thumb_y {
+                current.saturating_sub(page)
+            } else {
+                current.saturating_add(page)
+            };
+            self.set_list_scroll_offset(index, next);
+            return ListPointerResponse {
+                consumed: true,
+                resizing: false,
+                scrollbar_dragging: false,
+                events,
+            };
+        }
+
+        if local_y >= height - LIST_FOOTER_HEIGHT
+            && (LIST_FOOTER_SIDE_PADDING..LIST_FOOTER_SIDE_PADDING + 22.0).contains(&local_x)
+        {
+            self.commit_list_editor(&mut events);
+            let list_len = self.list_display_len(index);
+            let key = self.monitors[index].value_key.clone();
+            self.list_editor = Some(ListItemEditor {
+                monitor_index: index,
+                index: list_len + 1,
+                text: String::new(),
+                caret: 0,
+                select_all: true,
+                appended: true,
+                dirty: false,
+            });
+            let capacity = self.monitors[index].list_scroll_row_capacity();
+            self.monitors[index].list_scroll_offset = (list_len + 1).saturating_sub(capacity);
+            self.mark_gpu_shapes(index);
+            self.mark_gpu_text(index);
+            events.push(RuntimeInputEvent::ListAppend { key });
+            return ListPointerResponse {
+                consumed: true,
+                resizing: false,
+                scrollbar_dragging: false,
+                events,
+            };
+        }
+
+        if local_y >= LIST_CONTENT_TOP && local_y < height - LIST_FOOTER_HEIGHT {
+            let monitor = &self.monitors[index];
+            let displayed_len = self.list_display_len(index);
+            let start = monitor
+                .list_scroll_offset
+                .min(monitor.max_list_scroll_offset(displayed_len));
+            let row = ((local_y - LIST_CONTENT_TOP) / LIST_ROW_HEIGHT).floor() as usize;
+            let row_index = start + row + 1;
+            // keep pointer hit testing aligned with the dynamically sized value field.
+            let value_x = self.list_row_value_x(index, row_index);
+            if row_index <= displayed_len && local_x >= value_x && local_x < width - 6.0 {
+                if self.list_editor.as_ref().is_some_and(|editor| {
+                    editor.monitor_index == index
+                        && editor.index == row_index
+                        && local_x >= width - 28.0
+                }) {
+                    self.list_editor = None;
+                    let key = self.monitors[index].value_key.clone();
+                    events.push(RuntimeInputEvent::ListDeleteItem {
+                        key,
+                        index: row_index,
+                    });
+                    self.monitors[index].list_scroll_offset = self.monitors[index]
+                        .list_scroll_offset
+                        .min(self.monitors[index].max_list_scroll_offset(displayed_len - 1));
+                    self.mark_gpu_shapes(index);
+                    self.mark_gpu_text(index);
+                    return ListPointerResponse {
+                        consumed: true,
+                        resizing: false,
+                        scrollbar_dragging: false,
+                        events,
+                    };
+                }
+
+                if self.list_editor.as_ref().is_some_and(|editor| {
+                    editor.monitor_index == index && editor.index == row_index
+                }) {
+                    let selection_changed = self
+                        .list_editor
+                        .as_ref()
+                        .is_some_and(|editor| editor.select_all);
+                    let caret = self.list_caret_from_x(index, local_x, row_index);
+                    if let Some(editor) = self.list_editor.as_mut() {
+                        editor.caret = caret;
+                        editor.select_all = false;
+                    }
+                    if selection_changed {
+                        self.mark_gpu_shapes(index);
+                    }
+                    self.mark_gpu_text(index);
+                    return ListPointerResponse {
+                        consumed: true,
+                        resizing: false,
+                        scrollbar_dragging: false,
+                        events,
+                    };
+                }
+
+                self.commit_list_editor(&mut events);
+                let text = self.monitors[index]
+                    .list_items
+                    .get(row_index - 1)
+                    .map(crate::runtime::scratch_string)
+                    .unwrap_or_default();
+                self.list_editor = Some(ListItemEditor {
+                    monitor_index: index,
+                    index: row_index,
+                    caret: text.len(),
+                    text,
+                    select_all: true,
+                    appended: false,
+                    dirty: false,
+                });
+                self.mark_gpu_text(index);
+                return ListPointerResponse {
+                    consumed: true,
+                    resizing: false,
+                    scrollbar_dragging: false,
+                    events,
+                };
+            }
+        }
+
+        self.commit_list_editor(&mut events);
+        ListPointerResponse {
+            consumed: true,
+            resizing: false,
+            scrollbar_dragging: false,
+            events,
+        }
+    }
+
+    pub(crate) fn edit_list_item(
+        &mut self,
+        input: ListEditorInput<'_>,
+    ) -> (bool, Vec<RuntimeInputEvent>) {
+        if matches!(input, ListEditorInput::Commit) {
+            let index = self.list_editor.as_ref().map(|editor| editor.monitor_index);
+            let mut events = Vec::new();
+            self.commit_list_editor(&mut events);
+            return (index.is_some(), events);
+        }
+        if matches!(input, ListEditorInput::Cancel) {
+            let editor = self.list_editor.take();
+            if let Some(editor) = editor {
+                if editor.select_all {
+                    self.mark_gpu_shapes(editor.monitor_index);
+                }
+                let index = editor.monitor_index;
+                self.mark_gpu_text(index);
+                return (true, Vec::new());
+            }
+            return (false, Vec::new());
+        }
+        let Some(editor) = self.list_editor.as_mut() else {
+            return (false, Vec::new());
+        };
+        let index = editor.monitor_index;
+        let selection_was_active = editor.select_all;
+        let events = Vec::new();
+        let changed = match input {
+            ListEditorInput::Text(text) if !text.is_empty() => {
+                if editor.select_all {
+                    editor.text.clear();
+                    editor.caret = 0;
+                    editor.select_all = false;
+                }
+                editor.text.insert_str(editor.caret, text);
+                editor.caret += text.len();
+                editor.dirty = true;
+                true
+            }
+            ListEditorInput::Backspace => {
+                if editor.select_all {
+                    editor.text.clear();
+                    editor.caret = 0;
+                    editor.select_all = false;
+                    editor.dirty = true;
+                    true
+                } else if editor.caret > 0 {
+                    let previous = previous_char_boundary(&editor.text, editor.caret);
+                    editor.text.replace_range(previous..editor.caret, "");
+                    editor.caret = previous;
+                    editor.dirty = true;
+                    true
+                } else {
+                    false
+                }
+            }
+            ListEditorInput::Delete => {
+                if editor.select_all {
+                    editor.text.clear();
+                    editor.caret = 0;
+                    editor.select_all = false;
+                    editor.dirty = true;
+                    true
+                } else if editor.caret < editor.text.len() {
+                    let next = next_char_boundary(&editor.text, editor.caret);
+                    editor.text.replace_range(editor.caret..next, "");
+                    editor.dirty = true;
+                    true
+                } else {
+                    false
+                }
+            }
+            ListEditorInput::Left => {
+                editor.caret = if editor.select_all {
+                    0
+                } else {
+                    previous_char_boundary(&editor.text, editor.caret)
+                };
+                editor.select_all = false;
+                true
+            }
+            ListEditorInput::Right => {
+                editor.caret = if editor.select_all {
+                    editor.text.len()
+                } else {
+                    next_char_boundary(&editor.text, editor.caret)
+                };
+                editor.select_all = false;
+                true
+            }
+            ListEditorInput::Home => {
+                editor.caret = 0;
+                editor.select_all = false;
+                true
+            }
+            ListEditorInput::End => {
+                editor.caret = editor.text.len();
+                editor.select_all = false;
+                true
+            }
+            ListEditorInput::Commit | ListEditorInput::Cancel => false,
+            ListEditorInput::Text(_) => false,
+        };
+        if changed {
+            if selection_was_active {
+                self.mark_gpu_shapes(index);
+            }
+            self.mark_gpu_text(index);
+        }
+        (changed, events)
+    }
+
+    fn commit_list_editor(&mut self, events: &mut Vec<RuntimeInputEvent>) {
+        let Some(editor) = self.list_editor.take() else {
+            return;
+        };
+        if editor.select_all {
+            self.mark_gpu_shapes(editor.monitor_index);
+        }
+        if editor.dirty {
+            if let Some(monitor) = self.monitors.get(editor.monitor_index) {
+                events.push(RuntimeInputEvent::ListSetItem {
+                    key: monitor.value_key.clone(),
+                    index: editor.index,
+                    value: editor.text,
+                });
+            }
+        }
+        self.mark_gpu_text(editor.monitor_index);
+    }
+
+    fn list_caret_from_x(&self, monitor_index: usize, local_x: f32, row_index: usize) -> usize {
+        let Some(editor) = self.list_editor.as_ref() else {
+            return 0;
+        };
+        if editor.monitor_index != monitor_index || editor.index != row_index {
+            return 0;
+        }
+        // place the caret from the same value-field edge used by row rendering.
+        let start_x = self.list_row_value_x(monitor_index, row_index) + LIST_ROW_TEXT_INSET;
+        let target_x = (local_x - start_x).max(0.0);
+        let scaled = self.regular_font.as_scaled(LIST_ROW_FONT_SIZE);
+        let max_width = self.monitors[monitor_index].width - start_x - 28.0;
+        let shown = fit_monitor_text(
+            &self.regular_font,
+            &editor.text,
+            max_width,
+            LIST_ROW_FONT_SIZE,
+        );
+        let mut pen_x = 0.0;
+        let mut previous = None;
+        for (byte_index, character) in shown.char_indices() {
+            let glyph = scaled.glyph_id(character);
+            if let Some(prior) = previous {
+                pen_x += scaled.kern(prior, glyph);
+            }
+            if target_x < pen_x + scaled.h_advance(glyph) * 0.5 {
+                return byte_index;
+            }
+            pen_x += scaled.h_advance(glyph);
+            previous = Some(glyph);
+        }
+        shown.len().min(editor.text.len())
+    }
+
+    // size each value field from its own row index so shorter indices do not waste space.
+    pub(super) fn list_row_value_x(&self, monitor_index: usize, row_index: usize) -> f32 {
+        let Some(monitor) = self.monitors.get(monitor_index) else {
+            return LIST_ROW_VALUE_X;
+        };
+        let index_text = row_index.to_string();
+        let index_width =
+            text_width(&self.bold_font, &index_text, LIST_ROW_FONT_SIZE) + LIST_ROW_INDEX_CLEARANCE;
+        let available_index_width =
+            (monitor.width - LIST_ROW_INDEX_X - 6.0 - LIST_ROW_INDEX_GAP).max(0.0);
+        let fitted_index_width = index_width.min(available_index_width);
+        (LIST_ROW_INDEX_X + fitted_index_width + LIST_ROW_INDEX_GAP)
+            .max(LIST_ROW_VALUE_X)
+            .min((monitor.width - 6.0).max(0.0))
     }
 
     pub(crate) fn set_monitor_visibility(&mut self, name: &str, visible: bool) -> Option<usize> {
@@ -658,7 +1334,6 @@ impl VariableLayer {
         self.slider_dragging = Some(index);
         self.slider_hovered = None;
         self.slider_thumb_hovered = None;
-        self.mark_gpu_monitor(index);
         self.set_slider_value(index, x);
         true
     }
@@ -734,6 +1409,50 @@ impl VariableLayer {
         if let Some(index) = self.slider_dragging {
             return self.set_slider_value(index, x);
         }
+        if let Some(drag) = self.list_scrollbar_drag {
+            let Some(scrollbar) = self.list_scrollbar_geometry(drag.monitor_index) else {
+                return false;
+            };
+            let list_len = self.list_display_len(drag.monitor_index);
+            let monitor = &self.monitors[drag.monitor_index];
+            let local_y = (monitor.y - y) / monitor.scale;
+            let thumb_travel = scrollbar.track_height - scrollbar.thumb_height;
+            if thumb_travel <= 0.0 {
+                return false;
+            }
+            let progress = ((local_y - drag.pointer_offset - scrollbar.track_y) / thumb_travel)
+                .clamp(0.0, 1.0);
+            let max_offset = monitor.max_list_scroll_offset(list_len);
+            return self.set_list_scroll_offset(
+                drag.monitor_index,
+                (progress * max_offset as f32).round() as usize,
+            );
+        }
+        if let Some(resize) = self.list_resize.as_ref() {
+            let index = resize.monitor_index;
+            let display_len = self.list_display_len(index);
+            let monitor = &mut self.monitors[index];
+            let max_width =
+                ((SCRATCH_WIDTH as f32 - (monitor.x + STAGE_HALF_WIDTH)) / monitor.scale).max(64.0);
+            let max_height = ((SCRATCH_HEIGHT as f32 - (STAGE_HALF_HEIGHT - monitor.y))
+                / monitor.scale)
+                .max(68.0);
+            let width =
+                (resize.width + (x - resize.pointer_x) / monitor.scale).clamp(64.0, max_width);
+            let height =
+                (resize.height - (y - resize.pointer_y) / monitor.scale).clamp(68.0, max_height);
+            if monitor.width == width && monitor.height == height {
+                return false;
+            }
+            monitor.width = width;
+            monitor.height = height;
+            monitor.list_scroll_offset = monitor
+                .list_scroll_offset
+                .min(monitor.max_list_scroll_offset(display_len));
+            self.mark_gpu_shapes(index);
+            self.mark_gpu_text(index);
+            return true;
+        }
         let Some((index, offset_x, offset_y)) = self.dragging else {
             return false;
         };
@@ -768,6 +1487,10 @@ impl VariableLayer {
     pub(crate) fn end_drag(&mut self) {
         self.slider_dragging = None;
         self.dragging = None;
+        self.list_resize = None;
+        if let Some(drag) = self.list_scrollbar_drag.take() {
+            self.mark_gpu_shapes(drag.monitor_index);
+        }
         if self.shadow_monitor.is_some() {
             self.start_shadow_fade(0.0);
         }
@@ -859,6 +1582,21 @@ impl VariableLayer {
                     0.0,
                 ]
             })
+    }
+
+    pub(super) fn list_display_len(&self, index: usize) -> usize {
+        let Some(monitor) = self.monitors.get(index) else {
+            return 0;
+        };
+        let mut len = monitor.list_items.len();
+        if let Some(editor) = &self.list_editor
+            && editor.monitor_index == index
+            && editor.appended
+            && editor.index > len
+        {
+            len = editor.index;
+        }
+        len
     }
 
     pub(crate) fn gpu_monitor_ids_in_draw_order(&self) -> impl Iterator<Item = u32> + '_ {
@@ -1131,6 +1869,21 @@ fn clamp_monitor_position(value: f32, min: f32, max: f32) -> f32 {
     }
 }
 
+fn previous_char_boundary(text: &str, caret: usize) -> usize {
+    text[..caret.min(text.len())]
+        .char_indices()
+        .next_back()
+        .map_or(0, |(index, _)| index)
+}
+
+fn next_char_boundary(text: &str, caret: usize) -> usize {
+    let caret = caret.min(text.len());
+    text[caret..]
+        .char_indices()
+        .nth(1)
+        .map_or(text.len(), |(offset, _)| caret + offset)
+}
+
 fn truncate_monitor_text(value: &str, max_chars: usize) -> String {
     let mut chars = value.chars();
     let prefix: String = chars.by_ref().take(max_chars).collect();
@@ -1150,8 +1903,167 @@ fn expanded_width(label_width: f32, value_width: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{MonitorDisplayMode, VariableLayer, VariableMonitor};
-    use crate::runtime::variable_snapshot_key;
+    use super::{
+        LIST_ROW_FONT_SIZE, LIST_ROW_HEIGHT, ListEditorInput, MonitorDisplayMode, VariableLayer,
+        VariableMonitor,
+    };
+    use crate::runtime::{RuntimeInputEvent, ScratchValue, variable_snapshot_key};
+    use std::sync::Arc;
+
+    fn list_layer() -> VariableLayer {
+        VariableLayer::new(vec![
+            VariableMonitor::new("items", "2", 0.0, 0.0)
+                .with_value_key("Stage::items#items-id@shared")
+                .with_list_items(vec!["alpha".into(), "beta".into()], 180.0, 150.0),
+        ])
+        .unwrap()
+    }
+
+    fn click_local(
+        layer: &mut VariableLayer,
+        local_x: f32,
+        local_y: f32,
+    ) -> super::ListPointerResponse {
+        let monitor = &layer.monitors[0];
+        let x = monitor.x + local_x * monitor.scale;
+        let y = monitor.y - local_y * monitor.scale;
+        layer.handle_list_pointer(x, y)
+    }
+
+    fn list_with_items(length: usize, height: f32) -> VariableLayer {
+        VariableLayer::new(vec![
+            VariableMonitor::new("items", "", 0.0, 0.0)
+                .with_value_key("Stage::items#items-id@shared")
+                .with_list_items(
+                    (0..length).map(|index| index.to_string()).collect(),
+                    180.0,
+                    height,
+                ),
+        ])
+        .unwrap()
+    }
+
+    fn stage_point_for_list(layer: &VariableLayer, local_x: f32, local_y: f32) -> (f32, f32) {
+        let monitor = &layer.monitors[0];
+        (
+            monitor.x + local_x * monitor.scale,
+            monitor.y - local_y * monitor.scale,
+        )
+    }
+
+    #[test]
+    fn list_plus_appends_one_blank_item_and_opens_it_selected() {
+        let mut layer = list_layer();
+        let response = click_local(&mut layer, 12.0, 140.0);
+
+        assert!(response.consumed);
+        assert!(layer.list_editor_is_open());
+        assert_eq!(layer.list_display_len(0), 3);
+        assert_eq!(layer.visible_list_rows(0).last(), Some(&(3, String::new())));
+        assert!(matches!(
+            response.events.as_slice(),
+            [RuntimeInputEvent::ListAppend { key }] if key == "Stage::items#items-id@shared"
+        ));
+        let editor = layer.list_editor.as_ref().unwrap();
+        assert_eq!(editor.index, 3);
+        assert!(editor.select_all);
+        assert!(editor.appended);
+
+        layer.edit_list_item(ListEditorInput::Text("new"));
+        let (_, events) = layer.edit_list_item(ListEditorInput::Commit);
+        assert!(matches!(
+            events.as_slice(),
+            [RuntimeInputEvent::ListSetItem { index: 3, value, .. }] if value == "new"
+        ));
+    }
+
+    #[test]
+    fn list_value_editor_selects_all_and_click_positions_caret() {
+        let mut layer = list_layer();
+        click_local(&mut layer, 35.0, super::LIST_CONTENT_TOP + 11.0);
+        assert!(layer.list_editor.as_ref().unwrap().select_all);
+
+        layer.edit_list_item(ListEditorInput::Text("word"));
+        let prefix_width = super::text_width(&layer.regular_font, "w", LIST_ROW_FONT_SIZE);
+        click_local(
+            &mut layer,
+            super::LIST_ROW_VALUE_X + super::LIST_ROW_TEXT_INSET + prefix_width,
+            super::LIST_CONTENT_TOP + 11.0,
+        );
+        assert_eq!(layer.list_editor.as_ref().unwrap().caret, 1);
+        assert!(!layer.list_editor.as_ref().unwrap().select_all);
+
+        layer.edit_list_item(ListEditorInput::Text("X"));
+        let (_, events) = layer.edit_list_item(ListEditorInput::Commit);
+        assert!(matches!(
+            events.as_slice(),
+            [RuntimeInputEvent::ListSetItem { index: 1, value, .. }] if value == "wXord"
+        ));
+    }
+
+    #[test]
+    fn list_active_row_x_deletes_only_that_item() {
+        let mut layer = list_layer();
+        click_local(&mut layer, 35.0, super::LIST_CONTENT_TOP + 11.0);
+        let response = click_local(&mut layer, 165.0, super::LIST_CONTENT_TOP + 11.0);
+
+        assert!(response.consumed);
+        assert!(!layer.list_editor_is_open());
+        assert!(matches!(
+            response.events.as_slice(),
+            [RuntimeInputEvent::ListDeleteItem { key, index: 1 }]
+                if key == "Stage::items#items-id@shared"
+        ));
+    }
+
+    #[test]
+    fn list_resize_changes_only_available_area_not_typography_or_row_spacing() {
+        let mut layer = list_layer();
+        let width = layer.monitors[0].width;
+        let height = layer.monitors[0].height;
+        let scale = layer.monitors[0].scale;
+        let row_height = LIST_ROW_HEIGHT;
+        let font_size = LIST_ROW_FONT_SIZE;
+        let response = click_local(&mut layer, width - 4.0, height - 4.0);
+        assert!(response.resizing);
+
+        let monitor = &layer.monitors[0];
+        let start_x = monitor.x + (width - 4.0) * scale;
+        let start_y = monitor.y - (height - 4.0) * scale;
+        assert!(layer.drag_to(start_x + 20.0 * scale, start_y - 18.0 * scale));
+        assert!((layer.monitors[0].width - (width + 20.0)).abs() < 0.01);
+        assert!((layer.monitors[0].height - (height + 18.0)).abs() < 0.01);
+        assert_eq!(LIST_ROW_HEIGHT, row_height);
+        assert_eq!(LIST_ROW_FONT_SIZE, font_size);
+        assert_eq!(super::LIST_ROW_TEXT_INSET, 6.0);
+        assert_eq!(super::LIST_ROW_INDEX_X, 7.0);
+    }
+
+    #[test]
+    fn list_can_resize_to_stage_bounds_and_move_by_its_title_area() {
+        let mut layer = list_layer();
+        layer.monitors[0].x = -240.0;
+        layer.monitors[0].y = 180.0;
+        let scale = layer.monitors[0].scale;
+        let width = layer.monitors[0].width;
+        let height = layer.monitors[0].height;
+        let response = click_local(&mut layer, width - 4.0, height - 4.0);
+        assert!(response.resizing);
+        let target_x = layer.monitors[0].x + 480.0 - 4.0 * scale;
+        let target_y = layer.monitors[0].y - 360.0 + 4.0 * scale;
+        assert!(layer.drag_to(target_x, target_y));
+        assert!((layer.monitors[0].width * scale - 480.0).abs() < 0.01);
+        assert!((layer.monitors[0].height * scale - 360.0).abs() < 0.01);
+
+        let mut movable = list_layer();
+        let monitor = &movable.monitors[0];
+        let title_x = monitor.x + 20.0 * monitor.scale;
+        let title_y = monitor.y - 12.0 * monitor.scale;
+        let title_response = movable.handle_list_pointer(title_x, title_y);
+        assert!(!title_response.consumed);
+        assert!(movable.begin_drag(title_x, title_y));
+        assert!(movable.drag_to(title_x + 30.0, title_y - 20.0));
+    }
 
     #[test]
     fn variable_monitor_builds_gpu_instances() {
@@ -1177,7 +2089,7 @@ mod tests {
         assert_eq!(layer.monitors[1].category, super::MonitorCategory::Lists);
         assert_eq!(layer.monitors[1].kind, super::MonitorKind::List);
         let (shapes, glyphs) = layer.build_gpu_monitor_instances(1, true, true).unwrap();
-        assert_eq!(shapes.len(), 6);
+        assert_eq!(shapes.len(), 8);
         assert!(glyphs.len() > 10);
         let bounds = layer.monitor_bounds(1);
         assert!(
@@ -1249,13 +2161,356 @@ mod tests {
             .with_value_key(key)
             .with_list_items(vec!["one".to_owned()], 110.0, 120.0);
         let mut layer = VariableLayer::new(vec![monitor]).unwrap();
+        let items = Arc::new(vec![
+            ScratchValue::Text("one".into()),
+            ScratchValue::Text("two".into()),
+        ]);
         assert_eq!(
-            layer.set_monitor_list(key, vec!["one".into(), "two".into()]),
+            layer.set_monitor_list(key, Arc::clone(&items)),
             Some((0, true))
         );
-        assert_eq!(layer.monitors[0].list_items, vec!["one", "two"]);
+        assert!(Arc::ptr_eq(&layer.monitors[0].list_items, &items));
         assert_eq!(layer.monitors[0].display_mode, MonitorDisplayMode::List);
         assert_eq!(layer.take_dirty_gpu_shapes(), vec![0]);
+    }
+
+    #[test]
+    fn large_list_scroll_keeps_absolute_indices_and_builds_only_visible_gpu_rows() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../aida-ast/tests/src/monitor-tests-sensing.sb3"
+        );
+        let json = aida_ast::extractor::read_project_json(path).unwrap();
+        let project = aida_ast::parser::parse_project(&json).unwrap();
+        let source = project
+            .targets
+            .iter()
+            .flat_map(|target| target.lists.values())
+            .find(|list| list.items.len() == 200_000)
+            .expect("fixture should contain its complete list");
+        let values = source
+            .items
+            .iter()
+            .map(|item| match item {
+                serde_json::Value::String(value) => ScratchValue::Text(value.clone()),
+                serde_json::Value::Number(value) => ScratchValue::Number(value.as_f64().unwrap()),
+                serde_json::Value::Bool(value) => ScratchValue::Boolean(*value),
+                _ => ScratchValue::Text(item.to_string()),
+            })
+            .collect::<Vec<_>>();
+        let monitor = VariableMonitor::new("large list", "", 0.0, 0.0).with_list_values(
+            Arc::new(values),
+            220.0,
+            196.0,
+        );
+        let mut layer = VariableLayer::new(vec![monitor]).unwrap();
+
+        let first_rows = layer.visible_list_rows(0);
+        assert_eq!(
+            first_rows.first(),
+            Some(&(1, source.items[0].as_i64().unwrap().to_string()))
+        );
+        assert_eq!(first_rows.len(), 7);
+        let top_scrollbar = layer.list_scrollbar_geometry(0).unwrap();
+        assert_eq!(top_scrollbar.thumb_height, super::LIST_SCROLLBAR_MIN_THUMB_HEIGHT);
+        assert_eq!(top_scrollbar.thumb_y, top_scrollbar.track_y);
+        let (_, first_glyphs) = layer.build_gpu_monitor_instances(0, false, true).unwrap();
+        assert!(first_glyphs.len() < 256);
+
+        assert_eq!(layer.scroll_list_at(10.0, -30.0, 250_000.0), Some(0));
+        let last_rows = layer.visible_list_rows(0);
+        assert_eq!(last_rows.first().unwrap().0, 199_995);
+        assert_eq!(
+            last_rows.last(),
+            Some(&(200_000, source.items[199_999].as_i64().unwrap().to_string()))
+        );
+        let (_, last_glyphs) = layer.build_gpu_monitor_instances(0, false, true).unwrap();
+        assert!(last_glyphs.len() < 256);
+        assert_eq!(layer.monitors[0].list_scroll_offset, 199_994);
+        let bottom_scrollbar = layer.list_scrollbar_geometry(0).unwrap();
+        assert!((bottom_scrollbar.thumb_y + bottom_scrollbar.thumb_height
+            - (bottom_scrollbar.track_y + bottom_scrollbar.track_height))
+            .abs()
+            < 0.01);
+
+        // drag the scrollbar across the full fixture list without traversing its item data.
+        assert!(layer.set_list_scroll_offset(0, 0));
+        let top_scrollbar = layer.list_scrollbar_geometry(0).unwrap();
+        let pointer = stage_point_for_list(
+            &layer,
+            top_scrollbar.track_x + 1.0,
+            top_scrollbar.thumb_y + top_scrollbar.thumb_height * 0.5,
+        );
+        assert!(layer.handle_list_pointer(pointer.0, pointer.1).scrollbar_dragging);
+        let bottom_pointer = stage_point_for_list(
+            &layer,
+            top_scrollbar.track_x + 1.0,
+            top_scrollbar.track_y + top_scrollbar.track_height
+                - top_scrollbar.thumb_height * 0.5,
+        );
+        assert!(layer.drag_to(bottom_pointer.0, bottom_pointer.1));
+        assert_eq!(layer.visible_list_rows(0).last().unwrap().0, 200_000);
+        let dragged_scrollbar = layer.list_scrollbar_geometry(0).unwrap();
+        assert!(
+            (dragged_scrollbar.thumb_y + dragged_scrollbar.thumb_height
+                - (dragged_scrollbar.track_y + dragged_scrollbar.track_height))
+                .abs()
+                < 0.01
+        );
+    }
+
+    #[test]
+    fn list_wheel_scroll_accumulates_fractional_rows_and_clamps_to_available_range() {
+        let monitor = VariableMonitor::new("items", "", 0.0, 0.0).with_list_items(
+            (0..20).map(|index| index.to_string()).collect(),
+            160.0,
+            196.0,
+        );
+        let mut layer = VariableLayer::new(vec![monitor]).unwrap();
+        assert_eq!(layer.scroll_list_at(10.0, -30.0, 0.5), None);
+        assert_eq!(layer.scroll_list_at(10.0, -30.0, 0.5), Some(0));
+        assert_eq!(layer.monitors[0].list_scroll_offset, 1);
+        assert_eq!(layer.scroll_list_at(10.0, -30.0, 10_000.0), Some(0));
+        assert_eq!(layer.monitors[0].list_scroll_offset, 14);
+        assert_eq!(layer.scroll_list_at(10.0, -30.0, 3.0), None);
+    }
+
+    #[test]
+    fn list_scrollbar_only_appears_on_hover_when_content_exceeds_the_viewport() {
+        let empty = list_with_items(0, 196.0);
+        let fitting = list_with_items(6, 196.0);
+        assert_eq!(empty.list_scrollbar_geometry(0), None);
+        assert_eq!(fitting.list_scrollbar_geometry(0), None);
+
+        let mut scrollable = list_with_items(7, 196.0);
+        let geometry = scrollable.list_scrollbar_geometry(0).unwrap();
+        let (hidden_shapes, _) = scrollable
+            .build_gpu_monitor_instances(0, true, false)
+            .unwrap();
+        let track_index = hidden_shapes.len() - 3;
+        let thumb_index = hidden_shapes.len() - 2;
+        assert_eq!(hidden_shapes[track_index].fill[3], 0.0);
+        assert_eq!(hidden_shapes[track_index].fill, [0.0; 4]);
+        assert!(track_index < thumb_index);
+        assert!(scrollable.update_list_scrollbar_hover(Some(stage_point_for_list(
+            &scrollable,
+            geometry.track_x + 1.0,
+            geometry.track_y + 1.0,
+        ))));
+        assert!(scrollable.list_scrollbar_is_visible(0));
+        let (visible_shapes, _) = scrollable
+            .build_gpu_monitor_instances(0, true, false)
+            .unwrap();
+        assert_eq!(visible_shapes.len(), hidden_shapes.len());
+        assert_eq!(visible_shapes[track_index].fill[3], 42.0 / 255.0);
+        assert_eq!(visible_shapes[thumb_index].fill[3], 190.0 / 255.0);
+        assert!(
+            visible_shapes[track_index].fill[0] < visible_shapes[thumb_index].fill[0]
+        );
+        for index in 0..visible_shapes.len() {
+            if index != track_index && index != thumb_index {
+                assert_eq!(visible_shapes[index], hidden_shapes[index]);
+            }
+        }
+        assert!(scrollable.update_list_scrollbar_hover(None));
+        assert!(!scrollable.list_scrollbar_is_visible(0));
+    }
+
+    #[test]
+    fn partial_last_list_row_keeps_glyph_spacing_and_clips_at_the_footer() {
+        let mut layer = list_with_items(20, 196.0);
+        let (_, glyphs) = layer.build_gpu_monitor_instances(0, true, true).unwrap();
+        let visible_rows = layer.visible_list_rows(0);
+        let last_row = visible_rows.last().unwrap();
+        assert_eq!(last_row, &(7, "6".to_owned()));
+
+        let footer_top = layer.monitors[0].height - super::LIST_FOOTER_HEIGHT;
+        let partial_row_y = super::LIST_CONTENT_TOP + 6.0 * super::LIST_ROW_HEIGHT;
+        let last_row_glyphs = glyphs
+            .iter()
+            .filter(|glyph| glyph.clip_y[0] == partial_row_y)
+            .collect::<Vec<_>>();
+        assert!(last_row_glyphs.len() >= 2);
+        assert!(
+            last_row_glyphs
+                .iter()
+                .all(|glyph| glyph.clip_y[1] == footer_top)
+        );
+        assert!(last_row_glyphs
+            .iter()
+            .any(|glyph| glyph.local_position[0] < super::LIST_ROW_VALUE_X));
+        assert!(last_row_glyphs
+            .iter()
+            .any(|glyph| glyph.local_position[0] >= super::LIST_ROW_VALUE_X));
+        let bucket = layer.glyph_atlas_scale_bucket;
+        let index_glyph_id = layer.glyph_atlas_entries[&('7', true, bucket)].id;
+        let value_glyph_id = layer.glyph_atlas_entries[&('6', false, bucket)].id;
+        assert!(last_row_glyphs
+            .iter()
+            .any(|glyph| glyph.glyph_id == index_glyph_id));
+        assert!(last_row_glyphs
+            .iter()
+            .any(|glyph| glyph.glyph_id == value_glyph_id));
+        let previous_index_glyph_id = layer.glyph_atlas_entries[&('6', true, bucket)].id;
+        let previous_value_glyph_id = layer.glyph_atlas_entries[&('5', false, bucket)].id;
+        let previous_row_y = partial_row_y - super::LIST_ROW_HEIGHT;
+        let previous_row_glyphs = glyphs
+            .iter()
+            .filter(|glyph| glyph.clip_y[0] == previous_row_y)
+            .collect::<Vec<_>>();
+        let last_index_y = last_row_glyphs
+            .iter()
+            .find(|glyph| glyph.glyph_id == index_glyph_id)
+            .unwrap()
+            .local_position[1];
+        let previous_index_y = previous_row_glyphs
+            .iter()
+            .find(|glyph| glyph.glyph_id == previous_index_glyph_id)
+            .unwrap()
+            .local_position[1];
+        let last_value_y = last_row_glyphs
+            .iter()
+            .find(|glyph| glyph.glyph_id == value_glyph_id)
+            .unwrap()
+            .local_position[1];
+        let previous_value_y = previous_row_glyphs
+            .iter()
+            .find(|glyph| glyph.glyph_id == previous_value_glyph_id)
+            .unwrap()
+            .local_position[1];
+        assert_eq!(last_index_y - previous_index_y, super::LIST_ROW_HEIGHT);
+        assert_eq!(last_value_y - previous_value_y, super::LIST_ROW_HEIGHT);
+    }
+
+    #[test]
+    fn list_scrollbar_thumb_scales_and_maps_top_middle_and_bottom_offsets() {
+        let proportional = list_with_items(20, 196.0)
+            .list_scrollbar_geometry(0)
+            .unwrap();
+        let expected_thumb_height = proportional.track_height * proportional.track_height
+            / (20.0 * super::LIST_ROW_HEIGHT);
+        assert!((proportional.thumb_height - expected_thumb_height).abs() < 0.01);
+
+        let mut layer = list_with_items(1_000, 196.0);
+        let top = layer.list_scrollbar_geometry(0).unwrap();
+        assert_eq!(top.thumb_y, top.track_y);
+        assert_eq!(top.thumb_height, super::LIST_SCROLLBAR_MIN_THUMB_HEIGHT);
+
+        let max_offset = layer.monitors[0].max_list_scroll_offset(1_000);
+        assert!(layer.set_list_scroll_offset(0, max_offset / 2));
+        let middle = layer.list_scrollbar_geometry(0).unwrap();
+        let travel = middle.track_height - middle.thumb_height;
+        assert!((middle.thumb_y - (middle.track_y + travel * 0.5)).abs() < 1.0);
+
+        assert!(layer.set_list_scroll_offset(0, max_offset));
+        let bottom = layer.list_scrollbar_geometry(0).unwrap();
+        assert!((bottom.thumb_y + bottom.thumb_height
+            - (bottom.track_y + bottom.track_height))
+            .abs()
+            < 0.01);
+    }
+
+    #[test]
+    fn list_scrollbar_drag_and_track_click_scroll_visible_rows() {
+        let mut layer = list_with_items(100, 196.0);
+        let geometry = layer.list_scrollbar_geometry(0).unwrap();
+        let pointer = stage_point_for_list(
+            &layer,
+            geometry.track_x + 2.0,
+            geometry.thumb_y + geometry.thumb_height * 0.5,
+        );
+        let response = layer.handle_list_pointer(pointer.0, pointer.1);
+        assert!(response.consumed);
+        assert!(response.scrollbar_dragging);
+
+        let bottom_pointer_y = geometry.track_y + geometry.track_height
+            - geometry.thumb_height * 0.5;
+        let bottom_pointer = stage_point_for_list(&layer, geometry.track_x + 2.0, bottom_pointer_y);
+        assert!(layer.drag_to(bottom_pointer.0, bottom_pointer.1));
+        assert_eq!(layer.monitors[0].list_scroll_offset, 100 - 6);
+        assert_eq!(layer.visible_list_rows(0).first().unwrap().0, 95);
+        layer.end_drag();
+
+        assert!(layer.set_list_scroll_offset(0, 0));
+        let top = layer.list_scrollbar_geometry(0).unwrap();
+        let track_click = stage_point_for_list(
+            &layer,
+            top.track_x + 2.0,
+            top.thumb_y + top.thumb_height + 2.0,
+        );
+        let response = layer.handle_list_pointer(track_click.0, track_click.1);
+        assert!(response.consumed);
+        assert!(!response.scrollbar_dragging);
+        assert!(layer.monitors[0].list_scroll_offset > 0);
+    }
+
+    #[test]
+    fn list_scrollbar_recalculates_after_list_growth_and_viewport_resize() {
+        let mut layer = list_with_items(20, 196.0);
+        layer.take_dirty_gpu_shapes();
+        let initial = layer.list_scrollbar_geometry(0).unwrap();
+        let longer = Arc::new(
+            (0..40)
+                .map(|index| ScratchValue::Text(index.to_string()))
+                .collect(),
+        );
+        assert_eq!(
+            layer.set_monitor_list("Stage::items#items-id@shared", longer),
+            Some((0, true))
+        );
+        assert_eq!(layer.take_dirty_gpu_shapes(), vec![0]);
+        let after_growth = layer.list_scrollbar_geometry(0).unwrap();
+        assert!(after_growth.thumb_height < initial.thumb_height);
+
+        let monitor = &layer.monitors[0];
+        let scale = monitor.scale;
+        let start_x = monitor.x + (monitor.width - 4.0) * scale;
+        let start_y = monitor.y - (monitor.height - 4.0) * scale;
+        assert!(click_local(&mut layer, 176.0, 192.0).resizing);
+        assert!(layer.drag_to(start_x, start_y - 44.0 * scale));
+        let after_resize = layer.list_scrollbar_geometry(0).unwrap();
+        assert!(after_resize.track_height > after_growth.track_height);
+        assert!(after_resize.thumb_height > after_growth.thumb_height);
+        assert_eq!(layer.take_dirty_gpu_shapes(), vec![0]);
+    }
+
+    #[test]
+    fn list_changes_refresh_visible_text_without_rebuilding_row_shapes() {
+        let initial = Arc::new(
+            (0..20)
+                .map(|index| ScratchValue::Number(index as f64))
+                .collect::<Vec<_>>(),
+        );
+        let monitor = VariableMonitor::new("items", "", 0.0, 0.0)
+            .with_value_key("Stage::items#list-id@shared")
+            .with_list_values(Arc::clone(&initial), 160.0, 196.0);
+        let mut layer = VariableLayer::new(vec![monitor]).unwrap();
+        layer.take_dirty_gpu_shapes();
+        layer.take_dirty_gpu_texts();
+        let (_, original_glyphs) = layer.build_gpu_monitor_instances(0, false, true).unwrap();
+
+        let mut updated = (*initial).clone();
+        updated[19] = ScratchValue::Text("updated tail".into());
+        assert_eq!(
+            layer.set_monitor_list("Stage::items#list-id@shared", Arc::new(updated)),
+            Some((0, true))
+        );
+        assert!(layer.take_dirty_gpu_shapes().is_empty());
+        assert_eq!(layer.take_dirty_gpu_texts(), vec![0]);
+        assert_eq!(
+            layer.visible_list_rows(0).last(),
+            Some(&(7, "6".to_owned()))
+        );
+        let (_, unchanged_glyphs) = layer.build_gpu_monitor_instances(0, false, true).unwrap();
+        assert_eq!(original_glyphs, unchanged_glyphs);
+
+        layer.scroll_list_at(10.0, -30.0, 100.0);
+        assert_eq!(
+            layer.visible_list_rows(0).last(),
+            Some(&(20, "updated tail".to_owned()))
+        );
+        let (_, updated_glyphs) = layer.build_gpu_monitor_instances(0, false, true).unwrap();
+        assert_ne!(original_glyphs, updated_glyphs);
     }
 
     #[test]

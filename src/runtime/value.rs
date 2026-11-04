@@ -8,7 +8,13 @@ pub enum ScratchValue {
 use super::{ScratchList, scratch_number_operand, scratch_random, scratch_to_number};
 use std::collections::HashSet;
 use std::fmt::Debug;
-use std::sync::mpsc::Sender;
+use std::sync::{Arc, mpsc::Sender};
+use time::OffsetDateTime;
+
+fn default_username() -> String {
+    let suffix = scratch_random(1000.0, 9999.0) as u16;
+    format!("player{suffix:04}")
+}
 
 #[inline]
 fn add_to_scratch_value(value: &mut ScratchValue, change: f64) {
@@ -27,10 +33,44 @@ fn scratch_direction(direction: f64) -> f64 {
 /// input collected by the presentation thread and consumed by generated code.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RuntimeInputEvent {
-    Key { name: String, pressed: bool },
-    MousePosition { x: f64, y: f64 },
-    MouseButton { pressed: bool },
-    VariableValue { key: String, value: f64 },
+    Key {
+        name: String,
+        pressed: bool,
+    },
+    MousePosition {
+        x: f64,
+        y: f64,
+    },
+    MouseButton {
+        pressed: bool,
+    },
+    VariableValue {
+        key: String,
+        value: f64,
+    },
+    ListAppend {
+        key: String,
+    },
+    ListSetItem {
+        key: String,
+        index: usize,
+        value: String,
+    },
+    ListDeleteItem {
+        key: String,
+        index: usize,
+    },
+    ListReplace {
+        key: String,
+        items: Vec<String>,
+    },
+}
+
+enum ListMonitorEdit {
+    Append,
+    SetItem { index: usize, value: String },
+    DeleteItem { index: usize },
+    Replace(Vec<String>),
 }
 
 #[derive(Debug, Default)]
@@ -42,27 +82,34 @@ struct RuntimeInputState {
 }
 
 impl RuntimeInputState {
-    fn apply(&mut self, event: RuntimeInputEvent) -> Option<String> {
+    fn apply(&mut self, event: RuntimeInputEvent) -> (Option<String>, bool) {
         match event {
             RuntimeInputEvent::Key { name, pressed } => {
                 let name = name.to_ascii_lowercase();
                 if pressed {
-                    self.pressed_keys.insert(name.clone()).then_some(name)
+                    let changed = self.pressed_keys.insert(name.clone());
+                    (changed.then_some(name), changed)
                 } else {
-                    self.pressed_keys.remove(&name);
-                    None
+                    let changed = self.pressed_keys.remove(&name);
+                    (None, changed)
                 }
             }
             RuntimeInputEvent::MousePosition { x, y } => {
+                let changed = self.mouse_x != x || self.mouse_y != y;
                 self.mouse_x = x;
                 self.mouse_y = y;
-                None
+                (None, changed)
             }
             RuntimeInputEvent::MouseButton { pressed } => {
+                let changed = self.mouse_down != pressed;
                 self.mouse_down = pressed;
-                None
+                (None, changed)
             }
-            RuntimeInputEvent::VariableValue { .. } => None,
+            RuntimeInputEvent::VariableValue { .. }
+            | RuntimeInputEvent::ListAppend { .. }
+            | RuntimeInputEvent::ListSetItem { .. }
+            | RuntimeInputEvent::ListDeleteItem { .. }
+            | RuntimeInputEvent::ListReplace { .. } => (None, false),
         }
     }
 }
@@ -170,6 +217,10 @@ pub struct ScratchState {
     backdrop_names: Vec<String>,
     backdrop_index: usize,
     pending_backdrop_events: Vec<String>,
+    project_timer_started_at_millis: u64,
+    project_timer_epoch: u64,
+    project_timer_monitor_visible: bool,
+    username: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -193,6 +244,13 @@ pub struct VariableSnapshot {
     pub target: String,
     pub instance_id: Option<usize>,
     pub value: ScratchValue,
+    pub monitor_visible: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReporterSnapshot {
+    pub key: String,
+    pub value: ScratchValue,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -202,7 +260,8 @@ pub struct ListSnapshot {
     pub name: String,
     pub target: String,
     pub instance_id: Option<usize>,
-    pub items: Vec<ScratchValue>,
+    pub items: Arc<Vec<ScratchValue>>,
+    pub visible: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -252,6 +311,9 @@ pub struct RuntimeSnapshot {
     pub tick: usize,
     pub backdrop_index: usize,
     pub backdrop_name: String,
+    pub project_timer_millis: u64,
+    pub project_timer_epoch: u64,
+    pub reporters: Vec<ReporterSnapshot>,
     pub variables: Vec<VariableSnapshot>,
     pub lists: Vec<ListSnapshot>,
     pub layers: Vec<LayerSnapshot>,
@@ -469,8 +531,105 @@ impl ScratchState {
                 self.apply_variable_edit(&key, value);
                 None
             }
-            event => self.input.apply(event),
+            RuntimeInputEvent::ListAppend { key } => {
+                self.apply_list_monitor_edit(&key, ListMonitorEdit::Append);
+                None
+            }
+            RuntimeInputEvent::ListSetItem { key, index, value } => {
+                self.apply_list_monitor_edit(&key, ListMonitorEdit::SetItem { index, value });
+                None
+            }
+            RuntimeInputEvent::ListDeleteItem { key, index } => {
+                self.apply_list_monitor_edit(&key, ListMonitorEdit::DeleteItem { index });
+                None
+            }
+            RuntimeInputEvent::ListReplace { key, items } => {
+                self.apply_list_monitor_edit(&key, ListMonitorEdit::Replace(items));
+                None
+            }
+            event => {
+                let (keypress, changed) = self.input.apply(event);
+                if changed {
+                    self.request_presentation();
+                }
+                keypress
+            }
         }
+    }
+
+    fn apply_list_monitor_edit(&mut self, key: &str, edit: ListMonitorEdit) -> bool {
+        let target = self
+            .list_metadata
+            .iter()
+            .enumerate()
+            .find_map(|(slot, metadata)| {
+                let instance = if metadata.is_stage {
+                    None
+                } else {
+                    Some(self.original_instance(metadata.target_index)?)
+                };
+                (list_snapshot_key(&metadata.target, &metadata.name, &metadata.id, instance) == key)
+                    .then_some((slot, instance))
+            });
+        let Some((slot, instance)) = target else {
+            return false;
+        };
+
+        let default_list = instance.map(|_| self.lists[slot].clone());
+        let Some(list) = (if let Some(instance_id) = instance {
+            let Some(instance) = self.instances.get_mut(instance_id) else {
+                return false;
+            };
+            if instance.lists[slot].is_none() {
+                instance.lists[slot] = default_list;
+            }
+            instance.lists[slot].as_mut()
+        } else {
+            self.lists.get_mut(slot)
+        }) else {
+            return false;
+        };
+
+        let changed = match edit {
+            ListMonitorEdit::Append => list.add(ScratchValue::Text(String::new())),
+            ListMonitorEdit::SetItem { index, value } => {
+                if index == 0 || index > list.length() {
+                    false
+                } else {
+                    let value = ScratchValue::Text(value);
+                    if list.get(index as f64) == &value {
+                        false
+                    } else {
+                        list.replace(index as f64, value);
+                        true
+                    }
+                }
+            }
+            ListMonitorEdit::DeleteItem { index } => {
+                if index == 0 || index > list.length() {
+                    false
+                } else {
+                    list.delete(index as f64);
+                    true
+                }
+            }
+            ListMonitorEdit::Replace(items) => {
+                let next = items
+                    .into_iter()
+                    .map(ScratchValue::Text)
+                    .collect::<Vec<_>>();
+                if list.items() == next {
+                    false
+                } else {
+                    list.replace_all(next);
+                    true
+                }
+            }
+        };
+        if changed {
+            self.request_presentation();
+        }
+        changed
     }
 
     fn apply_variable_edit(&mut self, key: &str, value: f64) -> bool {
@@ -550,6 +709,10 @@ impl ScratchState {
             backdrop_names: Vec::new(),
             backdrop_index: 0,
             pending_backdrop_events: Vec::new(),
+            project_timer_started_at_millis: 0,
+            project_timer_epoch: 0,
+            project_timer_monitor_visible: false,
+            username: default_username(),
         }
     }
 
@@ -590,6 +753,10 @@ impl ScratchState {
             backdrop_names: Vec::new(),
             backdrop_index: 0,
             pending_backdrop_events: Vec::new(),
+            project_timer_started_at_millis: 0,
+            project_timer_epoch: 0,
+            project_timer_monitor_visible: false,
+            username: default_username(),
         }
     }
 
@@ -635,6 +802,10 @@ impl ScratchState {
             backdrop_names: Vec::new(),
             backdrop_index: 0,
             pending_backdrop_events: Vec::new(),
+            project_timer_started_at_millis: 0,
+            project_timer_epoch: 0,
+            project_timer_monitor_visible: false,
+            username: default_username(),
         }
     }
 
@@ -969,6 +1140,7 @@ impl ScratchState {
                     target: metadata.target.clone(),
                     instance_id: None,
                     value: self.values[slot].clone(),
+                    monitor_visible: metadata.monitor_visible,
                 });
                 continue;
             }
@@ -993,6 +1165,7 @@ impl ScratchState {
                     target: metadata.target.clone(),
                     instance_id: Some(instance_id),
                     value: value.clone(),
+                    monitor_visible: metadata.monitor_visible,
                 });
             }
         }
@@ -1004,7 +1177,8 @@ impl ScratchState {
                     name: metadata.name.clone(),
                     target: metadata.target.clone(),
                     instance_id: None,
-                    items: self.lists[slot].items().to_vec(),
+                    items: self.lists[slot].shared_items(),
+                    visible: self.list_visibility[slot],
                 });
                 continue;
             }
@@ -1028,10 +1202,98 @@ impl ScratchState {
                     name: metadata.name.clone(),
                     target: metadata.target.clone(),
                     instance_id: Some(instance_id),
-                    items: list.items().to_vec(),
+                    items: list.shared_items(),
+                    visible: self.list_visibility[slot],
                 });
             }
         }
+        snapshot
+    }
+
+    /// reset the project-wide Scratch timer against the runtime clock.
+    pub fn reset_project_timer(&mut self, now_millis: u64) {
+        self.project_timer_started_at_millis = now_millis;
+        self.project_timer_epoch = self.project_timer_epoch.wrapping_add(1);
+        if self.project_timer_monitor_visible {
+            self.request_presentation();
+        }
+    }
+
+    pub fn set_project_timer_monitor_visible(&mut self, visible: bool) {
+        self.project_timer_monitor_visible = visible;
+    }
+
+    pub fn set_username(&mut self, username: String) {
+        self.username = username;
+    }
+
+    pub fn username(&self) -> &str {
+        &self.username
+    }
+
+    pub fn days_since_2000(&self) -> f64 {
+        const UNIX_DAYS_TO_2000: f64 = 10_957.0;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        now.as_secs_f64() / 86_400.0 - UNIX_DAYS_TO_2000
+    }
+
+    pub fn current_year(&self) -> f64 {
+        local_datetime().year() as f64
+    }
+
+    pub fn current_month(&self) -> f64 {
+        local_datetime().month() as u8 as f64
+    }
+
+    pub fn current_date(&self) -> f64 {
+        local_datetime().day() as f64
+    }
+
+    pub fn current_day_of_week(&self) -> f64 {
+        local_datetime().weekday().number_from_sunday() as f64
+    }
+
+    pub fn current_hour(&self) -> f64 {
+        local_datetime().hour() as f64
+    }
+
+    pub fn current_minute(&self) -> f64 {
+        local_datetime().minute() as f64
+    }
+
+    pub fn current_second(&self) -> f64 {
+        local_datetime().second() as f64
+    }
+
+    /// microphone input is unavailable until AIDA has an audio input device.
+    pub fn loudness(&self) -> f64 {
+        -1.0
+    }
+
+    pub fn set_variable_visible(&mut self, slot: usize, visible: bool) {
+        if let Some(metadata) = self.variables.get_mut(slot)
+            && metadata.monitor_visible != visible
+        {
+            metadata.monitor_visible = visible;
+            self.request_presentation();
+        }
+    }
+
+    /// return elapsed project time without adding clock state to script frames.
+    pub fn project_timer_seconds(&self, now_millis: u64) -> f64 {
+        self.project_timer_millis(now_millis) as f64 / 1000.0
+    }
+
+    pub fn project_timer_millis(&self, now_millis: u64) -> u64 {
+        now_millis.saturating_sub(self.project_timer_started_at_millis)
+    }
+
+    pub fn observable_snapshot_with_timer(&self, tick: usize, now_millis: u64) -> RuntimeSnapshot {
+        let mut snapshot = self.observable_snapshot(tick);
+        snapshot.project_timer_millis = self.project_timer_millis(now_millis);
+        snapshot.project_timer_epoch = self.project_timer_epoch;
         snapshot
     }
 
@@ -1441,7 +1703,7 @@ impl ScratchState {
     }
 
     pub fn list_changed(&mut self, slot: usize, before: Option<ScratchList>) {
-        if before.is_some_and(|before| before != *self.list(slot)) {
+        if before.is_some_and(|before| !before.shares_storage_with(self.list(slot))) {
             self.request_presentation();
         }
     }
@@ -1490,13 +1752,17 @@ impl ScratchState {
     }
 }
 
+fn local_datetime() -> OffsetDateTime {
+    OffsetDateTime::now_local().unwrap_or_else(|_| OffsetDateTime::now_utc())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         BubbleKind, ObservableEvent, RuntimeInputEvent, ScratchListMetadata, ScratchState,
         ScratchValue, ScratchVariableMetadata, SpriteFenceGeometry,
     };
-    use crate::runtime::{ScratchList, scratch_to_number};
+    use crate::runtime::{ScratchList, list_snapshot_key, scratch_to_number};
 
     #[test]
     fn looks_up_variables_by_id_and_target_scoped_name() {
@@ -1531,6 +1797,27 @@ mod tests {
             state.get_by_name("SpriteA", "stage_only"),
             Some(&ScratchValue::Boolean(true))
         );
+    }
+
+    #[test]
+    fn project_timer_is_shared_and_resettable_without_scheduler_steps() {
+        let mut state = ScratchState::new(Vec::new());
+        state.reset_project_timer(250);
+        assert_eq!(state.project_timer_millis(1_250), 1_000);
+        assert_eq!(state.project_timer_seconds(1_750), 1.5);
+        state.reset_project_timer(2_000);
+        assert_eq!(state.project_timer_millis(2_750), 750);
+        assert_eq!(
+            state
+                .observable_snapshot_with_timer(4, 2_750)
+                .project_timer_millis,
+            750
+        );
+        assert!(!state.presentation_requested());
+        state.set_project_timer_monitor_visible(true);
+        state.begin_tick();
+        state.reset_project_timer(3_000);
+        assert!(state.presentation_requested());
     }
 
     #[test]
@@ -1838,6 +2125,43 @@ mod tests {
     }
 
     #[test]
+    fn list_monitor_edits_update_the_owned_stage_or_sprite_list() {
+        let mut state = clone_test_state();
+        let sprite_instance = state.original_instance(1).unwrap();
+        let sprite_key = list_snapshot_key("Sprite", "items", "sprite-list", Some(sprite_instance));
+        let stage_key = list_snapshot_key("Stage", "items", "stage-list", None);
+
+        state.apply_input(RuntimeInputEvent::ListAppend {
+            key: stage_key.clone(),
+        });
+        state.apply_input(RuntimeInputEvent::ListSetItem {
+            key: stage_key.clone(),
+            index: 1,
+            value: "shared".to_owned(),
+        });
+        state.apply_input(RuntimeInputEvent::ListReplace {
+            key: stage_key,
+            items: vec!["imported".to_owned(), "second".to_owned()],
+        });
+        state.apply_input(RuntimeInputEvent::ListAppend {
+            key: sprite_key.clone(),
+        });
+        state.apply_input(RuntimeInputEvent::ListSetItem {
+            key: sprite_key.clone(),
+            index: 2,
+            value: "local".to_owned(),
+        });
+        state.apply_input(RuntimeInputEvent::ListDeleteItem {
+            key: sprite_key,
+            index: 1,
+        });
+
+        assert_eq!(state.list(1).contents(), "imported second");
+        state.set_current_instance(sprite_instance);
+        assert_eq!(state.list(0).contents(), "local");
+    }
+
+    #[test]
     fn clone_positions_inherit_and_then_change_independently() {
         let mut state = ScratchState::new(vec![]);
         state.register_target(0, "Stage", true);
@@ -2101,5 +2425,39 @@ mod tests {
         state.list_changed(0, before);
         assert!(state.presentation_requested());
         assert!(!state.redraw_requested());
+    }
+
+    #[test]
+    fn sensing_values_are_scratch_values_and_variable_visibility_is_snapshotted() {
+        let mut state = ScratchState::with_project_data(
+            vec![ScratchValue::Number(5.0)],
+            vec![
+                ScratchVariableMetadata::for_target("v", "score", "Stage", 0, true)
+                    .with_monitor_visible(true),
+            ],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        state.register_target(0, "Stage", true);
+        assert!(matches!(state.days_since_2000(), day if day > 9_000.0));
+        assert!((1.0..=12.0).contains(&state.current_month()));
+        assert!((1.0..=7.0).contains(&state.current_day_of_week()));
+        assert_eq!(state.loudness(), -1.0);
+        assert_eq!(state.get(0), &ScratchValue::Number(5.0));
+
+        let username = state.username().to_owned();
+        assert!(username.strip_prefix("player").is_some_and(|suffix| {
+            suffix.len() == 4 && suffix.bytes().all(|byte| byte.is_ascii_digit())
+        }));
+        state.set_username("AdaUser".to_owned());
+        assert_eq!(state.username(), "AdaUser");
+
+        state.begin_tick();
+        state.set_variable_visible(0, false);
+        let snapshot = state.observable_snapshot(1);
+        assert!(!snapshot.variables[0].monitor_visible);
+        assert!(state.presentation_requested());
+        assert_eq!(snapshot.variables[0].value, ScratchValue::Number(5.0));
     }
 }

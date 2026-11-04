@@ -29,6 +29,7 @@ pub(crate) struct GlyphInstance {
     pub(crate) monitor_id: u32,
     pub(crate) color: [f32; 4],
     pub(crate) scale: f32,
+    pub(crate) clip_y: [f32; 2],
 }
 
 #[repr(C)]
@@ -193,7 +194,7 @@ pub(crate) fn glyph_instance_pipeline(
         bind_group_layouts: &[Some(&bind_layout)],
         immediate_size: 0,
     });
-    let attrs = wgpu::vertex_attr_array![0 => Float32x2, 1 => Uint32, 2 => Uint32, 3 => Float32x4, 4 => Float32];
+    let attrs = wgpu::vertex_attr_array![0 => Float32x2, 1 => Uint32, 2 => Uint32, 3 => Float32x4, 4 => Float32, 5 => Float32x2];
     let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("instanced variable glyph pipeline"),
         layout: Some(&layout),

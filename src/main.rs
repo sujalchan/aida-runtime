@@ -14,6 +14,7 @@ use std::{
         mpsc,
     },
     thread,
+    time::{Duration, Instant},
 };
 
 use aida_ast::load_sb3;
@@ -30,6 +31,7 @@ struct RunOptions {
     dev_mode: bool,
     test_mode: bool,
     hd_pen_mode: bool,
+    username: Option<String>,
     project: Option<PathBuf>,
     log_observables: bool,
     log_variables: bool,
@@ -41,7 +43,7 @@ fn main() {
         Ok(options) => options,
         Err(message) => {
             eprintln!(
-                "error: {message}\nusage: aida-runtime [--headless | --graphical --project <file.sb3>] [--test] [--dev] [--hd-pen] [--fps <number> | --turbo] [--max-ticks <count>] [--log-observables] [--log-variables] [--expect-variable <key>=<json-value>]"
+                "error: {message}\nusage: aida-runtime [--headless | --graphical --project <file.sb3>] [--test] [--dev] [--hd-pen] [--username <name>] [--fps <number> | --turbo] [--max-ticks <count>] [--log-observables] [--log-variables] [--expect-variable <key>=<json-value>]"
             );
             std::process::exit(2);
         }
@@ -59,6 +61,9 @@ fn main() {
 
 fn run_headless(options: RunOptions) -> Result<(), String> {
     let mut program = program::GeneratedProgram::new();
+    if let Some(username) = options.username.as_ref() {
+        program.set_username(username.clone());
+    }
     if let Some(project_path) = options.project.as_ref() {
         let loaded = load_sb3(project_path, "resources/projects")
             .map_err(|error| format!("failed to load project: {error}"))?;
@@ -129,6 +134,9 @@ fn run_graphical(options: RunOptions) -> Result<(), String> {
             for (target, geometry) in fence_geometries {
                 program.set_target_fence_geometry(target, geometry);
             }
+            if let Some(username) = worker_options.username.as_ref() {
+                program.set_username(username.clone());
+            }
             program.set_observable_event_sink(observable_sender);
             publish_snapshot(
                 &program,
@@ -142,6 +150,7 @@ fn run_graphical(options: RunOptions) -> Result<(), String> {
                 &mut program,
                 worker_options.pacing,
                 worker_options.max_ticks,
+                worker_options.test_mode,
                 &stop_receiver,
                 &worker_latest,
                 &worker_proxy,
@@ -171,6 +180,10 @@ fn run_graphical(options: RunOptions) -> Result<(), String> {
         execution_start_sender.clone(),
         ack_sender,
         input_sender,
+        match options.pacing {
+            PacingMode::Paced(interval) => interval,
+            PacingMode::Turbo => Duration::ZERO,
+        },
         options.expected_variables,
         options.dev_mode,
         options.test_mode,
@@ -241,6 +254,7 @@ fn run_worker(
     program: &mut program::GeneratedProgram,
     pacing: PacingMode,
     max_ticks: Option<usize>,
+    test_mode: bool,
     stop: &mpsc::Receiver<()>,
     latest: &Arc<RwLock<Arc<RuntimeSnapshot>>>,
     proxy: &winit::event_loop::EventLoopProxy<renderer::RendererEvent>,
@@ -253,6 +267,11 @@ fn run_worker(
     let mut pacer = runtime::TickPacer::new(pacing, runtime::SystemPacingMechanism::new());
     let mut ticks = 0;
     let mut stopped_externally = false;
+    let mut next_live_monitor_update = Instant::now();
+    let live_monitor_interval = match pacing {
+        PacingMode::Paced(interval) => interval,
+        PacingMode::Turbo => Duration::from_millis(33),
+    };
     loop {
         if max_ticks.is_some_and(|limit| ticks >= limit) {
             break;
@@ -262,11 +281,19 @@ fn run_worker(
             break;
         }
         let tick_started = pacer.begin_tick();
+        let was_complete = program.is_complete();
         let status = advance_tick(program, pacing, tick_started, &pacer, Some(inputs));
         ticks += 1;
-        let presentation_requested = program.presentation_requested();
+        let live_monitor_due =
+            program.has_live_sensing_monitors() && Instant::now() >= next_live_monitor_update;
+        let presentation_requested = program.presentation_requested()
+            || live_monitor_due
+            || (matches!(status, SchedulerStatus::Complete) && !was_complete);
         if presentation_requested {
             publish_snapshot(program, ticks, latest, proxy, notification_pending);
+            if live_monitor_due {
+                next_live_monitor_update = Instant::now() + live_monitor_interval;
+            }
         }
         if presentation_requested && pacing != PacingMode::Turbo {
             if !wait_for_renderer(acknowledgements, ticks, stop) {
@@ -296,10 +323,22 @@ fn run_worker(
                     pacer.finish_tick(tick_started);
                 }
             }
-            SchedulerStatus::Complete => break,
+            SchedulerStatus::Complete if test_mode => break,
+            SchedulerStatus::Complete if pacing == PacingMode::Turbo => {
+                // keep the graphical input and monitor pump alive without a busy loop.
+                match stop.recv_timeout(Duration::from_millis(33)) {
+                    Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        stopped_externally = true;
+                        break;
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                }
+            }
+            SchedulerStatus::Complete => pacer.finish_tick(tick_started),
         }
     }
     if stopped_externally {
+        publish_snapshot(program, ticks, latest, proxy, notification_pending);
         program.stop_all();
     }
     publish_snapshot(program, ticks, latest, proxy, notification_pending);
@@ -458,6 +497,7 @@ fn parse_run_options(args: impl IntoIterator<Item = String>) -> Result<RunOption
     let mut dev_mode = false;
     let mut test_mode = false;
     let mut hd_pen_mode = false;
+    let mut username = None;
     let mut project = None;
     let mut log_observables = false;
     let mut log_variables = false;
@@ -521,6 +561,16 @@ fn parse_run_options(args: impl IntoIterator<Item = String>) -> Result<RunOption
                 }
                 hd_pen_mode = true;
             }
+            "--username" => {
+                if username.is_some() {
+                    return Err("--username may only be specified once".to_owned());
+                }
+                let value = args.next().ok_or("--username requires a name")?;
+                if value.is_empty() {
+                    return Err("--username requires a non-empty name".to_owned());
+                }
+                username = Some(value);
+            }
             "--test" => {
                 if test_mode {
                     return Err("--test may only be specified once".to_owned());
@@ -574,6 +624,7 @@ fn parse_run_options(args: impl IntoIterator<Item = String>) -> Result<RunOption
         dev_mode,
         test_mode,
         hd_pen_mode,
+        username,
         project,
         log_observables,
         log_variables,
