@@ -48,45 +48,71 @@ impl ScratchList {
         true
     }
 
+    // reserve one shared vector mutation for batches emitted from safe warp loops.
+    pub fn add_generated(&mut self, count: usize, mut item: impl FnMut() -> ScratchValue) -> bool {
+        let count = count.min(SCRATCH_LIST_LIMIT.saturating_sub(self.items.len()));
+        if count == 0 {
+            return false;
+        }
+        let items = Arc::make_mut(&mut self.items);
+        items.reserve(count);
+        items.extend((0..count).map(|_| item()));
+        true
+    }
+
     pub fn replace_all(&mut self, items: Vec<ScratchValue>) {
         self.items = Arc::new(items);
     }
 
-    pub fn delete(&mut self, index: impl ScratchInput) {
+    pub fn delete(&mut self, index: impl ScratchInput) -> bool {
         match resolve_index(index, self.items.len(), true) {
-            ListIndex::All => Arc::make_mut(&mut self.items).clear(),
+            ListIndex::All => self.delete_all(),
             ListIndex::Item(index) => {
                 Arc::make_mut(&mut self.items).remove(index);
+                true
             }
-            ListIndex::Invalid => {}
+            ListIndex::Invalid => false,
         }
     }
 
-    pub fn delete_all(&mut self) {
-        Arc::make_mut(&mut self.items).clear();
+    // clear shared lists without cloning saved items, and keep the allocation for a refill.
+    pub fn delete_all(&mut self) -> bool {
+        if self.items.is_empty() {
+            return false;
+        }
+        if let Some(items) = Arc::get_mut(&mut self.items) {
+            items.clear();
+        } else {
+            let capacity = self.items.capacity().min(SCRATCH_LIST_LIMIT);
+            self.items = Arc::new(Vec::with_capacity(capacity));
+        }
+        true
     }
 
-    pub fn insert(&mut self, item: ScratchValue, index: impl ScratchInput) {
+    pub fn insert(&mut self, item: ScratchValue, index: impl ScratchInput) -> bool {
         let index = match resolve_index(index, self.items.len().saturating_add(1), false) {
             ListIndex::Item(index) => index,
-            ListIndex::All | ListIndex::Invalid => return,
+            ListIndex::All | ListIndex::Invalid => return false,
         };
         if index >= SCRATCH_LIST_LIMIT {
-            return;
+            return false;
         }
         let items = Arc::make_mut(&mut self.items);
         items.insert(index, item);
         if items.len() > SCRATCH_LIST_LIMIT {
             items.pop();
         }
+        true
     }
 
-    pub fn replace(&mut self, index: impl ScratchInput, item: ScratchValue) {
+    pub fn replace(&mut self, index: impl ScratchInput, item: ScratchValue) -> bool {
         if let ListIndex::Item(index) = resolve_index(index, self.items.len(), false) {
             if self.items[index] != item {
                 Arc::make_mut(&mut self.items)[index] = item;
+                return true;
             }
         }
+        false
     }
 
     pub fn get(&self, index: impl ScratchInput) -> &ScratchValue {
@@ -105,10 +131,21 @@ impl ScratchList {
     }
 
     pub fn item_number(&self, item: impl ScratchInput) -> usize {
-        self.items
-            .iter()
-            .position(|value| scratch_equals(value, &item))
-            .map_or(0, |index| index + 1)
+        // compare numeric entries directly while preserving scratch fallback for mixed lists.
+        let query = item.scratch_view();
+        let index = if let ScratchValueView::Number(search) = query {
+            self.items.iter().position(|value| match value {
+                ScratchValue::Number(candidate) if !search.is_nan() && !candidate.is_nan() => {
+                    *candidate == search
+                }
+                _ => scratch_equals(value, &item),
+            })
+        } else {
+            self.items
+                .iter()
+                .position(|value| scratch_equals(value, &item))
+        };
+        index.map_or(0, |index| index + 1)
     }
 
     pub fn contents(&self) -> String {
@@ -291,6 +328,59 @@ mod tests {
         assert_eq!(snapshot[0], ScratchValue::Text("one".into()));
     }
 
+    // keep saved rows alive for readers while preparing reusable capacity for a clear-and-refill.
+    #[test]
+    fn clearing_a_shared_large_list_keeps_capacity_without_copying_items() {
+        let seed = (0..SCRATCH_LIST_LIMIT)
+            .map(|index| ScratchValue::Number(index as f64))
+            .collect::<Vec<_>>();
+        let mut list = ScratchList::new(seed);
+        let old_items = list.shared_items();
+        let old_capacity = old_items.capacity();
+
+        assert!(list.delete_all());
+
+        assert!(list.items().is_empty());
+        assert!(list.items.capacity() >= old_capacity);
+        assert_eq!(old_items.len(), SCRATCH_LIST_LIMIT);
+        assert_eq!(
+            old_items[SCRATCH_LIST_LIMIT - 1],
+            ScratchValue::Number(199_999.0)
+        );
+        assert!(!list.delete_all());
+    }
+
+    // expose actual mutations so generated code can dirty a monitor without a list clone.
+    #[test]
+    fn list_mutations_report_only_actual_changes() {
+        let mut list = ScratchList::new(vec![1.0_f64.into()]);
+        assert!(list.add(2.0_f64.into()));
+        assert!(!list.replace(1.0_f64, 1.0_f64.into()));
+        assert!(list.replace(1.0_f64, 3.0_f64.into()));
+        assert!(!list.delete(0.0_f64));
+        assert!(list.insert(4.0_f64.into(), "last"));
+        assert!(list.delete("last"));
+        assert!(list.delete_all());
+        assert!(!list.delete_all());
+    }
+
+    // preserve the item cap while generating batches into the authoritative list storage.
+    #[test]
+    fn generated_append_batches_stop_at_the_scratch_item_limit() {
+        let mut list = ScratchList::new(vec![ScratchValue::Number(0.0); SCRATCH_LIST_LIMIT - 2]);
+        let mut generated = 0;
+
+        assert!(list.add_generated(5, || {
+            generated += 1;
+            ScratchValue::Number(generated as f64)
+        }));
+
+        assert_eq!(generated, 2);
+        assert_eq!(list.length(), SCRATCH_LIST_LIMIT);
+        assert_eq!(list.get("last"), &ScratchValue::Number(2.0));
+        assert!(!list.add_generated(1, || ScratchValue::Number(3.0)));
+    }
+
     #[test]
     fn equality_search_is_case_insensitive_numeric_and_returns_first_match() {
         let list = ScratchList::new(vec![
@@ -301,6 +391,7 @@ mod tests {
         ]);
         assert!(list.contains("HELLO"));
         assert_eq!(list.item_number("hello"), 1);
+        assert_eq!(list.item_number(1.0_f64), 2);
         assert_eq!(list.item_number("1"), 2);
         assert_eq!(list.item_number("missing"), 0);
     }

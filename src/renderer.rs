@@ -429,6 +429,10 @@ impl ApplicationHandler<RendererEvent> for RendererApp {
                     });
                 }
             }
+            WindowEvent::Focused(false) => {
+                // avoid leaving a key held after the operating system drops its key-up event.
+                let _ = self.input_sender.send(RuntimeInputEvent::ClearKeys);
+            }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor_position = Some(position);
                 // scratch gui promotes a held pointer to a drag after three css pixels.
@@ -923,14 +927,13 @@ fn detect_list_delimiter(contents: &str) -> u8 {
 fn scratch_key_name(key: &winit::keyboard::Key) -> Option<String> {
     use winit::keyboard::{Key, NamedKey};
     match key {
-        Key::Character(value) => Some(value.to_lowercase()),
-        Key::Named(NamedKey::Space) => Some("space".to_owned()),
-        Key::Named(NamedKey::ArrowUp) => Some("up arrow".to_owned()),
-        Key::Named(NamedKey::ArrowDown) => Some("down arrow".to_owned()),
-        Key::Named(NamedKey::ArrowLeft) => Some("left arrow".to_owned()),
-        Key::Named(NamedKey::ArrowRight) => Some("right arrow".to_owned()),
-        Key::Named(NamedKey::Enter) => Some("enter".to_owned()),
-        Key::Named(NamedKey::Escape) => Some("escape".to_owned()),
+        Key::Character(value) => Some(value.to_string()),
+        Key::Named(NamedKey::Space) => Some(" ".to_owned()),
+        Key::Named(NamedKey::ArrowUp) => Some("ArrowUp".to_owned()),
+        Key::Named(NamedKey::ArrowDown) => Some("ArrowDown".to_owned()),
+        Key::Named(NamedKey::ArrowLeft) => Some("ArrowLeft".to_owned()),
+        Key::Named(NamedKey::ArrowRight) => Some("ArrowRight".to_owned()),
+        Key::Named(NamedKey::Enter) => Some("Enter".to_owned()),
         _ => None,
     }
 }
@@ -950,19 +953,19 @@ mod tests {
     fn translates_winit_keyboard_keys_to_scratch_names() {
         assert_eq!(
             scratch_key_name(&Key::Character("A".into())),
-            Some("a".into())
+            Some("A".into())
         );
         assert_eq!(
             scratch_key_name(&Key::Named(NamedKey::Space)),
-            Some("space".into())
+            Some(" ".into())
         );
         assert_eq!(
             scratch_key_name(&Key::Named(NamedKey::ArrowLeft)),
-            Some("left arrow".into())
+            Some("ArrowLeft".into())
         );
         assert_eq!(
             scratch_key_name(&Key::Named(NamedKey::Enter)),
-            Some("enter".into())
+            Some("Enter".into())
         );
     }
 

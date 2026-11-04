@@ -124,6 +124,31 @@ impl ResumableScript for EventHatScript {
     }
 }
 
+struct KeyHatScript {
+    key: (usize, usize),
+    steps: u8,
+}
+
+impl ResumableScript for KeyHatScript {
+    fn step(&mut self, state: &mut ScratchState, _clock: &dyn Clock) -> ScriptStatus {
+        if self.steps == 0 {
+            state.set_shared(0, (scratch_to_number(state.get(0)) + 1.0).into());
+            self.steps = 1;
+            ScriptStatus::Yield
+        } else {
+            ScriptStatus::Complete
+        }
+    }
+
+    fn target_instance(&self) -> usize {
+        self.key.1
+    }
+
+    fn key_hat_key(&self) -> Option<(usize, usize)> {
+        Some(self.key)
+    }
+}
+
 fn dispatch_pointer_event(
     scheduler: &mut ScriptScheduler<EventHatScript>,
     event: RuntimeInputEvent,
@@ -187,6 +212,87 @@ fn edge_hat_threads_do_not_duplicate_and_clicks_restart_the_same_target_hat() {
     assert_eq!(scheduler.active_scripts(), 1);
     scheduler.advance(&mut state);
     assert_eq!(state.get(0), &ScratchValue::Number(4.0));
+}
+
+#[test]
+fn key_hats_suppress_restarts_per_hat_and_instance_and_allow_clone_threads() {
+    let mut state = ScratchState::new(vec![0.0_f64.into()]);
+    state.register_target(0, "Stage", true);
+    state.register_target(1, "Sprite", false);
+    let first_clone = state.create_clone(1, 1, 300).unwrap();
+    let second_clone = state.create_clone(1, 1, 300).unwrap();
+    let mut scheduler = ScriptScheduler::new(Vec::<KeyHatScript>::new());
+    let make = |hat, instance| KeyHatScript {
+        key: (hat, instance),
+        steps: 0,
+    };
+
+    scheduler.start_key_hats([make(4, 1), make(4, first_clone), make(4, second_clone)]);
+    assert_eq!(scheduler.active_scripts(), 3);
+    // repeat keydown events do not restart those active threads, per clone.
+    scheduler.start_key_hats([make(4, 1), make(4, first_clone), make(4, second_clone)]);
+    assert_eq!(scheduler.active_scripts(), 3);
+    // a different key hat on the same target remains independently runnable.
+    scheduler.start_key_hats([make(5, 1)]);
+    assert_eq!(scheduler.active_scripts(), 4);
+
+    for _ in 0..12 {
+        if scheduler.active_scripts() == 0 {
+            break;
+        }
+        scheduler.advance(&mut state);
+    }
+    assert_eq!(scheduler.active_scripts(), 0);
+    assert_eq!(state.get(0), &ScratchValue::Number(4.0));
+
+    // once a key hat finishes, a later repeated keydown can start it again.
+    scheduler.start_key_hats([make(4, 1)]);
+    assert_eq!(scheduler.active_scripts(), 1);
+}
+
+#[test]
+fn key_dispatch_candidates_follow_live_original_and_clone_instances() {
+    let mut state = ScratchState::new(vec![0.0_f64.into()]);
+    state.register_target(0, "Stage", true);
+    state.register_target(1, "Sprite", false);
+    let first_clone = state.create_clone(1, 1, 300).unwrap();
+    let second_clone = state.create_clone(1, 1, 300).unwrap();
+    let mut scheduler = ScriptScheduler::new(Vec::<KeyHatScript>::new());
+    let live_candidates = |state: &ScratchState| {
+        state
+            .instances_for_target(1)
+            .into_iter()
+            .map(|instance| KeyHatScript {
+                key: (7, instance),
+                steps: 0,
+            })
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(
+        state.instances_for_target(1),
+        vec![1, first_clone, second_clone]
+    );
+    scheduler.start_key_hats(live_candidates(&state));
+    assert_eq!(scheduler.active_scripts(), 3);
+
+    state.set_current_instance(first_clone);
+    assert!(state.delete_current_clone());
+    scheduler.remove_target_scripts(first_clone);
+    assert_eq!(state.instances_for_target(1), vec![1, second_clone]);
+    assert_eq!(scheduler.active_scripts(), 2);
+
+    // another press can target only the original and still-live clone.
+    scheduler.start_key_hats(live_candidates(&state));
+    assert_eq!(scheduler.active_scripts(), 2);
+    for _ in 0..8 {
+        if scheduler.active_scripts() == 0 {
+            break;
+        }
+        scheduler.advance(&mut state);
+    }
+    scheduler.start_key_hats(live_candidates(&state));
+    assert_eq!(scheduler.active_scripts(), 2);
 }
 
 #[test]

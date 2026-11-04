@@ -84,6 +84,15 @@ pub fn scratch_random(from: impl ScratchInput, to: impl ScratchInput) -> f64 {
     })
 }
 
+// skip repeated scratch conversion for numeric bounds already resolved by the generator.
+pub fn scratch_random_constant(from: f64, to: f64, integer_bounds: bool) -> f64 {
+    THREAD_RANDOM.with(|random| {
+        random
+            .borrow_mut()
+            .between_with_integer_bounds(from, to, integer_bounds)
+    })
+}
+
 fn is_scratch_integer(value: ScratchValueView<'_>) -> bool {
     match value {
         ScratchValueView::Number(number) => number.is_nan() || number.fract() == 0.0,

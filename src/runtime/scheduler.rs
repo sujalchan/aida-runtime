@@ -87,6 +87,12 @@ impl WarpBudget {
             false
         }
     }
+
+    // force the watchdog at generated loop chunk boundaries, never per list item.
+    pub fn expired_now(&mut self, clock: &dyn Clock) -> bool {
+        self.safe_points_until_check = 0;
+        self.expired(clock)
+    }
 }
 
 struct MonotonicClock {
@@ -151,6 +157,10 @@ pub trait ResumableScript {
     }
     /// identify click hats that restart when the same target is clicked again.
     fn click_hat_key(&self) -> Option<(usize, usize)> {
+        None
+    }
+    /// identify key hats so a held key does not restart an active target thread.
+    fn key_hat_key(&self) -> Option<(usize, usize)> {
         None
     }
 }
@@ -508,6 +518,24 @@ impl<S: ResumableScript> ScriptScheduler<S> {
             }
         }
         self.has_waiting_senders = self.joins.iter().any(Option::is_some);
+    }
+
+    /// start key hats once per hat and target instance while an earlier thread is active.
+    pub fn start_key_hats(&mut self, candidates: impl IntoIterator<Item = S>) {
+        let mut starters = Vec::new();
+        for candidate in candidates {
+            let Some(key) = candidate.key_hat_key() else {
+                continue;
+            };
+            if !self
+                .scripts
+                .iter()
+                .any(|script| script.key_hat_key() == Some(key))
+            {
+                starters.push(candidate);
+            }
+        }
+        self.add_scripts(starters);
     }
 
     pub fn remove_target_scripts(&mut self, target_instance: usize) {

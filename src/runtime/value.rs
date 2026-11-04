@@ -10,7 +10,7 @@ pub enum ScratchValue {
 use super::{
     PenColorParameter, PenColorState, PenCommand, PenDot, PenStroke, RealtimeAudio, ScratchList,
     SoundLibrary, SoundParameters, SoundRuntime, scratch_number_operand, scratch_random,
-    scratch_to_number,
+    scratch_string, scratch_to_number,
 };
 use std::collections::HashSet;
 use std::fmt::Debug;
@@ -49,6 +49,8 @@ pub enum RuntimeInputEvent {
         name: String,
         pressed: bool,
     },
+    // release all held keys when the window loses focus.
+    ClearKeys,
     MousePosition {
         x: f64,
         y: f64,
@@ -120,14 +122,21 @@ impl RuntimeInputState {
     fn apply(&mut self, event: RuntimeInputEvent) -> (Option<String>, bool) {
         match event {
             RuntimeInputEvent::Key { name, pressed } => {
-                let name = name.to_ascii_lowercase();
+                let Some(name) = scratch_key_from_host(&name) else {
+                    return (None, false);
+                };
                 if pressed {
                     let changed = self.pressed_keys.insert(name.clone());
-                    (changed.then_some(name), changed)
+                    (Some(name.to_lowercase()), changed)
                 } else {
                     let changed = self.pressed_keys.remove(&name);
                     (None, changed)
                 }
+            }
+            RuntimeInputEvent::ClearKeys => {
+                let changed = !self.pressed_keys.is_empty();
+                self.pressed_keys.clear();
+                (None, changed)
             }
             RuntimeInputEvent::MousePosition { x, y } => {
                 let changed = self.mouse_x != x || self.mouse_y != y;
@@ -147,6 +156,74 @@ impl RuntimeInputState {
             | RuntimeInputEvent::ListDeleteItem { .. }
             | RuntimeInputEvent::ListReplace { .. } => (None, false),
         }
+    }
+}
+
+// match the key names accepted from a logical host keyboard event by scratch vm.
+fn scratch_key_from_host(key: &str) -> Option<String> {
+    let special = match key {
+        " " => Some("space"),
+        "ArrowLeft" | "Left" => Some("left arrow"),
+        "ArrowUp" | "Up" => Some("up arrow"),
+        "ArrowRight" | "Right" => Some("right arrow"),
+        "ArrowDown" | "Down" => Some("down arrow"),
+        "Enter" => Some("enter"),
+        _ => None,
+    };
+    if let Some(special) = special {
+        return Some(special.to_owned());
+    }
+
+    // scratch ignores modifier and named keys whose logical name has multiple code units.
+    if key.encode_utf16().count() != 1 {
+        return None;
+    }
+    Some(key.to_uppercase())
+}
+
+// convert the sensing block argument separately from host events, as scratch does.
+fn scratch_key_from_argument(value: ScratchValueView<'_>) -> Option<String> {
+    if let ScratchValueView::Number(number) = value {
+        if (48.0..=90.0).contains(&number) {
+            return char::from_u32(number as u32).map(|key| key.to_uppercase().to_string());
+        }
+        let key = match number {
+            32.0 => "space",
+            37.0 => "left arrow",
+            38.0 => "up arrow",
+            39.0 => "right arrow",
+            40.0 => "down arrow",
+            _ => "",
+        };
+        if !key.is_empty() {
+            return Some(key.to_owned());
+        }
+    }
+
+    let ScratchValueView::Text(text) = value else {
+        let text = scratch_string(match value {
+            ScratchValueView::Number(number) => ScratchValue::Number(number),
+            ScratchValueView::Boolean(value) => ScratchValue::Boolean(value),
+            ScratchValueView::Undefined => ScratchValue::Undefined,
+            ScratchValueView::Text(_) => unreachable!(),
+        });
+        return scratch_key_from_text(&text);
+    };
+    if matches!(
+        text,
+        "space" | "left arrow" | "up arrow" | "right arrow" | "down arrow" | "enter"
+    ) {
+        return Some(text.to_owned());
+    }
+    scratch_key_from_text(text)
+}
+
+fn scratch_key_from_text(text: &str) -> Option<String> {
+    let key = text.chars().next()?;
+    if key == ' ' {
+        Some("space".to_owned())
+    } else {
+        Some(key.to_uppercase().to_string())
     }
 }
 
@@ -723,8 +800,13 @@ impl ScratchState {
         true
     }
 
-    pub fn key_pressed(&self, key: &str) -> bool {
-        self.input.pressed_keys.contains(&key.to_ascii_lowercase())
+    // keep reporter argument conversion separate from normalized host key state.
+    pub fn key_pressed(&self, key: impl ScratchInput) -> bool {
+        let value = key.scratch_view();
+        if matches!(value, ScratchValueView::Text("any")) {
+            return !self.input.pressed_keys.is_empty();
+        }
+        scratch_key_from_argument(value).is_some_and(|key| self.input.pressed_keys.contains(&key))
     }
 
     pub fn mouse_x(&self) -> f64 {
@@ -2234,6 +2316,7 @@ impl ScratchState {
         }
     }
 
+    // keep the old snapshot API usable by generated modules until they are regenerated.
     pub fn list_before_change(&self, slot: usize) -> Option<ScratchList> {
         if !self.list_visibility.get(slot).copied().unwrap_or(false) {
             return None;
@@ -2248,10 +2331,25 @@ impl ScratchState {
         Some(self.list(slot).clone())
     }
 
+    // support older generated modules while routing new code through the cheap change bit.
     pub fn list_changed(&mut self, slot: usize, before: Option<ScratchList>) {
-        if before.is_some_and(|before| !before.shares_storage_with(self.list(slot))) {
-            self.request_presentation();
+        let changed = before.is_some_and(|before| !before.shares_storage_with(self.list(slot)));
+        self.list_changed_result(slot, changed);
+    }
+
+    // publish only successful visible mutations, without cloning the list around each write.
+    pub fn list_changed_result(&mut self, slot: usize, changed: bool) {
+        if !changed || !self.list_visibility.get(slot).copied().unwrap_or(false) {
+            return;
         }
+        if let Some(metadata) = self.list_metadata.get(slot)
+            && !metadata.is_stage
+            && (!self.instances[self.current_instance].original
+                || self.instances[self.current_instance].target != metadata.target_index)
+        {
+            return;
+        }
+        self.request_presentation();
     }
 
     /// look up a list by its Scratch ID.
@@ -3071,7 +3169,7 @@ mod tests {
     }
 
     #[test]
-    fn redraw_gate_and_input_are_owned_by_canonical_runtime_state() {
+    fn keyboard_events_match_scratch_names_and_key_argument_conversion() {
         let mut state = ScratchState::new(Vec::new());
         state.begin_tick();
         assert!(!state.redraw_requested());
@@ -3093,11 +3191,75 @@ mod tests {
                 name: "a".to_owned(),
                 pressed: true,
             }),
+            Some("a".to_owned())
+        );
+
+        assert!(state.key_pressed("a"));
+        assert!(state.key_pressed(65.0));
+        assert!(state.key_pressed(65.5));
+        assert!(!state.key_pressed("65"));
+        assert!(state.key_pressed("any"));
+
+        for (host, scratch) in [
+            ("ArrowUp", "up arrow"),
+            ("Down", "down arrow"),
+            ("ArrowLeft", "left arrow"),
+            ("Right", "right arrow"),
+            (" ", "space"),
+            ("Enter", "enter"),
+            ("7", "7"),
+            ("6", "6"),
+            ("?", "?"),
+            ("æ", "æ"),
+        ] {
+            assert!(
+                state
+                    .apply_input(RuntimeInputEvent::Key {
+                        name: host.to_owned(),
+                        pressed: true,
+                    })
+                    .is_some(),
+                "host key {host:?} should be recognized"
+            );
+            assert!(
+                state.key_pressed(scratch),
+                "Scratch key {scratch:?} should be held"
+            );
+        }
+        assert!(state.key_pressed(32.0));
+        assert!(state.key_pressed(38.0));
+        assert!(state.key_pressed(40.0));
+        assert!(state.key_pressed(37.0));
+        assert!(state.key_pressed(39.0));
+        assert!(state.key_pressed(55.0));
+        assert!(state.key_pressed("65"));
+
+        // multi-character named keys and non-bmp characters are not Scratch keys.
+        assert_eq!(
+            state.apply_input(RuntimeInputEvent::Key {
+                name: "Shift".to_owned(),
+                pressed: true,
+            }),
             None
         );
+        assert_eq!(
+            state.apply_input(RuntimeInputEvent::Key {
+                name: "F1".to_owned(),
+                pressed: true,
+            }),
+            None
+        );
+        assert_eq!(
+            state.apply_input(RuntimeInputEvent::Key {
+                name: "👋".to_owned(),
+                pressed: true,
+            }),
+            None
+        );
+        assert!(state.key_pressed("any"));
+
         state.apply_input(RuntimeInputEvent::MousePosition { x: 21.0, y: -7.0 });
         state.apply_input(RuntimeInputEvent::MouseButton { pressed: true });
-        assert!(state.key_pressed("a"));
         assert_eq!((state.mouse_x(), state.mouse_y()), (21.0, -7.0));
         assert!(state.mouse_down());
         state.apply_input(RuntimeInputEvent::Key {
@@ -3105,6 +3267,57 @@ mod tests {
             pressed: false,
         });
         assert!(!state.key_pressed("a"));
+        assert!(!state.key_pressed(65.0));
+        assert!(state.key_pressed("any"));
+        state.apply_input(RuntimeInputEvent::ClearKeys);
+        assert!(!state.key_pressed("any"));
+        assert!(!state.key_pressed("up arrow"));
+    }
+
+    #[test]
+    fn keyboard_release_and_focus_loss_clear_only_held_key_state() {
+        let mut state = ScratchState::new(vec![0.0_f64.into()]);
+        state.apply_input(RuntimeInputEvent::Key {
+            name: "ArrowUp".to_owned(),
+            pressed: true,
+        });
+        state.apply_input(RuntimeInputEvent::Key {
+            name: "ArrowLeft".to_owned(),
+            pressed: true,
+        });
+        state.apply_input(RuntimeInputEvent::Key {
+            name: "Up".to_owned(),
+            pressed: false,
+        });
+        assert!(!state.key_pressed("up arrow"));
+        assert!(state.key_pressed("left arrow"));
+        state.apply_input(RuntimeInputEvent::ClearKeys);
+        assert!(!state.key_pressed("left arrow"));
+        assert_eq!(state.get(0), &ScratchValue::Number(0.0));
+    }
+
+    #[test]
+    fn keyboard_reporter_uses_the_executing_instances_current_costume_name() {
+        let mut state = ScratchState::new(Vec::new());
+        state.register_target(0, "Stage", true);
+        state.register_target(1, "Sprite1", false);
+        state.set_target_costumes(1, vec!["w".to_owned(), "other".to_owned()], 0);
+        let original = state.original_instance(1).unwrap();
+        let clone = state.create_clone(original, 1, 300).unwrap();
+        state.apply_input(RuntimeInputEvent::Key {
+            name: "W".to_owned(),
+            pressed: true,
+        });
+
+        state.set_current_instance(original);
+        assert!(state.key_pressed(state.costume_number_name(false)));
+        state.set_current_instance(clone);
+        assert!(state.key_pressed(state.costume_number_name(false)));
+
+        state.switch_costume_to(ScratchValue::Text("other".to_owned()));
+        assert!(!state.key_pressed(state.costume_number_name(false)));
+        state.set_current_instance(original);
+        assert!(state.key_pressed(state.costume_number_name(false)));
     }
 
     #[test]
@@ -3160,11 +3373,37 @@ mod tests {
         );
         state.register_target(0, "Stage", true);
         state.begin_tick();
-        let before = state.list_before_change(0);
-        state.list_mut(0).add("after".into());
-        state.list_changed(0, before);
+        let changed = state.list_mut(0).add("after".into());
+        state.list_changed_result(0, changed);
         assert!(state.presentation_requested());
         assert!(!state.redraw_requested());
+    }
+
+    #[test]
+    fn unchanged_or_clone_local_list_mutations_do_not_dirty_the_visible_monitor() {
+        let mut state = ScratchState::with_project_data(
+            Vec::new(),
+            Vec::new(),
+            vec![ScratchList::new(vec!["original".into()])],
+            vec![ScratchListMetadata::for_target(
+                "items", "items", "Sprite1", 1, false,
+            )],
+            vec![true],
+        );
+        state.register_target(0, "Stage", true);
+        state.register_target(1, "Sprite1", false);
+        let original = state.original_instance(1).unwrap();
+        let clone = state.create_clone(original, 1, 300).unwrap();
+
+        state.begin_tick();
+        state.set_current_instance(original);
+        state.list_changed_result(0, false);
+        assert!(!state.presentation_requested());
+
+        state.set_current_instance(clone);
+        let changed = state.list_mut(0).add("clone only".into());
+        state.list_changed_result(0, changed);
+        assert!(!state.presentation_requested());
     }
 
     #[test]
