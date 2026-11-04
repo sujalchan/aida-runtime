@@ -7,6 +7,7 @@ use super::{ScratchInput, ScratchValueView};
 fn to_number(value: ScratchValueView<'_>) -> f64 {
     let number = match value {
         ScratchValueView::Number(number) => number,
+        ScratchValueView::Undefined => 0.0,
 
         ScratchValueView::Boolean(value) => {
             if value {
@@ -170,6 +171,8 @@ pub(super) fn to_text(value: ScratchValueView<'_>) -> Cow<'_, str> {
         ScratchValueView::Text(text) => Cow::Borrowed(text),
 
         ScratchValueView::Boolean(value) => Cow::Borrowed(if value { "true" } else { "false" }),
+
+        ScratchValueView::Undefined => Cow::Borrowed("undefined"),
     }
 }
 
@@ -177,6 +180,8 @@ pub(super) fn to_text(value: ScratchValueView<'_>) -> Cow<'_, str> {
 pub fn scratch_bool(value: impl ScratchInput) -> bool {
     match value.scratch_view() {
         ScratchValueView::Boolean(value) => value,
+
+        ScratchValueView::Undefined => false,
 
         ScratchValueView::Number(number) => number != 0.0 && !number.is_nan(),
 
@@ -220,6 +225,8 @@ fn comparison_number(value: ScratchValueView<'_>) -> Option<f64> {
         }
 
         ScratchValueView::Boolean(value) => Some(if value { 1.0 } else { 0.0 }),
+
+        ScratchValueView::Undefined => None,
 
         ScratchValueView::Text(text) => {
             let text = text.trim();
@@ -400,6 +407,15 @@ mod tests {
         assert_eq!(scratch_to_number("not a number"), 0.0);
         assert_eq!(scratch_to_number(f64::NAN), 0.0);
         assert_eq!(scratch_add(f64::NAN, 1.0), 1.0);
+    }
+
+    #[test]
+    fn preserves_scratch_undefined_results_from_legacy_reporters() {
+        let value = ScratchValue::Undefined;
+        assert_eq!(scratch_to_number(&value), 0.0);
+        assert_eq!(scratch_string(&value), "undefined");
+        assert!(!scratch_bool(&value));
+        assert!(scratch_equals(&value, "undefined"));
     }
 
     #[test]

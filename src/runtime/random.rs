@@ -89,6 +89,7 @@ fn is_scratch_integer(value: ScratchValueView<'_>) -> bool {
         ScratchValueView::Number(number) => number.is_nan() || number.fract() == 0.0,
         ScratchValueView::Boolean(_) => true,
         ScratchValueView::Text(text) => !text.contains('.'),
+        ScratchValueView::Undefined => false,
     }
 }
 

@@ -152,6 +152,7 @@ fn parse_scratch_color(value: ScratchValueView<'_>) -> ([u8; 3], u8) {
         ScratchValueView::Number(number) => number,
         ScratchValueView::Boolean(value) => f64::from(value),
         ScratchValueView::Text(text) => scratch_to_number(text),
+        ScratchValueView::Undefined => 0.0,
     };
     let wrapped = if number.is_finite() {
         number.trunc().rem_euclid(4_294_967_296.0) as u32

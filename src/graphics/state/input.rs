@@ -893,6 +893,7 @@ fn scratch_value_text(value: &ScratchValue) -> String {
         ScratchValue::Number(value) => value.to_string(),
         ScratchValue::Text(value) => value.clone(),
         ScratchValue::Boolean(value) => value.to_string(),
+        ScratchValue::Undefined => "undefined".to_owned(),
     }
 }
 

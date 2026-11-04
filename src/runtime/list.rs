@@ -114,7 +114,7 @@ impl ScratchList {
     pub fn contents(&self) -> String {
         let single_letter_items = self.items.iter().all(|item| match item {
             ScratchValue::Text(text) => text.encode_utf16().count() == 1,
-            ScratchValue::Number(_) | ScratchValue::Boolean(_) => false,
+            ScratchValue::Number(_) | ScratchValue::Boolean(_) | ScratchValue::Undefined => false,
         });
         let separator = if single_letter_items { "" } else { " " };
         let mut output = String::new();
@@ -216,6 +216,7 @@ fn resolve_index(index: impl ScratchInput, length: usize, accept_all: bool) -> L
                 ScratchValueView::Number(number) => number,
                 ScratchValueView::Text(text) => scratch_to_number(text),
                 ScratchValueView::Boolean(value) => scratch_to_number(value),
+                ScratchValueView::Undefined => 0.0,
             };
             if !number.is_finite() {
                 return ListIndex::Invalid;

@@ -3,6 +3,8 @@ pub enum ScratchValue {
     Number(f64),
     Text(String),
     Boolean(bool),
+    /// undefined represents results from legacy Scratch VM reporter no-ops.
+    Undefined,
 }
 
 use super::{
@@ -23,7 +25,7 @@ fn default_username() -> String {
 fn add_to_scratch_value(value: &mut ScratchValue, change: f64) {
     match value {
         ScratchValue::Number(number) => *number = scratch_number_operand(*number) + change,
-        ScratchValue::Text(_) | ScratchValue::Boolean(_) => {
+        ScratchValue::Text(_) | ScratchValue::Boolean(_) | ScratchValue::Undefined => {
             *value = ScratchValue::Number(scratch_to_number(&*value) + change);
         }
     }
@@ -123,6 +125,7 @@ pub enum ScratchValueView<'a> {
     Number(f64),
     Text(&'a str),
     Boolean(bool),
+    Undefined,
 }
 
 /// a value that a scratch operator can inspect without taking ownership.
@@ -137,6 +140,7 @@ impl ScratchInput for ScratchValue {
             Self::Number(number) => ScratchValueView::Number(*number),
             Self::Text(text) => ScratchValueView::Text(text),
             Self::Boolean(value) => ScratchValueView::Boolean(*value),
+            Self::Undefined => ScratchValueView::Undefined,
         }
     }
 }
@@ -924,6 +928,7 @@ impl ScratchState {
                 }
             }
             super::ScratchValueView::Boolean(_) => None,
+            super::ScratchValueView::Undefined => None,
         };
         if let Some(index) = selected {
             self.backdrop_index = index;
@@ -1446,6 +1451,7 @@ impl ScratchState {
                 .position(|name| name == text)
                 .map(|index| index as f64 + 1.0)
                 .or_else(|| text.parse::<f64>().ok()),
+            super::ScratchValueView::Undefined => None,
         };
         let Some(choice) = choice.filter(|number| number.is_finite()) else {
             return;
