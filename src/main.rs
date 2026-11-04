@@ -150,7 +150,9 @@ fn run_graphical(options: RunOptions) -> Result<(), String> {
             if let Some(sound_library) = worker_sound_library {
                 program.set_sound_library(sound_library);
                 if let Err(error) = program.enable_realtime_audio() {
-                    eprintln!("audio output unavailable; using the controlled playback clock: {error}");
+                    eprintln!(
+                        "audio output unavailable; using the controlled playback clock: {error}"
+                    );
                 }
             }
             for (target, geometry) in fence_geometries {

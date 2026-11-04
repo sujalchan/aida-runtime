@@ -1,2 +1,3 @@
 /target
+/src/*.rs.lists.json
 .DS_Store

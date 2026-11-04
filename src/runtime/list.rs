@@ -25,9 +25,14 @@ impl ScratchList {
         }
     }
 
-    /// build a list from the compact json initializer emitted by aida-ast.
+    /// Build a list from the compact JSON initializer emitted by aida-ast.
     pub fn from_json(json: &str) -> Self {
-        let items: Vec<ScratchValue> = serde_json::from_str(json)
+        Self::from_json_bytes(json.as_bytes())
+    }
+
+    /// Build a list from a compact JSON byte slice stored beside generated code.
+    pub fn from_json_bytes(json: &[u8]) -> Self {
+        let items: Vec<ScratchValue> = serde_json::from_slice(json)
             .expect("generated Scratch list initializer must contain a JSON array");
         Self::new(items)
     }
@@ -551,7 +556,7 @@ mod tests {
             .find(|list| list.items.len() == 200_000)
             .expect("fixture should contain its complete 200,000-item list");
         let serialized = serde_json::to_string(&source_items.items).unwrap();
-        let list = ScratchList::from_json(&serialized);
+        let list = ScratchList::from_json_bytes(serialized.as_bytes());
 
         assert_eq!(list.length(), 200_000);
         let source_number =
