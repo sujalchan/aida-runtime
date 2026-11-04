@@ -2,6 +2,7 @@ mod list;
 mod motion;
 mod operators;
 mod pacing;
+mod pen;
 mod random;
 mod scheduler;
 mod tick;
@@ -14,6 +15,7 @@ pub use motion::GlideState;
 pub use operators::*;
 #[allow(unused_imports)]
 pub use pacing::{PacingMechanism, PacingMode, SystemPacingMechanism, TickPacer};
+pub use pen::PenColorState;
 #[allow(unused_imports)]
 pub use random::{ScratchRandom, scratch_random};
 pub use scheduler::{
@@ -28,7 +30,7 @@ pub use value::{
     list_snapshot_key, variable_snapshot_key,
 };
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum PenCommand {
     Clear,
     Stroke {

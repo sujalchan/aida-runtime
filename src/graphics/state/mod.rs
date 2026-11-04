@@ -86,6 +86,8 @@ pub(crate) struct GraphicsState {
     stamp_transform_capacity: usize,
     stamp_transform_stride: u64,
     pending_sprite_stamps: Vec<PendingSpriteStamp>,
+    // keep appended stamp transforms from being uploaded again each update.
+    pending_stamp_uploaded_count: usize,
     pen_composite_pipeline: wgpu::RenderPipeline,
     composite_pipeline: wgpu::RenderPipeline,
     sprite_pipeline: wgpu::RenderPipeline,
@@ -135,7 +137,7 @@ pub(crate) struct GraphicsState {
     pen_instance_capacity: usize,
     pen_instance_data: Vec<PenInstance>,
     pen_uploaded_count: usize,
-    pen_draw_range: Option<(u32, u32)>,
+    pending_pen_ops: Vec<PendingPenOp>,
     pen_texture_dirty: bool,
     pen_clear_pending: bool,
     hd_pen_mode: bool,
@@ -211,7 +213,16 @@ struct SpriteRenderer {
 struct PendingSpriteStamp {
     sprite_index: usize,
     costume_index: usize,
+    // preserve the pen-surface mip chosen for this captured stamp.
+    mip_level: i8,
     transform: SpriteTransform,
+}
+
+// preserve the ordering barriers between pen strokes, stamps, and clear operations.
+enum PendingPenOp {
+    Strokes { start: u32, end: u32 },
+    Stamp(usize),
+    Clear,
 }
 
 struct GpuTiming {
@@ -338,7 +349,7 @@ mod gpu_variable_tests {
     #[test]
     fn gpu_instance_layouts_match_shader_storage() {
         assert_eq!(std::mem::size_of::<MonitorInstance>(), 96);
-        assert_eq!(std::mem::size_of::<GlyphInstance>(), 36);
+        assert_eq!(std::mem::size_of::<GlyphInstance>(), 44);
         assert_eq!(std::mem::size_of::<GlyphMetadata>(), 32);
     }
 

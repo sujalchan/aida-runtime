@@ -317,6 +317,20 @@ mod tests {
     }
 
     #[test]
+    fn hd_pen_stamp_mip_uses_pen_surface_pixels_instead_of_standard_pen_resolution() {
+        let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="50" viewBox="0 0 100 50"><rect width="100" height="50"/></svg>"#;
+        let sprite = Sprite::from_bytes(svg).unwrap();
+        let logical_size = sprite.logical_size(1.0);
+
+        let standard_pen_mip =
+            sprite.mip_level_for_projected_size(1.0, 480, 360, logical_size, 4096);
+        let hd_pen_mip = sprite.mip_level_for_projected_size(1.0, 1920, 1440, logical_size, 4096);
+
+        assert_eq!(standard_pen_mip, 0);
+        assert_eq!(hd_pen_mip, 2);
+    }
+
+    #[test]
     fn png_costume_dimensions_do_not_follow_svg_mip_selection() {
         let pixmap = tiny_skia::Pixmap::new(3, 2).unwrap();
         let sprite = Sprite::from_bytes(&pixmap.encode_png().unwrap()).unwrap();

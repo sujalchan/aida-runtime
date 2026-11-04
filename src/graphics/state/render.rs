@@ -48,46 +48,7 @@ impl GraphicsState {
 
         // both offscreen layers are ready before the surface is acquired.
         if self.pen_texture_dirty {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("persistent GPU pen layer"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.pen_texture.view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: if self.pen_clear_pending {
-                            wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
-                        } else {
-                            wgpu::LoadOp::Load
-                        },
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                ..Default::default()
-            });
-            if let Some((start, end)) = self.pen_draw_range {
-                if start < end {
-                    pass.set_pipeline(&self.pen_pipeline);
-                    pass.set_vertex_buffer(0, self.pen_instances.slice(..));
-                    pass.draw(0..6, start..end);
-                }
-            }
-            for (slot, stamp) in self.pending_sprite_stamps.iter().enumerate() {
-                let sprite = &self.sprites[stamp.sprite_index];
-                let costume = &sprite.costumes[stamp.costume_index];
-                pass.set_pipeline(&self.stamp_sprite_pipeline);
-                pass.set_bind_group(
-                    0,
-                    &costume.mips[&costume.selected_mip].texture_bind_group,
-                    &[],
-                );
-                pass.set_bind_group(
-                    1,
-                    &self.stamp_transform_bind_group,
-                    &[(slot as u64 * self.stamp_transform_stride) as u32],
-                );
-                pass.draw(0..6, 0..1);
-            }
+            self.render_pending_pen_operations(&mut encoder);
         }
         let surface_acquire_started = Instant::now();
         let frame = match self.surface.get_current_texture() {
@@ -243,12 +204,11 @@ impl GraphicsState {
         if self.pen_texture_dirty {
             self.pen_texture_dirty = false;
             self.pen_clear_pending = false;
-            self.pen_draw_range = None;
-            // the texture now contains these strokes. keeping the instance
-            // history would grow cpu and gpu memory without limit in turbo.
+            self.pending_pen_ops.clear();
             self.pen_instance_data.clear();
             self.pen_uploaded_count = 0;
             self.pending_sprite_stamps.clear();
+            self.pending_stamp_uploaded_count = 0;
         }
         if let (Some(slot), Some(timing)) = (timestamp_slot, self.gpu_timing.as_mut()) {
             timing.pending_slots[slot] = true;
@@ -291,6 +251,77 @@ impl GraphicsState {
         self.recreate_stage_textures();
     }
 
+    // draw compatible operations together while splitting at clears to retain script order.
+    fn render_pending_pen_operations(&self, encoder: &mut wgpu::CommandEncoder) {
+        let mut segment_start = 0;
+        let mut clear_segment = self.pen_clear_pending;
+        for (index, operation) in self.pending_pen_ops.iter().enumerate() {
+            if matches!(operation, PendingPenOp::Clear) {
+                if segment_start < index || clear_segment {
+                    self.render_pen_segment(encoder, segment_start..index, clear_segment);
+                }
+                clear_segment = true;
+                segment_start = index + 1;
+            }
+        }
+        if segment_start < self.pending_pen_ops.len() || clear_segment {
+            self.render_pen_segment(
+                encoder,
+                segment_start..self.pending_pen_ops.len(),
+                clear_segment,
+            );
+        }
+    }
+
+    // render one ordered segment, using clear as the load action after a clear command.
+    fn render_pen_segment(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        range: std::ops::Range<usize>,
+        clear: bool,
+    ) {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("persistent GPU pen layer"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &self.pen_texture.view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: if clear {
+                        wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
+                    } else {
+                        wgpu::LoadOp::Load
+                    },
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            ..Default::default()
+        });
+        for operation in &self.pending_pen_ops[range] {
+            match operation {
+                PendingPenOp::Strokes { start, end } if start < end => {
+                    pass.set_pipeline(&self.pen_pipeline);
+                    pass.set_vertex_buffer(0, self.pen_instances.slice(..));
+                    pass.draw(0..6, *start..*end);
+                }
+                PendingPenOp::Stamp(slot) => {
+                    let stamp = &self.pending_sprite_stamps[*slot];
+                    let sprite = &self.sprites[stamp.sprite_index];
+                    let costume = &sprite.costumes[stamp.costume_index];
+                    pass.set_pipeline(&self.stamp_sprite_pipeline);
+                    pass.set_bind_group(0, &costume.mips[&stamp.mip_level].texture_bind_group, &[]);
+                    pass.set_bind_group(
+                        1,
+                        &self.stamp_transform_bind_group,
+                        &[(*slot as u64 * self.stamp_transform_stride) as u32],
+                    );
+                    pass.draw(0..6, 0..1);
+                }
+                PendingPenOp::Strokes { .. } | PendingPenOp::Clear => {}
+            }
+        }
+    }
+
     fn recreate_stage_textures(&mut self) {
         let Some(viewport) = self.viewport else {
             return;
@@ -319,11 +350,8 @@ impl GraphicsState {
                 &self.texture_layout,
                 &self.pen_texture,
                 &self.pen_texture,
-                if self.hd_pen_mode {
-                    &self.stage_linear_sampler
-                } else {
-                    &self.stage_nearest_sampler
-                },
+                // keep pen-edge filtering consistent at standard and hd resolutions.
+                &self.stage_linear_sampler,
                 &self.zero_uv_offset,
             );
             self.rebuild_pen_texture();
@@ -471,6 +499,24 @@ impl GraphicsState {
         costume_index: usize,
     ) -> Result<(), String> {
         let viewport = self.viewport.ok_or("stage viewport is unavailable")?;
+        let mip_level = self.ensure_sprite_costume_mip_for_size(
+            sprite_index,
+            costume_index,
+            self.sprites[sprite_index].transform.scale,
+            (viewport.width, viewport.height),
+        )?;
+        self.sprites[sprite_index].costumes[costume_index].selected_mip = mip_level;
+        Ok(())
+    }
+
+    // select svg detail from the physical pixels of the surface that will receive the draw.
+    pub(super) fn ensure_sprite_costume_mip_for_size(
+        &mut self,
+        sprite_index: usize,
+        costume_index: usize,
+        sprite_scale: f32,
+        surface_size: (u32, u32),
+    ) -> Result<i8, String> {
         let max_texture_dimension = self.device.limits().max_texture_dimension_2d;
         let sprite = &self.sprites[sprite_index];
         let costume = &sprite.costumes[costume_index];
@@ -478,9 +524,9 @@ impl GraphicsState {
         let asset_id = costume.asset_id.clone();
         let sprite_source = Arc::clone(&costume.sprite);
         let mip_level = costume.sprite.mip_level_for_projected_size(
-            sprite.transform.scale,
-            viewport.width,
-            viewport.height,
+            sprite_scale,
+            surface_size.0,
+            surface_size.1,
             costume.logical_size,
             max_texture_dimension,
         );
@@ -522,8 +568,7 @@ impl GraphicsState {
                 .mips
                 .insert(mip_level, mip);
         }
-        self.sprites[sprite_index].costumes[costume_index].selected_mip = mip_level;
-        Ok(())
+        Ok(mip_level)
     }
 
     pub(super) fn prune_unused_costume_mips(&mut self) {
@@ -538,7 +583,7 @@ impl GraphicsState {
                 .costumes
                 .get(stamp.costume_index)
             {
-                needed.insert((costume.asset_id.clone(), costume.selected_mip));
+                needed.insert((costume.asset_id.clone(), stamp.mip_level));
             }
         }
         self.shared_costume_mips

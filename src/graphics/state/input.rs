@@ -82,7 +82,10 @@ impl GraphicsState {
     pub(crate) fn sync_runtime_snapshot(
         &mut self,
         snapshot: &RuntimeSnapshot,
+        pen_commands: &[crate::runtime::PenCommand],
     ) -> Result<bool, String> {
+        // apply the scheduler's ordered pen operations before presenting this frame.
+        self.write_pen_commands(pen_commands);
         let timer_sampled_at = Instant::now();
         (self.project_timer_epoch, self.project_timer_sample_millis) = timer_sample_for_snapshot(
             self.project_timer_epoch,
@@ -174,6 +177,9 @@ impl GraphicsState {
                 };
                 if let Some(index) = index {
                     let sprite = &mut self.sprites[index];
+                    if !sprite.costumes.is_empty() {
+                        sprite.current_costume = layer.costume_index.min(sprite.costumes.len() - 1);
+                    }
                     if apply_runtime_layer_transform(&mut sprite.transform, layer) {
                         self.queue.write_buffer(
                             &sprite.transform_buffer,
@@ -184,16 +190,15 @@ impl GraphicsState {
                 }
             }
             for sprite_index in 0..self.sprites.len() {
-                if !self.sprites[sprite_index].original {
-                    let current_costume = self.sprites[sprite_index].current_costume;
-                    self.ensure_sprite_costume_mip(sprite_index, current_costume)?;
-                }
+                let current_costume = self.sprites[sprite_index].current_costume;
+                self.ensure_sprite_costume_mip(sprite_index, current_costume)?;
             }
             self.prune_unused_costume_mips();
             self.sync_bubble_gpu_data(snapshot)?;
             self.last_runtime_layers.clone_from(&snapshot.layers);
         }
         Ok(monitors_changed
+            || !pen_commands.is_empty()
             || monitor_visibility_changed
             || lists_changed
             || layers_changed
@@ -264,7 +269,9 @@ impl GraphicsState {
         let original = &self.sprites[original_index];
         let costumes = original.costumes.clone();
         let mut transform = original.transform;
-        let current_costume = original.current_costume;
+        let current_costume = layer
+            .costume_index
+            .min(original.costumes.len().saturating_sub(1));
         apply_runtime_layer_transform(&mut transform, layer);
         let transform_buffer = self
             .device
@@ -804,6 +811,7 @@ mod clone_transform_tests {
             direction,
             size,
             visible,
+            costume_index: 0,
             bubble: None,
         };
         let original_layer = layer(1, 4.0, 5.0, 90.0, 100.0, true);
@@ -849,6 +857,7 @@ mod clone_transform_tests {
             direction: 90.0,
             size,
             visible: true,
+            costume_index: 0,
             bubble: None,
         };
 

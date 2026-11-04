@@ -5,7 +5,10 @@ pub enum ScratchValue {
     Boolean(bool),
 }
 
-use super::{ScratchList, scratch_number_operand, scratch_random, scratch_to_number};
+use super::{
+    PenColorState, PenCommand, ScratchList, scratch_number_operand, scratch_random, scratch_string,
+    scratch_to_number,
+};
 use std::collections::HashSet;
 use std::fmt::Debug;
 use std::sync::{Arc, mpsc::Sender};
@@ -209,6 +212,7 @@ pub struct ScratchState {
     current_instance: usize,
     pending_clones: Vec<usize>,
     target_names: Vec<(usize, String, bool)>,
+    target_costumes: Vec<(usize, Vec<String>)>,
     fence_geometry: Vec<Option<SpriteFenceGeometry>>,
     event_sink: Option<Sender<ObservableEvent>>,
     input: RuntimeInputState,
@@ -221,6 +225,7 @@ pub struct ScratchState {
     project_timer_epoch: u64,
     project_timer_monitor_visible: bool,
     username: String,
+    pending_pen_commands: Vec<PenCommand>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -275,6 +280,8 @@ pub struct LayerSnapshot {
     pub direction: f64,
     pub size: f64,
     pub visible: bool,
+    // preserve costume selection per sprite instance in renderer snapshots.
+    pub costume_index: usize,
     pub bubble: Option<BubbleSnapshot>,
 }
 
@@ -348,6 +355,10 @@ struct ScratchTargetInstance {
     values: Vec<Option<ScratchValue>>,
     lists: Vec<Option<ScratchList>>,
     bubble: Option<SpeechBubble>,
+    pen_color: PenColorState,
+    pen_down: bool,
+    pen_size: f64,
+    costume_index: usize,
 }
 
 /// names and scope information for one shared-state slot.
@@ -697,10 +708,15 @@ impl ScratchState {
                 values: Vec::new(),
                 lists: Vec::new(),
                 bubble: None,
+                pen_color: PenColorState::default(),
+                pen_down: false,
+                pen_size: 1.0,
+                costume_index: 0,
             }],
             current_instance: 0,
             pending_clones: Vec::new(),
             target_names: Vec::new(),
+            target_costumes: Vec::new(),
             fence_geometry: Vec::new(),
             event_sink: None,
             input: RuntimeInputState::default(),
@@ -713,6 +729,7 @@ impl ScratchState {
             project_timer_epoch: 0,
             project_timer_monitor_visible: false,
             username: default_username(),
+            pending_pen_commands: Vec::new(),
         }
     }
 
@@ -741,10 +758,15 @@ impl ScratchState {
                 values: Vec::new(),
                 lists: Vec::new(),
                 bubble: None,
+                pen_color: PenColorState::default(),
+                pen_down: false,
+                pen_size: 1.0,
+                costume_index: 0,
             }],
             current_instance: 0,
             pending_clones: Vec::new(),
             target_names: Vec::new(),
+            target_costumes: Vec::new(),
             fence_geometry: Vec::new(),
             event_sink: None,
             input: RuntimeInputState::default(),
@@ -757,6 +779,7 @@ impl ScratchState {
             project_timer_epoch: 0,
             project_timer_monitor_visible: false,
             username: default_username(),
+            pending_pen_commands: Vec::new(),
         }
     }
 
@@ -790,10 +813,15 @@ impl ScratchState {
                 values: Vec::new(),
                 lists: Vec::new(),
                 bubble: None,
+                pen_color: PenColorState::default(),
+                pen_down: false,
+                pen_size: 1.0,
+                costume_index: 0,
             }],
             current_instance: 0,
             pending_clones: Vec::new(),
             target_names: Vec::new(),
+            target_costumes: Vec::new(),
             fence_geometry: Vec::new(),
             event_sink: None,
             input: RuntimeInputState::default(),
@@ -806,6 +834,7 @@ impl ScratchState {
             project_timer_epoch: 0,
             project_timer_monitor_visible: false,
             username: default_username(),
+            pending_pen_commands: Vec::new(),
         }
     }
 
@@ -1119,6 +1148,7 @@ impl ScratchState {
                     direction: instance.direction,
                     size: instance.size,
                     visible: instance.visible,
+                    costume_index: instance.costume_index,
                     bubble: instance.bubble.as_ref().map(|bubble| BubbleSnapshot {
                         kind: bubble.kind,
                         text: bubble.text.clone(),
@@ -1363,6 +1393,91 @@ impl ScratchState {
         }
     }
 
+    // register costume names and initialize the current costume for this target.
+    pub fn set_target_costumes(&mut self, target: usize, names: Vec<String>, current: usize) {
+        if let Some((_, existing)) = self
+            .target_costumes
+            .iter_mut()
+            .find(|(index, _)| *index == target)
+        {
+            *existing = names;
+        } else {
+            self.target_costumes.push((target, names));
+        }
+        if let Some(instance) = self
+            .instances
+            .iter_mut()
+            .find(|instance| instance.target == target && instance.original)
+        {
+            instance.costume_index = current;
+        }
+    }
+
+    // resolve costume names and 1-based numeric choices using scratch's costume wrapping.
+    pub fn switch_costume_to(&mut self, value: ScratchValue) {
+        let target = self.instances[self.current_instance].target;
+        let Some((_, names)) = self
+            .target_costumes
+            .iter()
+            .find(|(index, _)| *index == target)
+        else {
+            return;
+        };
+        if names.is_empty() {
+            return;
+        }
+        let choice = match value.scratch_view() {
+            super::ScratchValueView::Number(number) => Some(number),
+            super::ScratchValueView::Boolean(value) => Some(f64::from(value)),
+            super::ScratchValueView::Text(text) => names
+                .iter()
+                .position(|name| name == text)
+                .map(|index| index as f64 + 1.0)
+                .or_else(|| text.parse::<f64>().ok()),
+        };
+        let Some(choice) = choice.filter(|number| number.is_finite()) else {
+            return;
+        };
+        let rounded = (choice + 0.5).floor();
+        let index = ((rounded - 1.0).rem_euclid(names.len() as f64)) as usize;
+        let instance = &mut self.instances[self.current_instance];
+        if instance.costume_index != index {
+            instance.costume_index = index;
+            self.request_redraw();
+        }
+    }
+
+    // report the executing instance's selected costume using scratch's 1-based numbering.
+    pub fn costume_number_name(&self, number: bool) -> ScratchValue {
+        let instance = &self.instances[self.current_instance];
+        let Some((_, names)) = self
+            .target_costumes
+            .iter()
+            .find(|(index, _)| *index == instance.target)
+        else {
+            return ScratchValue::Text(String::new());
+        };
+        if number {
+            ScratchValue::Number(instance.costume_index as f64 + 1.0)
+        } else {
+            ScratchValue::Text(
+                names
+                    .get(instance.costume_index)
+                    .cloned()
+                    .unwrap_or_default(),
+            )
+        }
+    }
+
+    // update only the executing target's visibility and request a visual frame.
+    pub fn set_visible(&mut self, visible: bool) {
+        let instance = &mut self.instances[self.current_instance];
+        if !instance.is_stage && instance.visible != visible {
+            instance.visible = visible;
+            self.request_redraw();
+        }
+    }
+
     pub fn direction(&self) -> f64 {
         self.instances[self.current_instance].direction
     }
@@ -1385,15 +1500,133 @@ impl ScratchState {
         }
     }
 
+    /// update the current target's pen color using scratch's parameter ranges.
+    pub fn set_pen_color_parameter(&mut self, parameter: ScratchValue, value: f64, change: bool) {
+        let parameter = scratch_string(parameter);
+        self.instances[self.current_instance]
+            .pen_color
+            .set_or_change_parameter(&parameter, value, change);
+    }
+
+    /// set the current target's pen color from a scratch rgb input.
+    pub fn set_pen_rgb_color(&mut self, color: impl super::ScratchInput) {
+        self.instances[self.current_instance]
+            .pen_color
+            .set_rgb_color(color);
+    }
+
+    pub fn clear_pen(&mut self) {
+        self.pending_pen_commands.push(PenCommand::Clear);
+        self.request_redraw();
+    }
+
+    pub fn pen_down(&mut self) {
+        let instance_id = self.current_instance;
+        let instance = &mut self.instances[instance_id];
+        if instance.is_stage {
+            return;
+        }
+        instance.pen_down = true;
+        let point = [instance.x as f32, instance.y as f32];
+        self.pending_pen_commands.push(PenCommand::Stroke {
+            start: point,
+            end: point,
+            color: instance.pen_color.rgba,
+            diameter: instance.pen_size as f32,
+        });
+        self.request_redraw();
+    }
+
+    pub fn pen_up(&mut self) {
+        self.instances[self.current_instance].pen_down = false;
+    }
+
+    pub fn set_pen_size(&mut self, size: f64) {
+        let size = scratch_to_number(size).clamp(1.0, 1200.0);
+        self.instances[self.current_instance].pen_size = size;
+    }
+
+    pub fn change_pen_size(&mut self, change: f64) {
+        let size = self.instances[self.current_instance].pen_size + scratch_to_number(change);
+        self.set_pen_size(size);
+    }
+
+    pub fn stamp(&mut self) {
+        let instance = &self.instances[self.current_instance];
+        if instance.is_stage {
+            return;
+        }
+        let Some((_, target_name, _)) = self
+            .target_names
+            .iter()
+            .find(|(target, _, _)| *target == instance.target)
+        else {
+            return;
+        };
+        self.pending_pen_commands.push(PenCommand::Stamp {
+            target_name: target_name.clone(),
+            position: [instance.x as f32, instance.y as f32],
+            direction: instance.direction as f32,
+            scale: instance.size as f32 / 100.0,
+            costume_index: instance.costume_index,
+            effects_0: [0.0; 4],
+            effects_1: [0.0; 4],
+        });
+        self.request_redraw();
+    }
+
+    pub fn take_pending_pen_commands(&mut self) -> Vec<PenCommand> {
+        std::mem::take(&mut self.pending_pen_commands)
+    }
+
+    pub fn set_legacy_pen_hue(&mut self, hue: f64) {
+        self.instances[self.current_instance]
+            .pen_color
+            .set_legacy_hue(hue);
+    }
+
+    pub fn change_legacy_pen_hue(&mut self, hue: f64) {
+        self.instances[self.current_instance]
+            .pen_color
+            .change_legacy_hue(hue);
+    }
+
+    pub fn set_legacy_pen_shade(&mut self, shade: f64) {
+        self.instances[self.current_instance]
+            .pen_color
+            .set_legacy_shade(shade);
+    }
+
+    pub fn change_legacy_pen_shade(&mut self, shade: f64) {
+        self.instances[self.current_instance]
+            .pen_color
+            .change_legacy_shade(shade);
+    }
+
+    /// read the current target's calculated pen color for renderer commands.
+    pub fn current_pen_rgba(&self) -> [f32; 4] {
+        self.instances[self.current_instance].pen_color.rgba
+    }
+
     pub fn set_xy(&mut self, x: f64, y: f64) {
         if self.instances[self.current_instance].is_stage {
             return;
         }
         let (x, y) = self.fenced_position(self.current_instance, x, y);
         let instance = &mut self.instances[self.current_instance];
+        let old = [instance.x as f32, instance.y as f32];
         let changed = instance.x != x || instance.y != y;
         instance.x = x;
         instance.y = y;
+        let new = [x as f32, y as f32];
+        if changed && instance.pen_down {
+            self.pending_pen_commands.push(PenCommand::Stroke {
+                start: old,
+                end: new,
+                color: instance.pen_color.rgba,
+                diameter: instance.pen_size as f32,
+            });
+        }
         if changed {
             self.request_redraw();
         }
@@ -1498,6 +1731,10 @@ impl ScratchState {
             values: vec![None; self.values.len()],
             lists: vec![None; self.lists.len()],
             bubble: None,
+            pen_color: PenColorState::default(),
+            pen_down: false,
+            pen_size: 1.0,
+            costume_index: 0,
         });
         id
     }
@@ -1569,6 +1806,10 @@ impl ScratchState {
             values: vec![None; self.values.len()],
             lists: vec![None; self.lists.len()],
             bubble: None,
+            pen_color: self.instances[source_instance].pen_color,
+            pen_down: self.instances[source_instance].pen_down,
+            pen_size: self.instances[source_instance].pen_size,
+            costume_index: self.instances[source_instance].costume_index,
         };
         for (slot, metadata) in self.variables.iter().enumerate() {
             if !metadata.is_stage && metadata.target_index == target {
@@ -1762,7 +2003,78 @@ mod tests {
         BubbleKind, ObservableEvent, RuntimeInputEvent, ScratchListMetadata, ScratchState,
         ScratchValue, ScratchVariableMetadata, SpriteFenceGeometry,
     };
+    use crate::runtime::PenCommand;
     use crate::runtime::{ScratchList, list_snapshot_key, scratch_to_number};
+
+    #[test]
+    fn pen_commands_preserve_points_strokes_stamps_and_clear_order() {
+        let mut state = ScratchState::new(Vec::new());
+        state.register_target(0, "Sprite1", false);
+        state.set_original_xy(0, 10.0, 20.0);
+        state.set_target_costumes(0, vec!["one".to_owned(), "two".to_owned()], 0);
+        state.set_pen_rgb_color("#00ff00");
+        state.set_pen_size(6.0);
+        state.pen_down();
+        state.set_xy(30.0, 40.0);
+        state.switch_costume_to(ScratchValue::Text("two".to_owned()));
+        state.stamp();
+        state.clear_pen();
+        state.set_xy(50.0, 60.0);
+        let commands = state.take_pending_pen_commands();
+
+        assert!(matches!(commands.as_slice(), [
+            PenCommand::Stroke { start: [10.0, 20.0], end: [10.0, 20.0], color: [0.0, 1.0, 0.0, 1.0], diameter: 6.0 },
+            PenCommand::Stroke { start: [10.0, 20.0], end: [30.0, 40.0], color: [0.0, 1.0, 0.0, 1.0], diameter: 6.0 },
+            PenCommand::Stamp { target_name, position: [30.0, 40.0], costume_index: 1, .. },
+            PenCommand::Clear,
+            PenCommand::Stroke { start: [30.0, 40.0], end: [50.0, 60.0], color: [0.0, 1.0, 0.0, 1.0], diameter: 6.0 }
+        ] if target_name == "Sprite1"));
+    }
+
+    #[test]
+    fn clones_copy_pen_state_and_keep_later_changes_independent() {
+        let mut state = ScratchState::new(Vec::new());
+        state.register_target(0, "Sprite1", false);
+        state.set_target_costumes(0, vec!["costume1".to_owned(), "Apple".to_owned()], 1);
+        state.set_pen_rgb_color("#00ff00");
+        state.set_pen_size(6.0);
+        state.pen_down();
+        let clone = state.create_clone(0, 0, 300).unwrap();
+        state.set_current_instance(clone);
+        state.set_xy(5.0, 7.0);
+        state.set_pen_rgb_color("#ff0000");
+        state.set_pen_size(2.0);
+        state.set_xy(8.0, 9.0);
+        state.set_current_instance(0);
+        state.set_xy(2.0, 3.0);
+        let commands = state.take_pending_pen_commands();
+
+        assert!(matches!(
+            commands.as_slice(),
+            [
+                PenCommand::Stroke { .. },
+                PenCommand::Stroke {
+                    start: [0.0, 0.0],
+                    end: [5.0, 7.0],
+                    color: [0.0, 1.0, 0.0, 1.0],
+                    diameter: 6.0
+                },
+                PenCommand::Stroke {
+                    start: [5.0, 7.0],
+                    end: [8.0, 9.0],
+                    color: [1.0, 0.0, 0.0, 1.0],
+                    diameter: 2.0
+                },
+                PenCommand::Stroke {
+                    start: [0.0, 0.0],
+                    end: [2.0, 3.0],
+                    color: [0.0, 1.0, 0.0, 1.0],
+                    diameter: 6.0
+                }
+            ]
+        ));
+        assert_eq!(state.instances[clone].costume_index, 1);
+    }
 
     #[test]
     fn looks_up_variables_by_id_and_target_scoped_name() {

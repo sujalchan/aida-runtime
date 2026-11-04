@@ -936,7 +936,8 @@ impl GraphicsState {
             &texture_layout,
             &pen_texture,
             &pen_texture,
-            &stage_nearest_sampler,
+            // interpolate the antialiased pen edge when the stage is scaled.
+            &stage_linear_sampler,
             &zero_uv_offset,
         );
         let ui_bind_group = layer_bind_group(
@@ -1208,6 +1209,7 @@ impl GraphicsState {
             stamp_transform_capacity,
             stamp_transform_stride,
             pending_sprite_stamps: Vec::new(),
+            pending_stamp_uploaded_count: 0,
             pen_composite_pipeline,
             composite_pipeline,
             sprite_pipeline: sprite_render_pipeline,
@@ -1256,7 +1258,7 @@ impl GraphicsState {
             pen_instance_capacity,
             pen_instance_data: Vec::new(),
             pen_uploaded_count: 0,
-            pen_draw_range: None,
+            pending_pen_ops: Vec::new(),
             pen_texture_dirty: true,
             pen_clear_pending: true,
             hd_pen_mode: false,
@@ -1270,7 +1272,7 @@ impl GraphicsState {
         }
         state.prune_unused_costume_mips();
         state.ensure_backdrop_texture(state.backdrop_index)?;
-        state.sync_runtime_snapshot(&initial_snapshot)?;
+        state.sync_runtime_snapshot(&initial_snapshot, &[])?;
         Ok(state)
     }
 }

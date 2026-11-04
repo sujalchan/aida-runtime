@@ -16,7 +16,7 @@ use winit::{
 
 use crate::{
     graphics::{GraphicsState, ListEditorInput, ListMonitorFileAction, RenderOutcome},
-    runtime::{ObservableEvent, RuntimeInputEvent, RuntimeSnapshot, ScratchValue},
+    runtime::{ObservableEvent, PenCommand, RuntimeInputEvent, RuntimeSnapshot, ScratchValue},
 };
 
 pub(crate) enum RendererEvent {
@@ -30,6 +30,7 @@ pub(crate) struct RendererApp {
     assets_dir: PathBuf,
     window_title: String,
     latest: Arc<RwLock<Arc<RuntimeSnapshot>>>,
+    pending_pen_commands: Arc<RwLock<Vec<PenCommand>>>,
     notification_pending: Arc<AtomicBool>,
     observable_events: Option<mpsc::Receiver<ObservableEvent>>,
     stop_sender: mpsc::Sender<()>,
@@ -56,6 +57,7 @@ impl RendererApp {
         assets_dir: PathBuf,
         window_title: String,
         latest: Arc<RwLock<Arc<RuntimeSnapshot>>>,
+        pending_pen_commands: Arc<RwLock<Vec<PenCommand>>>,
         notification_pending: Arc<AtomicBool>,
         observable_events: Option<mpsc::Receiver<ObservableEvent>>,
         stop_sender: mpsc::Sender<()>,
@@ -74,6 +76,7 @@ impl RendererApp {
             assets_dir,
             window_title,
             latest,
+            pending_pen_commands,
             notification_pending,
             observable_events,
             stop_sender,
@@ -106,9 +109,16 @@ impl RendererApp {
 
     fn sync_latest_snapshot(&mut self) {
         let snapshot = self.snapshot();
+        let pen_commands = {
+            let mut pending = self
+                .pending_pen_commands
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::mem::take(&mut *pending)
+        };
         self.pending_snapshot_tick = snapshot.tick;
         if let Some(graphics) = self.graphics.as_mut() {
-            match graphics.sync_runtime_snapshot(&snapshot) {
+            match graphics.sync_runtime_snapshot(&snapshot, &pen_commands) {
                 Ok(true) => {
                     graphics.window().request_redraw();
                     self.redraw_pending = true;
@@ -480,9 +490,8 @@ impl ApplicationHandler<RendererEvent> for RendererApp {
                         Ok(true) => self.request_redraw(),
                         Ok(false) => {}
                         Err(error) => {
-                            self.error = Some(format!(
-                                "failed to clear list scrollbar hover: {error}"
-                            ));
+                            self.error =
+                                Some(format!("failed to clear list scrollbar hover: {error}"));
                         }
                     }
                 }

@@ -1,11 +1,12 @@
 use super::*;
 
+fn pending_stamp_upload_range(uploaded: usize, total: usize) -> std::ops::Range<usize> {
+    uploaded.min(total)..total
+}
+
 impl GraphicsState {
     pub(crate) fn write_pen_commands(&mut self, commands: &[PenCommand]) {
         let mut changed = false;
-        let mut draw_start = self
-            .pen_draw_range
-            .map_or(self.pen_instance_data.len(), |(start, _)| start as usize);
         let stroke_count = commands
             .iter()
             .filter(|command| matches!(command, PenCommand::Stroke { .. }))
@@ -14,11 +15,7 @@ impl GraphicsState {
         for command in commands {
             match command {
                 PenCommand::Clear => {
-                    self.pen_instance_data.clear();
-                    self.pen_uploaded_count = 0;
-                    draw_start = 0;
-                    self.pending_sprite_stamps.clear();
-                    self.pen_clear_pending = true;
+                    self.pending_pen_ops.push(PendingPenOp::Clear);
                     changed = true;
                 }
                 PenCommand::Stroke {
@@ -40,12 +37,23 @@ impl GraphicsState {
                     } else {
                         0.0
                     };
+                    let range_start = self.pen_instance_data.len() as u32;
                     self.pen_instance_data.push(PenInstance {
                         start: [start[0] + pixel_offset, start[1] + pixel_offset],
                         end: [end[0] + pixel_offset, end[1] + pixel_offset],
                         color: *color,
                         diameter: diameter.max(1.0),
                     });
+                    let end = self.pen_instance_data.len() as u32;
+                    match self.pending_pen_ops.last_mut() {
+                        Some(PendingPenOp::Strokes {
+                            end: previous_end, ..
+                        }) if *previous_end == range_start => *previous_end = end,
+                        _ => self.pending_pen_ops.push(PendingPenOp::Strokes {
+                            start: range_start,
+                            end,
+                        }),
+                    }
                     changed = true;
                 }
                 PenCommand::Stamp {
@@ -71,11 +79,23 @@ impl GraphicsState {
                         transform.effects_0 = *effects_0;
                         transform.effects_1 = *effects_1;
                         sanitize_stamp_effects(&mut transform);
+                        let surface_size = (self.pen_texture.width, self.pen_texture.height);
+                        let mip_level = self
+                            .ensure_sprite_costume_mip_for_size(
+                                sprite_index,
+                                costume_index,
+                                transform.scale,
+                                surface_size,
+                            )
+                            .expect("pen stamp costume should rasterize for the pen surface");
+                        let stamp_index = self.pending_sprite_stamps.len();
                         self.pending_sprite_stamps.push(PendingSpriteStamp {
                             sprite_index,
                             costume_index,
+                            mip_level,
                             transform,
                         });
+                        self.pending_pen_ops.push(PendingPenOp::Stamp(stamp_index));
                         changed = true;
                     }
                 }
@@ -86,21 +106,30 @@ impl GraphicsState {
             self.ensure_stamp_transform_capacity(self.pending_sprite_stamps.len());
             let stride = self.stamp_transform_stride as usize;
             let transform_size = std::mem::size_of::<SpriteTransform>();
-            let mut packed = vec![0_u8; stride * self.pending_sprite_stamps.len()];
-            for (index, stamp) in self.pending_sprite_stamps.iter().enumerate() {
-                let start = index * stride;
-                packed[start..start + transform_size]
-                    .copy_from_slice(bytemuck::bytes_of(&stamp.transform));
+            let upload_range = pending_stamp_upload_range(
+                self.pending_stamp_uploaded_count,
+                self.pending_sprite_stamps.len(),
+            );
+            let first = upload_range.start;
+            if !upload_range.is_empty() {
+                let count = upload_range.len();
+                let mut packed = vec![0_u8; stride * count];
+                for (index, stamp) in self.pending_sprite_stamps[upload_range].iter().enumerate() {
+                    let start = index * stride;
+                    packed[start..start + transform_size]
+                        .copy_from_slice(bytemuck::bytes_of(&stamp.transform));
+                }
+                self.queue.write_buffer(
+                    &self.stamp_transform_buffer,
+                    first as u64 * self.stamp_transform_stride,
+                    &packed,
+                );
+                self.pending_stamp_uploaded_count = self.pending_sprite_stamps.len();
             }
-            self.queue
-                .write_buffer(&self.stamp_transform_buffer, 0, &packed);
         }
         if changed {
             self.upload_pending_pen_instances();
             self.pen_texture_dirty = true;
-            let draw_end = self.pen_instance_data.len();
-            self.pen_draw_range =
-                (draw_start < draw_end).then_some((draw_start as u32, draw_end as u32));
         }
     }
 
@@ -130,6 +159,8 @@ impl GraphicsState {
                     }),
                 }],
             });
+        // a replacement buffer starts empty, so queued stamp transforms need uploading again.
+        self.pending_stamp_uploaded_count = 0;
     }
 
     fn upload_pending_pen_instances(&mut self) {
@@ -160,9 +191,8 @@ impl GraphicsState {
         self.pen_uploaded_count = 0;
         self.pen_clear_pending = true;
         self.pen_texture_dirty = true;
+        // retain unpresented operations across texture recreation and keep their barriers.
         self.upload_pending_pen_instances();
-        self.pen_draw_range = (!self.pen_instance_data.is_empty())
-            .then_some((0, self.pen_instance_data.len() as u32));
     }
 }
 
@@ -180,4 +210,21 @@ fn sanitize_stamp_effects(transform: &mut SpriteTransform) {
     transform.effects_0[2] = transform.effects_0[2].rem_euclid(360.0);
     transform.effects_1[1] = transform.effects_1[1].clamp(-100.0, 100.0);
     transform.effects_1[2] = transform.effects_1[2].clamp(0.0, 100.0);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pending_stamp_upload_range;
+
+    #[test]
+    fn stamp_transform_uploads_only_the_new_suffix() {
+        assert_eq!(pending_stamp_upload_range(0, 3), 0..3);
+        assert_eq!(pending_stamp_upload_range(3, 5), 3..5);
+        assert_eq!(pending_stamp_upload_range(5, 5), 5..5);
+    }
+
+    #[test]
+    fn stamp_transform_upload_restarts_after_pending_queue_reset() {
+        assert_eq!(pending_stamp_upload_range(0, 2), 0..2);
+    }
 }

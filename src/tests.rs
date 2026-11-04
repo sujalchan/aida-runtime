@@ -1,16 +1,41 @@
 use std::{cell::Cell, rc::Rc};
 
 use crate::{
-    apply_input_batch, assert_expected_variables, parse_run_options,
+    apply_input_batch, assert_expected_variables, enqueue_pen_commands, parse_run_options,
     program::GeneratedProgram,
     project_window_title, run_headless,
     runtime::{
-        Clock, PacingMechanism, PacingMode, ResumableScript, RuntimeInputEvent, RuntimeSnapshot,
-        SchedulerStatus, ScratchState, ScratchValue, ScratchVariableMetadata, ScriptScheduler,
-        ScriptStatus, VariableSnapshot, variable_snapshot_key,
+        Clock, PacingMechanism, PacingMode, PenCommand, ResumableScript, RuntimeInputEvent,
+        RuntimeSnapshot, SchedulerStatus, ScratchState, ScratchValue, ScratchVariableMetadata,
+        ScriptScheduler, ScriptStatus, VariableSnapshot, variable_snapshot_key,
     },
     wait_for_renderer,
 };
+
+#[test]
+fn pen_command_batches_accumulate_across_coalesced_snapshots_in_order() {
+    let pending = std::sync::RwLock::new(Vec::new());
+    enqueue_pen_commands(&pending, vec![PenCommand::Clear]);
+    enqueue_pen_commands(
+        &pending,
+        vec![PenCommand::Stroke {
+            start: [1.0, 2.0],
+            end: [3.0, 4.0],
+            color: [1.0, 0.0, 0.0, 1.0],
+            diameter: 2.0,
+        }],
+    );
+    let commands = std::mem::take(
+        &mut *pending
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    );
+
+    assert!(matches!(
+        commands.as_slice(),
+        [PenCommand::Clear, PenCommand::Stroke { .. }]
+    ));
+}
 
 #[derive(Clone)]
 struct TestClock(Rc<Cell<u64>>);

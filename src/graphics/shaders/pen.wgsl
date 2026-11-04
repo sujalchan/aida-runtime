@@ -37,8 +37,10 @@ fn vs_main(
     let direction = select(vec2<f32>(1.0, 0.0), delta / max(line_length, 1e-5), line_length > 1e-5);
     let normal = vec2<f32>(-direction.y, direction.x);
     let corner = quad_corner(vertex_index);
-    let along = mix(-half_width, line_length + half_width, corner.x);
-    let across = mix(-half_width, half_width, corner.y);
+    // leave a small raster margin so the antialiased circle edge is not cut by the quad.
+    let raster_margin = 1.0;
+    let along = mix(-half_width - raster_margin, line_length + half_width + raster_margin, corner.x);
+    let across = mix(-half_width - raster_margin, half_width + raster_margin, corner.y);
     let stage_position = start + direction * along + normal * across;
 
     var output: VertexOutput;
@@ -63,7 +65,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         input.line_position.y,
     )) - input.half_width;
     let pixel_footprint = max(fwidth(distance), 1e-4);
-    let coverage = clamp(0.5 - distance / pixel_footprint, 0.0, 1.0);
+    let coverage = 1.0 - smoothstep(-pixel_footprint * 0.5, pixel_footprint * 0.5, distance);
     let alpha = input.color.a * coverage;
     return vec4<f32>(input.color.rgb * alpha, alpha);
 }

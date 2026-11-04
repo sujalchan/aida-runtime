@@ -19,7 +19,8 @@ use std::{
 
 use aida_ast::load_sb3;
 use runtime::{
-    ObservableEvent, PacingMode, RuntimeInputEvent, RuntimeSnapshot, SchedulerStatus, ScratchValue,
+    ObservableEvent, PacingMode, PenCommand, RuntimeInputEvent, RuntimeSnapshot, SchedulerStatus,
+    ScratchValue,
 };
 use winit::event_loop::{ControlFlow, EventLoop};
 
@@ -111,6 +112,7 @@ fn run_graphical(options: RunOptions) -> Result<(), String> {
     event_loop.set_control_flow(ControlFlow::Wait);
     let proxy = event_loop.create_proxy();
     let latest = Arc::new(RwLock::new(Arc::new(RuntimeSnapshot::default())));
+    let pending_pen_commands = Arc::new(RwLock::new(Vec::<PenCommand>::new()));
     let notification_pending = Arc::new(AtomicBool::new(false));
     let (observable_sender, observable_receiver) = if options.log_observables {
         let (sender, receiver) = mpsc::channel();
@@ -124,6 +126,7 @@ fn run_graphical(options: RunOptions) -> Result<(), String> {
     let (input_sender, input_receiver) = mpsc::channel();
     let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
     let worker_latest = Arc::clone(&latest);
+    let worker_pen_commands = Arc::clone(&pending_pen_commands);
     let worker_notification_pending = Arc::clone(&notification_pending);
     let worker_options = options.clone();
     let worker_proxy = proxy.clone();
@@ -139,9 +142,10 @@ fn run_graphical(options: RunOptions) -> Result<(), String> {
             }
             program.set_observable_event_sink(observable_sender);
             publish_snapshot(
-                &program,
+                &mut program,
                 0,
                 &worker_latest,
+                &worker_pen_commands,
                 &worker_proxy,
                 &worker_notification_pending,
             );
@@ -153,6 +157,7 @@ fn run_graphical(options: RunOptions) -> Result<(), String> {
                 worker_options.test_mode,
                 &stop_receiver,
                 &worker_latest,
+                &worker_pen_commands,
                 &worker_proxy,
                 &worker_notification_pending,
                 &execution_start_receiver,
@@ -174,6 +179,7 @@ fn run_graphical(options: RunOptions) -> Result<(), String> {
         loaded.assets_dir,
         window_title,
         latest,
+        pending_pen_commands,
         notification_pending,
         observable_receiver,
         stop_sender.clone(),
@@ -233,6 +239,7 @@ fn run_program(
         if program.presentation_requested() {
             // headless presentation consumes the same tick snapshot without creating a window.
             let _snapshot = program.observable_snapshot(ticks);
+            let _pen_commands = program.take_pending_pen_commands();
             program.presentation_consumed();
         }
         if max_ticks == Some(ticks) && !program.is_complete() {
@@ -257,6 +264,7 @@ fn run_worker(
     test_mode: bool,
     stop: &mpsc::Receiver<()>,
     latest: &Arc<RwLock<Arc<RuntimeSnapshot>>>,
+    pending_pen_commands: &Arc<RwLock<Vec<PenCommand>>>,
     proxy: &winit::event_loop::EventLoopProxy<renderer::RendererEvent>,
     notification_pending: &AtomicBool,
     execution_start: &mpsc::Receiver<()>,
@@ -290,7 +298,14 @@ fn run_worker(
             || live_monitor_due
             || (matches!(status, SchedulerStatus::Complete) && !was_complete);
         if presentation_requested {
-            publish_snapshot(program, ticks, latest, proxy, notification_pending);
+            publish_snapshot(
+                program,
+                ticks,
+                latest,
+                pending_pen_commands,
+                proxy,
+                notification_pending,
+            );
             if live_monitor_due {
                 next_live_monitor_update = Instant::now() + live_monitor_interval;
             }
@@ -338,10 +353,24 @@ fn run_worker(
         }
     }
     if stopped_externally {
-        publish_snapshot(program, ticks, latest, proxy, notification_pending);
+        publish_snapshot(
+            program,
+            ticks,
+            latest,
+            pending_pen_commands,
+            proxy,
+            notification_pending,
+        );
         program.stop_all();
     }
-    publish_snapshot(program, ticks, latest, proxy, notification_pending);
+    publish_snapshot(
+        program,
+        ticks,
+        latest,
+        pending_pen_commands,
+        proxy,
+        notification_pending,
+    );
     Ok(ticks)
 }
 
@@ -425,18 +454,32 @@ fn stop_requested(receiver: &mpsc::Receiver<()>) -> bool {
 }
 
 fn publish_snapshot(
-    program: &program::GeneratedProgram,
+    program: &mut program::GeneratedProgram,
     ticks: usize,
     latest: &Arc<RwLock<Arc<RuntimeSnapshot>>>,
+    pending_pen_commands: &Arc<RwLock<Vec<PenCommand>>>,
     proxy: &winit::event_loop::EventLoopProxy<renderer::RendererEvent>,
     notification_pending: &AtomicBool,
 ) {
-    let snapshot = Arc::new(program.observable_snapshot(ticks));
+    let snapshot = program.observable_snapshot(ticks);
+    let pen_commands = program.take_pending_pen_commands();
+    enqueue_pen_commands(pending_pen_commands, pen_commands);
+    let snapshot = Arc::new(snapshot);
     *latest
         .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = snapshot;
     if !notification_pending.swap(true, Ordering::AcqRel) {
         let _ = proxy.send_event(renderer::RendererEvent::SnapshotUpdated);
+    }
+}
+
+// retain incremental pen operations even while renderer snapshots are coalesced.
+fn enqueue_pen_commands(pending: &RwLock<Vec<PenCommand>>, commands: Vec<PenCommand>) {
+    if !commands.is_empty() {
+        pending
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .extend(commands);
     }
 }
 

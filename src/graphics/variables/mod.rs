@@ -661,8 +661,7 @@ impl VariableLayer {
             return Some((index, false));
         }
         let old_display_len = self.list_display_len(index);
-        let old_visible_count =
-            self.monitors[index].visible_list_row_count(old_display_len);
+        let old_visible_count = self.monitors[index].visible_list_row_count(old_display_len);
         let old_visible_start = self.monitors[index]
             .list_scroll_offset
             .min(self.monitors[index].max_list_scroll_offset(old_display_len));
@@ -674,8 +673,7 @@ impl VariableLayer {
         self.monitors[index].list_scroll_remainder = 0.0;
         // update row and scrollbar geometry when list size or the visible range changes.
         let shapes_changed = old_display_len != displayed_len
-            || old_visible_count
-            != self.monitors[index].visible_list_row_count(displayed_len)
+            || old_visible_count != self.monitors[index].visible_list_row_count(displayed_len)
             || old_visible_start
                 != self.monitors[index]
                     .list_scroll_offset
@@ -864,9 +862,7 @@ impl VariableLayer {
                 }
                 self.mark_gpu_shapes(index);
             }
-            if (scrollbar.thumb_y..=scrollbar.thumb_y + scrollbar.thumb_height)
-                .contains(&local_y)
-            {
+            if (scrollbar.thumb_y..=scrollbar.thumb_y + scrollbar.thumb_height).contains(&local_y) {
                 self.list_scrollbar_drag = Some(ListScrollbarDrag {
                     monitor_index: index,
                     pointer_offset: local_y - scrollbar.thumb_y,
@@ -2212,7 +2208,10 @@ mod tests {
         );
         assert_eq!(first_rows.len(), 7);
         let top_scrollbar = layer.list_scrollbar_geometry(0).unwrap();
-        assert_eq!(top_scrollbar.thumb_height, super::LIST_SCROLLBAR_MIN_THUMB_HEIGHT);
+        assert_eq!(
+            top_scrollbar.thumb_height,
+            super::LIST_SCROLLBAR_MIN_THUMB_HEIGHT
+        );
         assert_eq!(top_scrollbar.thumb_y, top_scrollbar.track_y);
         let (_, first_glyphs) = layer.build_gpu_monitor_instances(0, false, true).unwrap();
         assert!(first_glyphs.len() < 256);
@@ -2228,10 +2227,12 @@ mod tests {
         assert!(last_glyphs.len() < 256);
         assert_eq!(layer.monitors[0].list_scroll_offset, 199_994);
         let bottom_scrollbar = layer.list_scrollbar_geometry(0).unwrap();
-        assert!((bottom_scrollbar.thumb_y + bottom_scrollbar.thumb_height
-            - (bottom_scrollbar.track_y + bottom_scrollbar.track_height))
-            .abs()
-            < 0.01);
+        assert!(
+            (bottom_scrollbar.thumb_y + bottom_scrollbar.thumb_height
+                - (bottom_scrollbar.track_y + bottom_scrollbar.track_height))
+                .abs()
+                < 0.01
+        );
 
         // drag the scrollbar across the full fixture list without traversing its item data.
         assert!(layer.set_list_scroll_offset(0, 0));
@@ -2241,12 +2242,15 @@ mod tests {
             top_scrollbar.track_x + 1.0,
             top_scrollbar.thumb_y + top_scrollbar.thumb_height * 0.5,
         );
-        assert!(layer.handle_list_pointer(pointer.0, pointer.1).scrollbar_dragging);
+        assert!(
+            layer
+                .handle_list_pointer(pointer.0, pointer.1)
+                .scrollbar_dragging
+        );
         let bottom_pointer = stage_point_for_list(
             &layer,
             top_scrollbar.track_x + 1.0,
-            top_scrollbar.track_y + top_scrollbar.track_height
-                - top_scrollbar.thumb_height * 0.5,
+            top_scrollbar.track_y + top_scrollbar.track_height - top_scrollbar.thumb_height * 0.5,
         );
         assert!(layer.drag_to(bottom_pointer.0, bottom_pointer.1));
         assert_eq!(layer.visible_list_rows(0).last().unwrap().0, 200_000);
@@ -2292,11 +2296,13 @@ mod tests {
         assert_eq!(hidden_shapes[track_index].fill[3], 0.0);
         assert_eq!(hidden_shapes[track_index].fill, [0.0; 4]);
         assert!(track_index < thumb_index);
-        assert!(scrollable.update_list_scrollbar_hover(Some(stage_point_for_list(
-            &scrollable,
-            geometry.track_x + 1.0,
-            geometry.track_y + 1.0,
-        ))));
+        assert!(
+            scrollable.update_list_scrollbar_hover(Some(stage_point_for_list(
+                &scrollable,
+                geometry.track_x + 1.0,
+                geometry.track_y + 1.0,
+            )))
+        );
         assert!(scrollable.list_scrollbar_is_visible(0));
         let (visible_shapes, _) = scrollable
             .build_gpu_monitor_instances(0, true, false)
@@ -2304,9 +2310,7 @@ mod tests {
         assert_eq!(visible_shapes.len(), hidden_shapes.len());
         assert_eq!(visible_shapes[track_index].fill[3], 42.0 / 255.0);
         assert_eq!(visible_shapes[thumb_index].fill[3], 190.0 / 255.0);
-        assert!(
-            visible_shapes[track_index].fill[0] < visible_shapes[thumb_index].fill[0]
-        );
+        assert!(visible_shapes[track_index].fill[0] < visible_shapes[thumb_index].fill[0]);
         for index in 0..visible_shapes.len() {
             if index != track_index && index != thumb_index {
                 assert_eq!(visible_shapes[index], hidden_shapes[index]);
@@ -2336,21 +2340,29 @@ mod tests {
                 .iter()
                 .all(|glyph| glyph.clip_y[1] == footer_top)
         );
-        assert!(last_row_glyphs
-            .iter()
-            .any(|glyph| glyph.local_position[0] < super::LIST_ROW_VALUE_X));
-        assert!(last_row_glyphs
-            .iter()
-            .any(|glyph| glyph.local_position[0] >= super::LIST_ROW_VALUE_X));
+        assert!(
+            last_row_glyphs
+                .iter()
+                .any(|glyph| glyph.local_position[0] < super::LIST_ROW_VALUE_X)
+        );
+        assert!(
+            last_row_glyphs
+                .iter()
+                .any(|glyph| glyph.local_position[0] >= super::LIST_ROW_VALUE_X)
+        );
         let bucket = layer.glyph_atlas_scale_bucket;
         let index_glyph_id = layer.glyph_atlas_entries[&('7', true, bucket)].id;
         let value_glyph_id = layer.glyph_atlas_entries[&('6', false, bucket)].id;
-        assert!(last_row_glyphs
-            .iter()
-            .any(|glyph| glyph.glyph_id == index_glyph_id));
-        assert!(last_row_glyphs
-            .iter()
-            .any(|glyph| glyph.glyph_id == value_glyph_id));
+        assert!(
+            last_row_glyphs
+                .iter()
+                .any(|glyph| glyph.glyph_id == index_glyph_id)
+        );
+        assert!(
+            last_row_glyphs
+                .iter()
+                .any(|glyph| glyph.glyph_id == value_glyph_id)
+        );
         let previous_index_glyph_id = layer.glyph_atlas_entries[&('6', true, bucket)].id;
         let previous_value_glyph_id = layer.glyph_atlas_entries[&('5', false, bucket)].id;
         let previous_row_y = partial_row_y - super::LIST_ROW_HEIGHT;
@@ -2387,8 +2399,8 @@ mod tests {
         let proportional = list_with_items(20, 196.0)
             .list_scrollbar_geometry(0)
             .unwrap();
-        let expected_thumb_height = proportional.track_height * proportional.track_height
-            / (20.0 * super::LIST_ROW_HEIGHT);
+        let expected_thumb_height =
+            proportional.track_height * proportional.track_height / (20.0 * super::LIST_ROW_HEIGHT);
         assert!((proportional.thumb_height - expected_thumb_height).abs() < 0.01);
 
         let mut layer = list_with_items(1_000, 196.0);
@@ -2404,10 +2416,10 @@ mod tests {
 
         assert!(layer.set_list_scroll_offset(0, max_offset));
         let bottom = layer.list_scrollbar_geometry(0).unwrap();
-        assert!((bottom.thumb_y + bottom.thumb_height
-            - (bottom.track_y + bottom.track_height))
-            .abs()
-            < 0.01);
+        assert!(
+            (bottom.thumb_y + bottom.thumb_height - (bottom.track_y + bottom.track_height)).abs()
+                < 0.01
+        );
     }
 
     #[test]
@@ -2423,8 +2435,8 @@ mod tests {
         assert!(response.consumed);
         assert!(response.scrollbar_dragging);
 
-        let bottom_pointer_y = geometry.track_y + geometry.track_height
-            - geometry.thumb_height * 0.5;
+        let bottom_pointer_y =
+            geometry.track_y + geometry.track_height - geometry.thumb_height * 0.5;
         let bottom_pointer = stage_point_for_list(&layer, geometry.track_x + 2.0, bottom_pointer_y);
         assert!(layer.drag_to(bottom_pointer.0, bottom_pointer.1));
         assert_eq!(layer.monitors[0].list_scroll_offset, 100 - 6);

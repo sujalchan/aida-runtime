@@ -10,9 +10,9 @@ use super::menu::{
 use super::{
     GLYPH_ATLAS_MAX_SIZE, GlyphAtlasEntry, LIST_CONTENT_TOP, LIST_EMPTY_TOP_PADDING,
     LIST_FOOTER_HEIGHT, LIST_FOOTER_SIDE_PADDING, LIST_HEADER_FONT_SIZE,
-    LIST_HEADER_HORIZONTAL_PADDING, LIST_LENGTH_FONT_SIZE, LIST_ROW_FONT_SIZE,
-    LIST_ROW_HEIGHT, LIST_ROW_INDEX_GAP, LIST_ROW_INDEX_X, LIST_ROW_TEXT_INSET,
-    LIST_SCROLLBAR_RIGHT_INSET, LIST_SCROLLBAR_WIDTH,
+    LIST_HEADER_HORIZONTAL_PADDING, LIST_LENGTH_FONT_SIZE, LIST_ROW_FONT_SIZE, LIST_ROW_HEIGHT,
+    LIST_ROW_INDEX_GAP, LIST_ROW_INDEX_X, LIST_ROW_TEXT_INSET, LIST_SCROLLBAR_RIGHT_INSET,
+    LIST_SCROLLBAR_WIDTH,
 };
 use super::{
     MonitorVisibility, SCRATCH_HEIGHT, SCRATCH_WIDTH, VariableLayer,
@@ -508,8 +508,8 @@ impl VariableLayer {
             }
             for (row, item) in shown_items.iter().enumerate() {
                 let row_value_x = self.list_row_value_x(index, visible_rows[row].0);
-                let index_max_width = (row_value_x - LIST_ROW_INDEX_X - LIST_ROW_INDEX_GAP)
-                    .max(0.0);
+                let index_max_width =
+                    (row_value_x - LIST_ROW_INDEX_X - LIST_ROW_INDEX_GAP).max(0.0);
                 let index_text = visible_rows[row].0.to_string();
                 let shown_index = fit_monitor_text(
                     &self.bold_font,
@@ -619,8 +619,7 @@ impl VariableLayer {
             let track_x = width - LIST_SCROLLBAR_RIGHT_INSET - LIST_SCROLLBAR_WIDTH;
             let thumb_height = scrollbar.map_or(track_height, |bar| bar.thumb_height);
             let thumb_y = scrollbar.map_or(track_y, |bar| bar.thumb_y);
-            let scrollbar_visible =
-                scrollbar.is_some() && self.list_scrollbar_is_visible(index);
+            let scrollbar_visible = scrollbar.is_some() && self.list_scrollbar_is_visible(index);
             let track_alpha = if scrollbar_visible { 42 } else { 0 };
             let thumb_alpha = if scrollbar_visible { 190 } else { 0 };
             let track_color = [82, 93, 117, track_alpha];
@@ -701,8 +700,8 @@ impl VariableLayer {
                 let row_glyph_start = glyphs.len();
                 let index_text = visible_rows[row].0.to_string();
                 let row_value_x = self.list_row_value_x(index, visible_rows[row].0);
-                let index_max_width = (row_value_x - LIST_ROW_INDEX_X - LIST_ROW_INDEX_GAP)
-                    .max(0.0);
+                let index_max_width =
+                    (row_value_x - LIST_ROW_INDEX_X - LIST_ROW_INDEX_GAP).max(0.0);
                 // keep narrow monitors from drawing index glyphs into the value column.
                 let shown_index = fit_monitor_text(
                     &self.bold_font,
@@ -1641,8 +1640,14 @@ mod tests {
             .0;
         assert_eq!(list_shapes[1].params[0], MONITOR_FRAME_RADIUS - 1.0);
         assert_eq!(list_shapes[1].shape[2], MONITOR_SHAPE_TOP_ROUNDED);
-        assert_eq!(list_shapes.last().unwrap().params[0], MONITOR_FRAME_RADIUS - 1.0);
-        assert_eq!(list_shapes.last().unwrap().shape[2], MONITOR_SHAPE_BOTTOM_ROUNDED);
+        assert_eq!(
+            list_shapes.last().unwrap().params[0],
+            MONITOR_FRAME_RADIUS - 1.0
+        );
+        assert_eq!(
+            list_shapes.last().unwrap().shape[2],
+            MONITOR_SHAPE_BOTTOM_ROUNDED
+        );
         assert_eq!(list_shapes[2].params[0], LIST_ROW_RADIUS);
         assert_eq!(list_shapes[2].rect[0], LIST_ROW_VALUE_X);
         assert_eq!(list_shapes[2].rect[2], 120.0 - LIST_ROW_VALUE_X - 6.0);
