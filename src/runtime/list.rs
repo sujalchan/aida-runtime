@@ -9,15 +9,19 @@ pub const SCRATCH_LIST_LIMIT: usize = 200_000;
 
 static EMPTY_ITEM: ScratchValue = ScratchValue::Text(String::new());
 
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone)]
 pub struct ScratchList {
     items: Arc<Vec<ScratchValue>>,
+    // true only when constructors or generated operations establish numeric-only contents.
+    all_numbers: bool,
 }
 
 impl ScratchList {
     pub fn new(items: Vec<ScratchValue>) -> Self {
+        let all_numbers = items.is_empty();
         Self {
             items: Arc::new(items),
+            all_numbers,
         }
     }
 
@@ -44,6 +48,7 @@ impl ScratchList {
         if self.items.len() >= SCRATCH_LIST_LIMIT {
             return false;
         }
+        self.all_numbers &= matches!(&item, ScratchValue::Number(_));
         Arc::make_mut(&mut self.items).push(item);
         true
     }
@@ -54,13 +59,34 @@ impl ScratchList {
         if count == 0 {
             return false;
         }
+        let mut all_numbers = self.all_numbers;
         let items = Arc::make_mut(&mut self.items);
         items.reserve(count);
-        items.extend((0..count).map(|_| item()));
+        for _ in 0..count {
+            let value = item();
+            all_numbers &= matches!(value, ScratchValue::Number(_));
+            items.push(value);
+        }
+        self.all_numbers = all_numbers;
+        true
+    }
+
+    // append statically numeric reporters without per-item dynamic type checks.
+    pub fn add_generated_numbers(&mut self, count: usize, mut item: impl FnMut() -> f64) -> bool {
+        let count = count.min(SCRATCH_LIST_LIMIT.saturating_sub(self.items.len()));
+        if count == 0 {
+            return false;
+        }
+        let all_numbers = self.all_numbers;
+        let items = Arc::make_mut(&mut self.items);
+        items.reserve(count);
+        items.extend((0..count).map(|_| ScratchValue::Number(item())));
+        self.all_numbers = all_numbers;
         true
     }
 
     pub fn replace_all(&mut self, items: Vec<ScratchValue>) {
+        self.all_numbers = items.is_empty();
         self.items = Arc::new(items);
     }
 
@@ -69,6 +95,9 @@ impl ScratchList {
             ListIndex::All => self.delete_all(),
             ListIndex::Item(index) => {
                 Arc::make_mut(&mut self.items).remove(index);
+                if self.items.is_empty() {
+                    self.all_numbers = true;
+                }
                 true
             }
             ListIndex::Invalid => false,
@@ -78,14 +107,21 @@ impl ScratchList {
     // clear shared lists without cloning saved items, and keep the allocation for a refill.
     pub fn delete_all(&mut self) -> bool {
         if self.items.is_empty() {
+            self.all_numbers = true;
             return false;
         }
         if let Some(items) = Arc::get_mut(&mut self.items) {
-            items.clear();
+            if self.all_numbers {
+                // numeric values own no resources, so their drop glue can be skipped safely.
+                unsafe { items.set_len(0) };
+            } else {
+                items.clear();
+            }
         } else {
             let capacity = self.items.capacity().min(SCRATCH_LIST_LIMIT);
             self.items = Arc::new(Vec::with_capacity(capacity));
         }
+        self.all_numbers = true;
         true
     }
 
@@ -97,6 +133,7 @@ impl ScratchList {
         if index >= SCRATCH_LIST_LIMIT {
             return false;
         }
+        self.all_numbers &= matches!(&item, ScratchValue::Number(_));
         let items = Arc::make_mut(&mut self.items);
         items.insert(index, item);
         if items.len() > SCRATCH_LIST_LIMIT {
@@ -108,6 +145,7 @@ impl ScratchList {
     pub fn replace(&mut self, index: impl ScratchInput, item: ScratchValue) -> bool {
         if let ListIndex::Item(index) = resolve_index(index, self.items.len(), false) {
             if self.items[index] != item {
+                self.all_numbers &= matches!(&item, ScratchValue::Number(_));
                 Arc::make_mut(&mut self.items)[index] = item;
                 return true;
             }
@@ -162,6 +200,18 @@ impl ScratchList {
             output.push_str(&to_text(item.scratch_view()));
         }
         output
+    }
+}
+
+impl Default for ScratchList {
+    fn default() -> Self {
+        Self::new(Vec::new())
+    }
+}
+
+impl PartialEq for ScratchList {
+    fn eq(&self, other: &Self) -> bool {
+        self.items == other.items
     }
 }
 
@@ -269,8 +319,7 @@ fn resolve_index(index: impl ScratchInput, length: usize, accept_all: bool) -> L
 
 #[cfg(test)]
 mod tests {
-    use super::{SCRATCH_LIST_LIMIT, ScratchList};
-    use crate::runtime::ScratchValue;
+    use super::{SCRATCH_LIST_LIMIT, ScratchList, ScratchValue};
 
     #[test]
     fn preserves_values_and_mutates_with_scratch_indices() {
@@ -379,6 +428,39 @@ mod tests {
         assert_eq!(list.length(), SCRATCH_LIST_LIMIT);
         assert_eq!(list.get("last"), &ScratchValue::Number(2.0));
         assert!(!list.add_generated(1, || ScratchValue::Number(3.0)));
+    }
+
+    #[test]
+    fn numeric_batches_preserve_values_and_clear_without_generic_drop_tracking() {
+        let mut list = ScratchList::new(Vec::with_capacity(SCRATCH_LIST_LIMIT));
+        let mut next = 0.0;
+
+        assert!(list.add_generated_numbers(SCRATCH_LIST_LIMIT, || {
+            next += 1.0;
+            next
+        }));
+        assert!(list.all_numbers);
+        assert_eq!(list.length(), SCRATCH_LIST_LIMIT);
+        assert_eq!(list.get(1.0_f64), &ScratchValue::Number(1.0));
+        assert_eq!(list.get(100_000.0_f64), &ScratchValue::Number(100_000.0));
+        assert_eq!(list.get("last"), &ScratchValue::Number(200_000.0));
+        assert!(list.delete_all());
+        assert!(list.items().is_empty());
+        assert!(list.all_numbers);
+    }
+
+    #[test]
+    fn numeric_storage_hint_tracks_mixed_mutations_without_changing_list_equality() {
+        let mut list = ScratchList::new(vec!["text".into()]);
+        list.replace(1.0_f64, 4.0_f64.into());
+
+        assert!(!list.all_numbers);
+        assert_eq!(list, ScratchList::new(vec![4.0_f64.into()]));
+
+        list.delete_all();
+        assert!(list.all_numbers);
+        assert!(list.add_generated_numbers(1, || 5.0));
+        assert!(list.all_numbers);
     }
 
     #[test]

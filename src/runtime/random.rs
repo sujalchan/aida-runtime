@@ -39,7 +39,8 @@ impl ScratchRandom {
         self.between_with_integer_bounds(from, to, from.fract() == 0.0 && to.fract() == 0.0)
     }
 
-    fn between_with_integer_bounds(&mut self, from: f64, to: f64, integer_bounds: bool) -> f64 {
+    /// sample using preconverted bounds while preserving the integer endpoint rule.
+    pub fn between_with_integer_bounds(&mut self, from: f64, to: f64, integer_bounds: bool) -> f64 {
         let (low, high) = if from <= to { (from, to) } else { (to, from) };
         if low == high {
             return low;
@@ -93,6 +94,11 @@ pub fn scratch_random_constant(from: f64, to: f64, integer_bounds: bool) -> f64 
     })
 }
 
+// borrow the thread generator once when generated loops need many random values.
+pub fn with_scratch_random<R>(use_random: impl FnOnce(&mut ScratchRandom) -> R) -> R {
+    THREAD_RANDOM.with(|random| use_random(&mut random.borrow_mut()))
+}
+
 fn is_scratch_integer(value: ScratchValueView<'_>) -> bool {
     match value {
         ScratchValueView::Number(number) => number.is_nan() || number.fract() == 0.0,
@@ -122,6 +128,23 @@ mod tests {
     fn random_reporter_converts_bounds_using_scratch_number_rules() {
         let value = scratch_random("2", 2.0);
         assert_eq!(value, 2.0);
+    }
+
+    #[test]
+    fn batching_random_samples_preserves_the_thread_random_sequence() {
+        THREAD_RANDOM.with(|random| *random.borrow_mut() = ScratchRandom::seeded(73));
+        let batched = with_scratch_random(|random| {
+            (0..4096)
+                .map(|_| random.between_with_integer_bounds(11.0, 20.0, true))
+                .collect::<Vec<_>>()
+        });
+
+        THREAD_RANDOM.with(|random| *random.borrow_mut() = ScratchRandom::seeded(73));
+        let individual = (0..4096)
+            .map(|_| scratch_random_constant(11.0, 20.0, true))
+            .collect::<Vec<_>>();
+
+        assert_eq!(batched, individual);
     }
 
     #[test]

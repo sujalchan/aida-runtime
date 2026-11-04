@@ -18,7 +18,7 @@ pub use operators::*;
 pub use pacing::{PacingMechanism, PacingMode, SystemPacingMechanism, TickPacer};
 pub use pen::PenColorState;
 #[allow(unused_imports)]
-pub use random::{ScratchRandom, scratch_random, scratch_random_constant};
+pub use random::{ScratchRandom, scratch_random, scratch_random_constant, with_scratch_random};
 #[allow(unused_imports)]
 pub use scheduler::EdgeHatState;
 pub use scheduler::{
