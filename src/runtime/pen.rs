@@ -1,4 +1,4 @@
-use super::{ScratchInput, ScratchValueView, scratch_to_number};
+use super::{PenColorParameter, ScratchInput, ScratchValueView, scratch_to_number};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PenColorState {
@@ -38,25 +38,30 @@ impl PenColorState {
         self.update_rgba();
     }
 
-    pub fn set_or_change_parameter(&mut self, parameter: &str, value: f64, change: bool) {
+    pub fn set_or_change_parameter(
+        &mut self,
+        parameter: impl Into<PenColorParameter>,
+        value: f64,
+        change: bool,
+    ) {
         let value = scratch_to_number(value);
-        match parameter {
-            "color" => {
+        match parameter.into() {
+            PenColorParameter::Color => {
                 self.hue = scratch_wrap_color(value + if change { self.hue } else { 0.0 });
             }
-            "saturation" => {
+            PenColorParameter::Saturation => {
                 self.saturation =
                     (value + if change { self.saturation } else { 0.0 }).clamp(0.0, 100.0);
             }
-            "brightness" => {
+            PenColorParameter::Brightness => {
                 self.brightness =
                     (value + if change { self.brightness } else { 0.0 }).clamp(0.0, 100.0);
             }
-            "transparency" => {
+            PenColorParameter::Transparency => {
                 self.transparency =
                     (value + if change { self.transparency } else { 0.0 }).clamp(0.0, 100.0);
             }
-            _ => return,
+            PenColorParameter::Unsupported => return,
         }
         self.update_rgba();
     }
@@ -213,7 +218,32 @@ fn mix_rgb(first: [f64; 3], second: [f64; 3], fraction: f64) -> [f64; 3] {
 
 #[cfg(test)]
 mod tests {
-    use super::{PenColorState, scratch_to_number};
+    use super::{PenColorParameter, PenColorState, scratch_to_number};
+
+    #[test]
+    fn color_parameter_names_map_to_compact_runtime_values() {
+        assert_eq!(PenColorParameter::from("color"), PenColorParameter::Color);
+        assert_eq!(
+            PenColorParameter::from("saturation"),
+            PenColorParameter::Saturation
+        );
+        assert_eq!(
+            PenColorParameter::from("brightness"),
+            PenColorParameter::Brightness
+        );
+        assert_eq!(
+            PenColorParameter::from("transparency"),
+            PenColorParameter::Transparency
+        );
+        assert_eq!(
+            PenColorParameter::from("unknown"),
+            PenColorParameter::Unsupported
+        );
+        assert_eq!(
+            PenColorParameter::from(String::from("color")),
+            PenColorParameter::Color
+        );
+    }
 
     #[test]
     fn hue_uses_scratch_inclusive_wrap_and_other_parameters_clamp() {

@@ -22,8 +22,8 @@ use winit::{
 
 use super::pipelines::{
     GlyphInstance, GlyphMetadata, MonitorInstance, composite_pipeline, glyph_instance_pipeline,
-    layer_bind_group, monitor_instance_pipeline, pen_pipeline, premultiplied_composite_pipeline,
-    sprite_pipeline, texture_layout, variable_pipeline,
+    layer_bind_group, monitor_instance_pipeline, pen_dot_pipeline, pen_pipeline,
+    premultiplied_composite_pipeline, sprite_pipeline, texture_layout, variable_pipeline,
 };
 use super::sprite::Sprite;
 use super::texture::{LAYER_FORMAT, RenderTexture};
@@ -34,6 +34,7 @@ use super::variables::{
 use super::viewport::StageViewport;
 use super::{SCRATCH_HEIGHT, SCRATCH_WIDTH};
 use crate::runtime::PenCommand;
+use crate::runtime::{PenDot, PenStroke};
 
 pub(crate) enum RenderOutcome {
     Presented,
@@ -79,6 +80,7 @@ pub(crate) struct GraphicsState {
     fading_shadow_bounds: Option<MonitorBounds>,
     drag_shadow_texture_rect: Option<(u32, u32, u32, u32)>,
     pen_pipeline: wgpu::RenderPipeline,
+    pen_dot_pipeline: wgpu::RenderPipeline,
     stamp_sprite_pipeline: wgpu::RenderPipeline,
     stamp_transform_layout: wgpu::BindGroupLayout,
     stamp_transform_buffer: wgpu::Buffer,
@@ -135,8 +137,15 @@ pub(crate) struct GraphicsState {
     gpu_timing: Option<GpuTiming>,
     pen_instances: wgpu::Buffer,
     pen_instance_capacity: usize,
-    pen_instance_data: Vec<PenInstance>,
+    // retain owned cpu batches until presentation so a resize can replay pending strokes.
+    pen_stroke_batches: Vec<PendingPenStrokeBatch>,
+    pen_instance_count: usize,
     pen_uploaded_count: usize,
+    pen_dots: wgpu::Buffer,
+    pen_dot_capacity: usize,
+    pen_dot_batches: Vec<PendingPenDotBatch>,
+    pen_dot_count: usize,
+    pen_dot_uploaded_count: usize,
     pending_pen_ops: Vec<PendingPenOp>,
     pen_texture_dirty: bool,
     pen_clear_pending: bool,
@@ -146,13 +155,20 @@ pub(crate) struct GraphicsState {
     cpu_frame_time_ms: Option<f32>,
 }
 
-#[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
-struct PenInstance {
-    start: [f32; 2],
-    end: [f32; 2],
-    color: [f32; 4],
-    diameter: f32,
+// use the runtime batch layout directly as the gpu vertex-instance layout.
+type PenInstance = PenStroke;
+
+struct PendingPenStrokeBatch {
+    start: usize,
+    strokes: Vec<PenInstance>,
+}
+
+// retain compact point batches until their ordered draw operations are presented.
+type PenDotInstance = PenDot;
+
+struct PendingPenDotBatch {
+    start: usize,
+    dots: Vec<PenDotInstance>,
 }
 
 #[repr(C)]
@@ -220,6 +236,7 @@ struct PendingSpriteStamp {
 
 // preserve the ordering barriers between pen strokes, stamps, and clear operations.
 enum PendingPenOp {
+    Dots { start: u32, end: u32 },
     Strokes { start: u32, end: u32 },
     Stamp(usize),
     Clear,

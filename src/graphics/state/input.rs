@@ -82,9 +82,11 @@ impl GraphicsState {
     pub(crate) fn sync_runtime_snapshot(
         &mut self,
         snapshot: &RuntimeSnapshot,
-        pen_commands: &[crate::runtime::PenCommand],
+        pen_commands: Vec<crate::runtime::PenCommand>,
     ) -> Result<bool, String> {
         // apply the scheduler's ordered pen operations before presenting this frame.
+        // keep the redraw decision after moving the pen batch into renderer-owned storage.
+        let has_pen_commands = !pen_commands.is_empty();
         self.write_pen_commands(pen_commands);
         let timer_sampled_at = Instant::now();
         (self.project_timer_epoch, self.project_timer_sample_millis) = timer_sample_for_snapshot(
@@ -198,7 +200,7 @@ impl GraphicsState {
             self.last_runtime_layers.clone_from(&snapshot.layers);
         }
         Ok(monitors_changed
-            || !pen_commands.is_empty()
+            || has_pen_commands
             || monitor_visibility_changed
             || lists_changed
             || layers_changed

@@ -21,7 +21,7 @@ impl GraphicsState {
         self.recreate_stage_textures();
     }
 
-    pub(crate) fn render_with_submission_ack(&mut self, submitted: impl FnOnce()) -> RenderOutcome {
+    pub(crate) fn render_with_present_ack(&mut self, presented: impl FnOnce()) -> RenderOutcome {
         let Some(viewport) = self.viewport else {
             return RenderOutcome::Unavailable;
         };
@@ -200,13 +200,16 @@ impl GraphicsState {
         }
 
         self.queue.submit([encoder.finish()]);
-        submitted();
         if self.pen_texture_dirty {
             self.pen_texture_dirty = false;
             self.pen_clear_pending = false;
             self.pending_pen_ops.clear();
-            self.pen_instance_data.clear();
+            self.pen_stroke_batches.clear();
+            self.pen_instance_count = 0;
             self.pen_uploaded_count = 0;
+            self.pen_dot_batches.clear();
+            self.pen_dot_count = 0;
+            self.pen_dot_uploaded_count = 0;
             self.pending_sprite_stamps.clear();
             self.pending_stamp_uploaded_count = 0;
         }
@@ -239,6 +242,8 @@ impl GraphicsState {
         }
         self.window.pre_present_notify();
         self.queue.present(frame);
+        // release the scheduler only after this frame has entered the vsynced surface.
+        presented();
         RenderOutcome::Presented
     }
 
@@ -299,6 +304,12 @@ impl GraphicsState {
         });
         for operation in &self.pending_pen_ops[range] {
             match operation {
+                // keep point marks in one instanced draw over their compact buffer.
+                PendingPenOp::Dots { start, end } if start < end => {
+                    pass.set_pipeline(&self.pen_dot_pipeline);
+                    pass.set_vertex_buffer(0, self.pen_dots.slice(..));
+                    pass.draw(0..6, *start..*end);
+                }
                 PendingPenOp::Strokes { start, end } if start < end => {
                     pass.set_pipeline(&self.pen_pipeline);
                     pass.set_vertex_buffer(0, self.pen_instances.slice(..));
@@ -317,7 +328,7 @@ impl GraphicsState {
                     );
                     pass.draw(0..6, 0..1);
                 }
-                PendingPenOp::Strokes { .. } | PendingPenOp::Clear => {}
+                PendingPenOp::Dots { .. } | PendingPenOp::Strokes { .. } | PendingPenOp::Clear => {}
             }
         }
     }
@@ -350,8 +361,8 @@ impl GraphicsState {
                 &self.texture_layout,
                 &self.pen_texture,
                 &self.pen_texture,
-                // keep pen-edge filtering consistent at standard and hd resolutions.
-                &self.stage_linear_sampler,
+                // keep one scratch pen pixel crisp at every output scale.
+                &self.stage_nearest_sampler,
                 &self.zero_uv_offset,
             );
             self.rebuild_pen_texture();

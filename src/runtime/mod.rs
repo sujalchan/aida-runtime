@@ -33,12 +33,8 @@ pub use value::{
 #[derive(Clone, Debug, PartialEq)]
 pub enum PenCommand {
     Clear,
-    Stroke {
-        start: [f32; 2],
-        end: [f32; 2],
-        color: [f32; 4],
-        diameter: f32,
-    },
+    Dots(Vec<PenDot>),
+    Strokes(Vec<PenStroke>),
     Stamp {
         target_name: String,
         position: [f32; 2],
@@ -48,6 +44,56 @@ pub enum PenCommand {
         effects_0: [f32; 4],
         effects_1: [f32; 4],
     },
+}
+
+// store pen-down points without duplicating their center as a line endpoint.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct PenDot {
+    pub position: [f32; 2],
+    pub color: [f32; 4],
+    pub diameter: f32,
+    pub pixel_offset: f32,
+}
+
+// encode fixed pen dropdown choices once in generated code instead of matching strings per block.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PenColorParameter {
+    Color,
+    Saturation,
+    Brightness,
+    Transparency,
+    Unsupported,
+}
+
+impl From<&str> for PenColorParameter {
+    fn from(value: &str) -> Self {
+        match value {
+            "color" => Self::Color,
+            "saturation" => Self::Saturation,
+            "brightness" => Self::Brightness,
+            "transparency" => Self::Transparency,
+            _ => Self::Unsupported,
+        }
+    }
+}
+
+impl From<String> for PenColorParameter {
+    fn from(value: String) -> Self {
+        Self::from(value.as_str())
+    }
+}
+
+// keep adjacent pen marks in one compact buffer so every script path can batch gpu uploads.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct PenStroke {
+    pub start: [f32; 2],
+    pub end: [f32; 2],
+    pub color: [f32; 4],
+    pub diameter: f32,
+    // offset thin marks by half a physical pen-texture pixel at upload time.
+    pub pixel_offset: f32,
 }
 
 #[allow(dead_code)]

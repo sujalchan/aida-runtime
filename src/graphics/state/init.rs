@@ -936,8 +936,8 @@ impl GraphicsState {
             &texture_layout,
             &pen_texture,
             &pen_texture,
-            // interpolate the antialiased pen edge when the stage is scaled.
-            &stage_linear_sampler,
+            // preserve scratch-pixel edges when the pen texture is composited.
+            &stage_nearest_sampler,
             &zero_uv_offset,
         );
         let ui_bind_group = layer_bind_group(
@@ -957,6 +957,7 @@ impl GraphicsState {
             &drag_shadow_uv_offset,
         );
         let pen_pipeline = pen_pipeline(&device);
+        let pen_dot_pipeline = pen_dot_pipeline(&device);
         let pen_composite_pipeline =
             premultiplied_composite_pipeline(&device, config.format, &texture_layout);
         let composite_pipeline = composite_pipeline(&device, config.format, &texture_layout);
@@ -1163,6 +1164,13 @@ impl GraphicsState {
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let pen_dot_capacity = 256;
+        let pen_dots = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("GPU pen dot instances"),
+            size: (pen_dot_capacity * std::mem::size_of::<PenDotInstance>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let mut state = Self {
             window,
             surface,
@@ -1202,6 +1210,7 @@ impl GraphicsState {
             fading_shadow_bounds: None,
             drag_shadow_texture_rect: None,
             pen_pipeline,
+            pen_dot_pipeline,
             stamp_sprite_pipeline,
             stamp_transform_layout,
             stamp_transform_buffer,
@@ -1256,8 +1265,14 @@ impl GraphicsState {
             gpu_timing,
             pen_instances,
             pen_instance_capacity,
-            pen_instance_data: Vec::new(),
+            pen_stroke_batches: Vec::new(),
+            pen_instance_count: 0,
             pen_uploaded_count: 0,
+            pen_dots,
+            pen_dot_capacity,
+            pen_dot_batches: Vec::new(),
+            pen_dot_count: 0,
+            pen_dot_uploaded_count: 0,
             pending_pen_ops: Vec::new(),
             pen_texture_dirty: true,
             pen_clear_pending: true,
@@ -1272,7 +1287,7 @@ impl GraphicsState {
         }
         state.prune_unused_costume_mips();
         state.ensure_backdrop_texture(state.backdrop_index)?;
-        state.sync_runtime_snapshot(&initial_snapshot, &[])?;
+        state.sync_runtime_snapshot(&initial_snapshot, Vec::new())?;
         Ok(state)
     }
 }

@@ -6,8 +6,8 @@ pub enum ScratchValue {
 }
 
 use super::{
-    PenColorState, PenCommand, ScratchList, scratch_number_operand, scratch_random, scratch_string,
-    scratch_to_number,
+    PenColorParameter, PenColorState, PenCommand, PenDot, PenStroke, ScratchList,
+    scratch_number_operand, scratch_random, scratch_to_number,
 };
 use std::collections::HashSet;
 use std::fmt::Debug;
@@ -341,6 +341,14 @@ pub fn list_snapshot_key(target: &str, name: &str, id: &str, instance_id: Option
     format!("{target}::{name}#{id}@{instance}")
 }
 
+#[derive(Debug, Clone, Copy)]
+struct CachedFenceOffsets {
+    geometry: SpriteFenceGeometry,
+    direction: f64,
+    size: f64,
+    points: [(f64, f64); 4],
+}
+
 #[derive(Debug, Clone)]
 struct ScratchTargetInstance {
     target: usize,
@@ -359,6 +367,7 @@ struct ScratchTargetInstance {
     pen_down: bool,
     pen_size: f64,
     costume_index: usize,
+    fence_offsets: Option<CachedFenceOffsets>,
 }
 
 /// names and scope information for one shared-state slot.
@@ -712,6 +721,7 @@ impl ScratchState {
                 pen_down: false,
                 pen_size: 1.0,
                 costume_index: 0,
+                fence_offsets: None,
             }],
             current_instance: 0,
             pending_clones: Vec::new(),
@@ -762,6 +772,7 @@ impl ScratchState {
                 pen_down: false,
                 pen_size: 1.0,
                 costume_index: 0,
+                fence_offsets: None,
             }],
             current_instance: 0,
             pending_clones: Vec::new(),
@@ -817,6 +828,7 @@ impl ScratchState {
                 pen_down: false,
                 pen_size: 1.0,
                 costume_index: 0,
+                fence_offsets: None,
             }],
             current_instance: 0,
             pending_clones: Vec::new(),
@@ -1501,11 +1513,16 @@ impl ScratchState {
     }
 
     /// update the current target's pen color using scratch's parameter ranges.
-    pub fn set_pen_color_parameter(&mut self, parameter: ScratchValue, value: f64, change: bool) {
-        let parameter = scratch_string(parameter);
+    // accept the generated menu string directly so fixed dropdowns allocate nothing per block.
+    pub fn set_pen_color_parameter(
+        &mut self,
+        parameter: impl Into<PenColorParameter>,
+        value: f64,
+        change: bool,
+    ) {
         self.instances[self.current_instance]
             .pen_color
-            .set_or_change_parameter(&parameter, value, change);
+            .set_or_change_parameter(parameter, value, change);
     }
 
     /// set the current target's pen color from a scratch rgb input.
@@ -1522,18 +1539,21 @@ impl ScratchState {
 
     pub fn pen_down(&mut self) {
         let instance_id = self.current_instance;
-        let instance = &mut self.instances[instance_id];
-        if instance.is_stage {
-            return;
-        }
-        instance.pen_down = true;
-        let point = [instance.x as f32, instance.y as f32];
-        self.pending_pen_commands.push(PenCommand::Stroke {
-            start: point,
-            end: point,
-            color: instance.pen_color.rgba,
-            diameter: instance.pen_size as f32,
-        });
+        let stroke = {
+            let instance = &mut self.instances[instance_id];
+            if instance.is_stage {
+                return;
+            }
+            instance.pen_down = true;
+            let point = [instance.x as f32, instance.y as f32];
+            PenDot {
+                position: point,
+                color: instance.pen_color.rgba,
+                diameter: instance.pen_size as f32,
+                pixel_offset: 0.0,
+            }
+        };
+        self.push_pen_dot(stroke);
         self.request_redraw();
     }
 
@@ -1579,6 +1599,26 @@ impl ScratchState {
         std::mem::take(&mut self.pending_pen_commands)
     }
 
+    #[inline]
+    fn push_pen_dot(&mut self, dot: PenDot) {
+        // group adjacent pen-down points into a compact renderer upload.
+        match self.pending_pen_commands.last_mut() {
+            Some(PenCommand::Dots(dots)) => dots.push(dot),
+            _ => self.pending_pen_commands.push(PenCommand::Dots(vec![dot])),
+        }
+    }
+
+    #[inline]
+    fn push_pen_stroke(&mut self, stroke: PenStroke) {
+        // retain marks in order while grouping adjacent strokes for one renderer upload.
+        match self.pending_pen_commands.last_mut() {
+            Some(PenCommand::Strokes(strokes)) => strokes.push(stroke),
+            _ => self
+                .pending_pen_commands
+                .push(PenCommand::Strokes(vec![stroke])),
+        }
+    }
+
     pub fn set_legacy_pen_hue(&mut self, hue: f64) {
         self.instances[self.current_instance]
             .pen_color
@@ -1613,56 +1653,88 @@ impl ScratchState {
             return;
         }
         let (x, y) = self.fenced_position(self.current_instance, x, y);
-        let instance = &mut self.instances[self.current_instance];
-        let old = [instance.x as f32, instance.y as f32];
-        let changed = instance.x != x || instance.y != y;
-        instance.x = x;
-        instance.y = y;
-        let new = [x as f32, y as f32];
-        if changed && instance.pen_down {
-            self.pending_pen_commands.push(PenCommand::Stroke {
+        let (changed, stroke) = {
+            let instance = &mut self.instances[self.current_instance];
+            let old = [instance.x as f32, instance.y as f32];
+            let changed = instance.x != x || instance.y != y;
+            instance.x = x;
+            instance.y = y;
+            let new = [x as f32, y as f32];
+            let stroke = (changed && instance.pen_down).then_some(PenStroke {
                 start: old,
                 end: new,
                 color: instance.pen_color.rgba,
                 diameter: instance.pen_size as f32,
+                pixel_offset: 0.0,
             });
+            (changed, stroke)
+        };
+        if let Some(stroke) = stroke {
+            self.push_pen_stroke(stroke);
         }
         if changed {
             self.request_redraw();
         }
     }
 
-    fn fenced_position(&self, instance_id: usize, x: f64, y: f64) -> (f64, f64) {
+    fn fenced_position(&mut self, instance_id: usize, x: f64, y: f64) -> (f64, f64) {
         let instance = &self.instances[instance_id];
-        let Some(geometry) = self.fence_geometry.get(instance.target).copied().flatten() else {
+        let target = instance.target;
+        let direction = instance.direction;
+        let size = instance.size;
+        let instance_x = instance.x;
+        let instance_y = instance.y;
+        let Some(geometry) = self.fence_geometry.get(target).copied().flatten() else {
             return (x, y);
         };
-        let radians = (90.0 - instance.direction).to_radians();
-        let cos = radians.cos();
-        let sin = radians.sin();
-        let scale = instance.size / 100.0;
-        let points = [
-            (-geometry.rotation_center_x, geometry.rotation_center_y),
-            (
-                geometry.width - geometry.rotation_center_x,
-                geometry.rotation_center_y,
-            ),
-            (
-                -geometry.rotation_center_x,
-                geometry.rotation_center_y - geometry.height,
-            ),
-            (
-                geometry.width - geometry.rotation_center_x,
-                geometry.rotation_center_y - geometry.height,
-            ),
-        ];
+        let cache = self.instances[instance_id].fence_offsets;
+        let offsets = cache
+            .filter(|cache| {
+                cache.geometry == geometry && cache.direction == direction && cache.size == size
+            })
+            .map(|cache| cache.points)
+            .unwrap_or_else(|| {
+                // cache the rotated costume corners until its bounds or transform changes.
+                let radians = (90.0 - direction).to_radians();
+                let cos = radians.cos();
+                let sin = radians.sin();
+                let scale = size / 100.0;
+                let corners = [
+                    (-geometry.rotation_center_x, geometry.rotation_center_y),
+                    (
+                        geometry.width - geometry.rotation_center_x,
+                        geometry.rotation_center_y,
+                    ),
+                    (
+                        -geometry.rotation_center_x,
+                        geometry.rotation_center_y - geometry.height,
+                    ),
+                    (
+                        geometry.width - geometry.rotation_center_x,
+                        geometry.rotation_center_y - geometry.height,
+                    ),
+                ];
+                let points = corners.map(|(local_x, local_y)| {
+                    (
+                        (local_x * cos - local_y * sin) * scale,
+                        (local_x * sin + local_y * cos) * scale,
+                    )
+                });
+                self.instances[instance_id].fence_offsets = Some(CachedFenceOffsets {
+                    geometry,
+                    direction,
+                    size,
+                    points,
+                });
+                points
+            });
         let mut min_x = f64::INFINITY;
         let mut max_x = f64::NEG_INFINITY;
         let mut min_y = f64::INFINITY;
         let mut max_y = f64::NEG_INFINITY;
-        for (local_x, local_y) in points {
-            let tx = (local_x * cos - local_y * sin) * scale + instance.x;
-            let ty = (local_x * sin + local_y * cos) * scale + instance.y;
+        for (offset_x, offset_y) in offsets {
+            let tx = offset_x + instance_x;
+            let ty = offset_y + instance_y;
             min_x = min_x.min(tx);
             max_x = max_x.max(tx);
             min_y = min_y.min(ty);
@@ -1672,19 +1744,19 @@ impl ScratchState {
         let margin = 15.0_f64.min(inset);
         let fence_x = 240.0 - margin;
         let fence_y = 180.0 - margin;
-        let dx = x - instance.x;
-        let dy = y - instance.y;
+        let dx = x - instance_x;
+        let dy = y - instance_y;
         let mut fenced_x = x;
         let mut fenced_y = y;
         if max_x + dx < -fence_x {
-            fenced_x = (instance.x - (fence_x + max_x)).ceil();
+            fenced_x = (instance_x - (fence_x + max_x)).ceil();
         } else if min_x + dx > fence_x {
-            fenced_x = (instance.x + (fence_x - min_x)).floor();
+            fenced_x = (instance_x + (fence_x - min_x)).floor();
         }
         if max_y + dy < -fence_y {
-            fenced_y = (instance.y - (fence_y + max_y)).ceil();
+            fenced_y = (instance_y - (fence_y + max_y)).ceil();
         } else if min_y + dy > fence_y {
-            fenced_y = (instance.y + (fence_y - min_y)).floor();
+            fenced_y = (instance_y + (fence_y - min_y)).floor();
         }
         (fenced_x, fenced_y)
     }
@@ -1735,6 +1807,7 @@ impl ScratchState {
             pen_down: false,
             pen_size: 1.0,
             costume_index: 0,
+            fence_offsets: None,
         });
         id
     }
@@ -1810,6 +1883,7 @@ impl ScratchState {
             pen_down: self.instances[source_instance].pen_down,
             pen_size: self.instances[source_instance].pen_size,
             costume_index: self.instances[source_instance].costume_index,
+            fence_offsets: None,
         };
         for (slot, metadata) in self.variables.iter().enumerate() {
             if !metadata.is_stage && metadata.target_index == target {
@@ -2000,8 +2074,8 @@ fn local_datetime() -> OffsetDateTime {
 #[cfg(test)]
 mod tests {
     use super::{
-        BubbleKind, ObservableEvent, RuntimeInputEvent, ScratchListMetadata, ScratchState,
-        ScratchValue, ScratchVariableMetadata, SpriteFenceGeometry,
+        BubbleKind, ObservableEvent, PenDot, PenStroke, RuntimeInputEvent, ScratchListMetadata,
+        ScratchState, ScratchValue, ScratchVariableMetadata, SpriteFenceGeometry,
     };
     use crate::runtime::PenCommand;
     use crate::runtime::{ScratchList, list_snapshot_key, scratch_to_number};
@@ -2022,13 +2096,20 @@ mod tests {
         state.set_xy(50.0, 60.0);
         let commands = state.take_pending_pen_commands();
 
-        assert!(matches!(commands.as_slice(), [
-            PenCommand::Stroke { start: [10.0, 20.0], end: [10.0, 20.0], color: [0.0, 1.0, 0.0, 1.0], diameter: 6.0 },
-            PenCommand::Stroke { start: [10.0, 20.0], end: [30.0, 40.0], color: [0.0, 1.0, 0.0, 1.0], diameter: 6.0 },
-            PenCommand::Stamp { target_name, position: [30.0, 40.0], costume_index: 1, .. },
-            PenCommand::Clear,
-            PenCommand::Stroke { start: [30.0, 40.0], end: [50.0, 60.0], color: [0.0, 1.0, 0.0, 1.0], diameter: 6.0 }
-        ] if target_name == "Sprite1"));
+        assert!(matches!(
+            commands.as_slice(),
+            [
+                PenCommand::Dots(points),
+                PenCommand::Strokes(first),
+                PenCommand::Stamp { target_name, position: [30.0, 40.0], costume_index: 1, .. },
+                PenCommand::Clear,
+                PenCommand::Strokes(last)
+            ] if points == &[PenDot { position: [10.0, 20.0], color: [0.0, 1.0, 0.0, 1.0], diameter: 6.0, pixel_offset: 0.0 }] && first == &[
+                PenStroke { start: [10.0, 20.0], end: [30.0, 40.0], color: [0.0, 1.0, 0.0, 1.0], diameter: 6.0, pixel_offset: 0.0 }
+            ] && target_name == "Sprite1" && last == &[
+                PenStroke { start: [30.0, 40.0], end: [50.0, 60.0], color: [0.0, 1.0, 0.0, 1.0], diameter: 6.0, pixel_offset: 0.0 }
+            ]
+        ));
     }
 
     #[test]
@@ -2049,30 +2130,15 @@ mod tests {
         state.set_xy(2.0, 3.0);
         let commands = state.take_pending_pen_commands();
 
-        assert!(matches!(
-            commands.as_slice(),
-            [
-                PenCommand::Stroke { .. },
-                PenCommand::Stroke {
-                    start: [0.0, 0.0],
-                    end: [5.0, 7.0],
-                    color: [0.0, 1.0, 0.0, 1.0],
-                    diameter: 6.0
-                },
-                PenCommand::Stroke {
-                    start: [5.0, 7.0],
-                    end: [8.0, 9.0],
-                    color: [1.0, 0.0, 0.0, 1.0],
-                    diameter: 2.0
-                },
-                PenCommand::Stroke {
-                    start: [0.0, 0.0],
-                    end: [2.0, 3.0],
-                    color: [0.0, 1.0, 0.0, 1.0],
-                    diameter: 6.0
-                }
-            ]
-        ));
+        assert!(
+            matches!(commands.as_slice(), [PenCommand::Dots(points), PenCommand::Strokes(strokes)] if points == &[
+                PenDot { position: [0.0, 0.0], color: [0.0, 1.0, 0.0, 1.0], diameter: 6.0, pixel_offset: 0.0 }
+            ] && strokes == &[
+                PenStroke { start: [0.0, 0.0], end: [5.0, 7.0], color: [0.0, 1.0, 0.0, 1.0], diameter: 6.0, pixel_offset: 0.0 },
+                PenStroke { start: [5.0, 7.0], end: [8.0, 9.0], color: [1.0, 0.0, 0.0, 1.0], diameter: 2.0, pixel_offset: 0.0 },
+                PenStroke { start: [0.0, 0.0], end: [2.0, 3.0], color: [0.0, 1.0, 0.0, 1.0], diameter: 6.0, pixel_offset: 0.0 }
+            ])
+        );
         assert_eq!(state.instances[clone].costume_index, 1);
     }
 
@@ -2333,6 +2399,44 @@ mod tests {
         state.remove_clones();
         assert_eq!(state.observable_snapshot(2).layers.len(), 1);
         assert!(!state.instance_is_alive(second));
+    }
+
+    // reuse rotated costume bounds until the sprite transform or costume changes.
+    #[test]
+    fn fence_offsets_reuse_and_invalidate_cached_transform_geometry() {
+        let mut state = ScratchState::new(Vec::new());
+        let first_geometry = SpriteFenceGeometry {
+            width: 120.0,
+            height: 80.0,
+            rotation_center_x: 60.0,
+            rotation_center_y: 40.0,
+        };
+        state.set_target_fence_geometry(0, first_geometry);
+        state.set_xy(20.0, 30.0);
+        let original_cache = state.instances[0].fence_offsets.unwrap();
+
+        state.set_xy(25.0, 35.0);
+        assert_eq!(
+            state.instances[0].fence_offsets.unwrap().points,
+            original_cache.points
+        );
+
+        state.set_direction(0.0);
+        state.set_xy(25.0, 35.0);
+        let rotated_cache = state.instances[0].fence_offsets.unwrap();
+        assert_eq!(rotated_cache.direction, 0.0);
+        assert_ne!(rotated_cache.points, original_cache.points);
+
+        let second_geometry = SpriteFenceGeometry {
+            width: 200.0,
+            ..first_geometry
+        };
+        state.set_target_fence_geometry(0, second_geometry);
+        state.set_xy(25.0, 35.0);
+        assert_eq!(
+            state.instances[0].fence_offsets.unwrap().geometry,
+            second_geometry
+        );
     }
 
     #[test]

@@ -30,8 +30,11 @@ fn vs_main(
     @location(1) end: vec2<f32>,
     @location(2) color: vec4<f32>,
     @location(3) diameter: f32,
+    @location(4) pixel_offset: f32,
 ) -> VertexOutput {
-    let delta = end - start;
+    let aligned_start = start + vec2<f32>(pixel_offset);
+    let aligned_end = end + vec2<f32>(pixel_offset);
+    let delta = aligned_end - aligned_start;
     let line_length = length(delta);
     let half_width = max(diameter, 1.0) * 0.5;
     let direction = select(vec2<f32>(1.0, 0.0), delta / max(line_length, 1e-5), line_length > 1e-5);
@@ -41,7 +44,7 @@ fn vs_main(
     let raster_margin = 1.0;
     let along = mix(-half_width - raster_margin, line_length + half_width + raster_margin, corner.x);
     let across = mix(-half_width - raster_margin, half_width + raster_margin, corner.y);
-    let stage_position = start + direction * along + normal * across;
+    let stage_position = aligned_start + direction * along + normal * across;
 
     var output: VertexOutput;
     output.position = vec4<f32>(
@@ -52,6 +55,36 @@ fn vs_main(
     );
     output.line_position = vec2<f32>(along, across);
     output.line_length = line_length;
+    output.half_width = half_width;
+    output.color = vec4<f32>(srgb_to_linear(color.rgb), color.a);
+    return output;
+}
+
+@vertex
+fn vs_dot(
+    @builtin(vertex_index) vertex_index: u32,
+    @location(0) position: vec2<f32>,
+    @location(1) color: vec4<f32>,
+    @location(2) diameter: f32,
+    @location(3) pixel_offset: f32,
+) -> VertexOutput {
+    let half_width = max(diameter, 1.0) * 0.5;
+    let corner = quad_corner(vertex_index);
+    let raster_margin = 1.0;
+    let along = mix(-half_width - raster_margin, half_width + raster_margin, corner.x);
+    let across = mix(-half_width - raster_margin, half_width + raster_margin, corner.y);
+    let point_position = position + vec2<f32>(pixel_offset);
+    let stage_position = point_position + vec2<f32>(along, across);
+
+    var output: VertexOutput;
+    output.position = vec4<f32>(
+        stage_position.x * (2.0 / 480.0),
+        stage_position.y * (2.0 / 360.0),
+        0.0,
+        1.0,
+    );
+    output.line_position = vec2<f32>(along, across);
+    output.line_length = 0.0;
     output.half_width = half_width;
     output.color = vec4<f32>(srgb_to_linear(color.rgb), color.a);
     return output;

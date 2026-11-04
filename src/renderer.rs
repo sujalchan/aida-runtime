@@ -118,7 +118,7 @@ impl RendererApp {
         };
         self.pending_snapshot_tick = snapshot.tick;
         if let Some(graphics) = self.graphics.as_mut() {
-            match graphics.sync_runtime_snapshot(&snapshot, &pen_commands) {
+            match graphics.sync_runtime_snapshot(&snapshot, pen_commands) {
                 Ok(true) => {
                     graphics.window().request_redraw();
                     self.redraw_pending = true;
@@ -164,7 +164,7 @@ impl RendererApp {
             self.dev_mode && (self.dragging_variable || graphics.variable_shadow_is_animating());
         let tick = self.pending_snapshot_tick;
         let acknowledgement_sender = &self.acknowledgement_sender;
-        match graphics.render_with_submission_ack(|| {
+        match graphics.render_with_present_ack(|| {
             let _ = acknowledgement_sender.send(tick);
         }) {
             RenderOutcome::Presented => {

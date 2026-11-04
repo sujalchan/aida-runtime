@@ -1,8 +1,21 @@
 use wgpu::Device;
 
 use super::super::texture::{LAYER_FORMAT, RenderTexture};
-const PEN_INSTANCE_ATTRIBUTES: [wgpu::VertexAttribute; 4] =
-    wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x4, 3 => Float32];
+use crate::runtime::{PenDot, PenStroke};
+
+const PEN_INSTANCE_ATTRIBUTES: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![
+    0 => Float32x2,
+    1 => Float32x2,
+    2 => Float32x4,
+    3 => Float32,
+    4 => Float32
+];
+const PEN_DOT_INSTANCE_ATTRIBUTES: [wgpu::VertexAttribute; 4] = wgpu::vertex_attr_array![
+    0 => Float32x2,
+    1 => Float32x4,
+    2 => Float32,
+    3 => Float32
+];
 
 pub(crate) fn pen_pipeline(device: &Device) -> wgpu::RenderPipeline {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -17,9 +30,45 @@ pub(crate) fn pen_pipeline(device: &Device) -> wgpu::RenderPipeline {
             entry_point: Some("vs_main"),
             compilation_options: Default::default(),
             buffers: &[Some(wgpu::VertexBufferLayout {
-                array_stride: 36,
+                array_stride: std::mem::size_of::<PenStroke>() as u64,
                 step_mode: wgpu::VertexStepMode::Instance,
                 attributes: &PEN_INSTANCE_ATTRIBUTES,
+            })],
+        },
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_main"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: LAYER_FORMAT,
+                blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+pub(crate) fn pen_dot_pipeline(device: &Device) -> wgpu::RenderPipeline {
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("GPU pen dot shader"),
+        source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/pen.wgsl").into()),
+    });
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("GPU pen dot pipeline"),
+        layout: None,
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_dot"),
+            compilation_options: Default::default(),
+            buffers: &[Some(wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<PenDot>() as u64,
+                step_mode: wgpu::VertexStepMode::Instance,
+                attributes: &PEN_DOT_INSTANCE_ATTRIBUTES,
             })],
         },
         primitive: wgpu::PrimitiveState::default(),

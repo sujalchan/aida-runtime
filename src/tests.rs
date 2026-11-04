@@ -5,9 +5,10 @@ use crate::{
     program::GeneratedProgram,
     project_window_title, run_headless,
     runtime::{
-        Clock, PacingMechanism, PacingMode, PenCommand, ResumableScript, RuntimeInputEvent,
-        RuntimeSnapshot, SchedulerStatus, ScratchState, ScratchValue, ScratchVariableMetadata,
-        ScriptScheduler, ScriptStatus, VariableSnapshot, variable_snapshot_key,
+        Clock, PacingMechanism, PacingMode, PenCommand, PenStroke, ResumableScript,
+        RuntimeInputEvent, RuntimeSnapshot, SchedulerStatus, ScratchState, ScratchValue,
+        ScratchVariableMetadata, ScriptScheduler, ScriptStatus, VariableSnapshot,
+        variable_snapshot_key,
     },
     wait_for_renderer,
 };
@@ -18,12 +19,13 @@ fn pen_command_batches_accumulate_across_coalesced_snapshots_in_order() {
     enqueue_pen_commands(&pending, vec![PenCommand::Clear]);
     enqueue_pen_commands(
         &pending,
-        vec![PenCommand::Stroke {
+        vec![PenCommand::Strokes(vec![PenStroke {
             start: [1.0, 2.0],
             end: [3.0, 4.0],
             color: [1.0, 0.0, 0.0, 1.0],
             diameter: 2.0,
-        }],
+            pixel_offset: 0.0,
+        }])],
     );
     let commands = std::mem::take(
         &mut *pending
@@ -33,7 +35,7 @@ fn pen_command_batches_accumulate_across_coalesced_snapshots_in_order() {
 
     assert!(matches!(
         commands.as_slice(),
-        [PenCommand::Clear, PenCommand::Stroke { .. }]
+        [PenCommand::Clear, PenCommand::Strokes(_)]
     ));
 }
 
