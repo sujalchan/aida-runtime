@@ -1,5 +1,7 @@
 use super::*;
-use crate::runtime::{RuntimeSnapshot, list_snapshot_key, variable_snapshot_key};
+use crate::runtime::{
+    RuntimeSnapshot, ScratchRotationStyle, list_snapshot_key, variable_snapshot_key,
+};
 
 struct SpriteAsset {
     target_name: String,
@@ -50,14 +52,17 @@ fn sprite_transform(
     logical_size: [f32; 2],
     rotation_center: [f32; 2],
 ) -> SpriteTransform {
+    let style = ScratchRotationStyle::from_scratch(&target.rotation_style).unwrap_or_default();
+    let (direction, flip_x) = style.rendered_direction_and_flip(target.direction);
     SpriteTransform {
         position: [target.x as f32, target.y as f32],
         logical_size,
         rotation_center,
-        direction: target.direction as f32,
+        direction: direction as f32,
         scale: target.size as f32 / 100.0,
         visible: if target.visible { 1.0 } else { 0.0 },
-        padding: [0.0; 3],
+        flip_x: flip_x as f32,
+        padding: [0.0; 2],
         effects_0: [0.0; 4],
         effects_1: [0.0; 4],
     }

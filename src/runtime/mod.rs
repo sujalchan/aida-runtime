@@ -29,12 +29,13 @@ pub(crate) use sound::{SoundParameters, SoundRuntime};
 pub use tick::run_tick;
 #[allow(unused_imports)]
 pub use value::pointer_click_activates;
+pub use value::scratch_motion_coordinate;
 #[allow(unused_imports)]
 pub use value::{
     BubbleKind, BubbleSnapshot, LayerSnapshot, ListSnapshot, ObservableEvent, ReporterSnapshot,
-    RuntimeInputEvent, RuntimeSnapshot, ScratchInput, ScratchListMetadata, ScratchSoundEffect,
-    ScratchState, ScratchValue, ScratchValueView, ScratchVariableMetadata, SpriteFenceGeometry,
-    VariableSnapshot, list_snapshot_key, variable_snapshot_key,
+    RuntimeInputEvent, RuntimeSnapshot, ScratchInput, ScratchListMetadata, ScratchRotationStyle,
+    ScratchSoundEffect, ScratchState, ScratchValue, ScratchValueView, ScratchVariableMetadata,
+    SpriteFenceGeometry, VariableSnapshot, list_snapshot_key, variable_snapshot_key,
 };
 
 #[derive(Clone, Debug, PartialEq)]

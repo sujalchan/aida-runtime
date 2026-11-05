@@ -99,6 +99,72 @@ impl Sprite {
         ]
     }
 
+    // derive the same opaque-pixel hull used by scratch's tight drawable bounds.
+    pub(crate) fn opaque_bounds_hull(&self, bitmap_resolution: f64) -> Vec<[f64; 2]> {
+        let (source_width, source_height) = self.source_size();
+        let (width, height) = match &self.source {
+            // scratch's SVG canvas dimensions truncate fractional natural sizes at 1x.
+            SpriteSource::Svg(_) => (
+                source_width.floor().max(1.0) as u32,
+                source_height.floor().max(1.0) as u32,
+            ),
+            SpriteSource::Png(source) => (source.width(), source.height()),
+            SpriteSource::Empty => return Vec::new(),
+        };
+        let Some(mut pixmap) = tiny_skia::Pixmap::new(width, height) else {
+            return Vec::new();
+        };
+        match &self.source {
+            SpriteSource::Svg(tree) => {
+                resvg::render(tree, tiny_skia::Transform::identity(), &mut pixmap.as_mut());
+            }
+            SpriteSource::Png(source) => pixmap.draw_pixmap(
+                0,
+                0,
+                source.as_ref(),
+                &tiny_skia::PixmapPaint::default(),
+                tiny_skia::Transform::identity(),
+                None,
+            ),
+            SpriteSource::Empty => return Vec::new(),
+        }
+
+        let logical_scale = bitmap_resolution.max(1.0);
+        let logical_width = source_width as f64 / logical_scale;
+        let logical_height = source_height as f64 / logical_scale;
+        let row_bytes = width as usize * 4;
+        let mut edge_points = Vec::with_capacity(logical_height.ceil() as usize * 2);
+        for sample_y in 0..logical_height.ceil() as usize {
+            let texture_y =
+                (sample_y as f64 / logical_height * (height - 1) as f64).floor() as usize;
+            let mut first = None;
+            let mut last = 0;
+            for sample_x in 0..logical_width.ceil() as usize {
+                let texture_x =
+                    (sample_x as f64 / logical_width * (width - 1) as f64).floor() as usize;
+                let touches = (texture_y..=texture_y + 1).any(|y| {
+                    (texture_x..=texture_x + 1).any(|x| {
+                        x < width as usize
+                            && y < height as usize
+                            && pixmap.data()[y * row_bytes + x * 4 + 3] != 0
+                    })
+                });
+                if touches {
+                    first.get_or_insert(sample_x);
+                    last = sample_x;
+                }
+            }
+            if let Some(first) = first {
+                // scratch's hull samples use logical integer coordinates, not texel centers.
+                edge_points.push([first as f64, sample_y as f64]);
+                if last != first {
+                    edge_points.push([last as f64, sample_y as f64]);
+                }
+            }
+        }
+        convex_hull(edge_points)
+    }
+
     pub(crate) fn texture_size(&self, raster_scale: f32) -> (u32, u32) {
         let (width, height) = self.source_size();
         let scale = if self.is_vector() {
@@ -234,6 +300,42 @@ impl Sprite {
         }
         Ok(pixmap)
     }
+}
+
+// use a monotone-chain hull over scanline extremes instead of retaining every opaque pixel.
+fn convex_hull(mut points: Vec<[f64; 2]>) -> Vec<[f64; 2]> {
+    points.sort_by(|left, right| {
+        left[0]
+            .total_cmp(&right[0])
+            .then_with(|| left[1].total_cmp(&right[1]))
+    });
+    points.dedup();
+    if points.len() <= 2 {
+        return points;
+    }
+
+    let cross = |origin: [f64; 2], first: [f64; 2], second: [f64; 2]| {
+        (first[0] - origin[0]) * (second[1] - origin[1])
+            - (first[1] - origin[1]) * (second[0] - origin[0])
+    };
+    let mut hull = Vec::with_capacity(points.len() * 2);
+    for point in &points {
+        while hull.len() >= 2 && cross(hull[hull.len() - 2], hull[hull.len() - 1], *point) <= 0.0 {
+            hull.pop();
+        }
+        hull.push(*point);
+    }
+    let lower_len = hull.len();
+    for point in points.iter().rev().skip(1) {
+        while hull.len() > lower_len
+            && cross(hull[hull.len() - 2], hull[hull.len() - 1], *point) <= 0.0
+        {
+            hull.pop();
+        }
+        hull.push(*point);
+    }
+    hull.pop();
+    hull
 }
 
 fn is_zero_sized_svg(bytes: &[u8]) -> bool {

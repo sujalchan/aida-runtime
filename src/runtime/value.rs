@@ -36,6 +36,67 @@ fn scratch_direction(direction: f64) -> f64 {
     direction - (((direction + 179.0) / 360.0).floor() * 360.0)
 }
 
+// match scratch's display precision without changing the stored target coordinates.
+pub fn scratch_motion_coordinate(coordinate: f64) -> f64 {
+    let rounded = coordinate.round();
+    if (coordinate - rounded).abs() < 1e-9 {
+        rounded
+    } else {
+        coordinate
+    }
+}
+
+fn costume_corners(geometry: &SpriteFenceGeometry) -> [(f64, f64); 4] {
+    [
+        (0.0, 0.0),
+        (geometry.width, 0.0),
+        (0.0, geometry.height),
+        (geometry.width, geometry.height),
+    ]
+}
+
+fn transform_costume_point(
+    x: f64,
+    y: f64,
+    rotation_center_x: f64,
+    rotation_center_y: f64,
+    cos: f64,
+    sin: f64,
+    flip_x: f64,
+    scale: f64,
+) -> (f64, f64) {
+    let local_x = (x - rotation_center_x) * flip_x * scale;
+    let local_y = (rotation_center_y - y) * scale;
+    (local_x * cos - local_y * sin, local_x * sin + local_y * cos)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ScratchRotationStyle {
+    #[default]
+    AllAround,
+    LeftRight,
+    DontRotate,
+}
+
+impl ScratchRotationStyle {
+    pub fn from_scratch(value: &str) -> Option<Self> {
+        match value {
+            "all around" => Some(Self::AllAround),
+            "left-right" => Some(Self::LeftRight),
+            "don't rotate" => Some(Self::DontRotate),
+            _ => None,
+        }
+    }
+
+    pub fn rendered_direction_and_flip(self, direction: f64) -> (f64, f64) {
+        match self {
+            Self::AllAround => (direction, 1.0),
+            Self::LeftRight => (90.0, if direction < 0.0 { -1.0 } else { 1.0 }),
+            Self::DontRotate => (90.0, 1.0),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScratchSoundEffect {
     Pitch,
@@ -392,6 +453,7 @@ pub struct LayerSnapshot {
     pub x: f64,
     pub y: f64,
     pub direction: f64,
+    pub rotation_style: ScratchRotationStyle,
     pub size: f64,
     pub visible: bool,
     // preserve costume selection per sprite instance in renderer snapshots.
@@ -399,12 +461,13 @@ pub struct LayerSnapshot {
     pub bubble: Option<BubbleSnapshot>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct SpriteFenceGeometry {
     pub width: f64,
     pub height: f64,
     pub rotation_center_x: f64,
     pub rotation_center_y: f64,
+    pub bounds_hull: Option<Vec<[f64; 2]>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -470,9 +533,10 @@ pub fn list_snapshot_key(target: &str, name: &str, id: &str, instance_id: Option
 
 #[derive(Debug, Clone, Copy)]
 struct CachedFenceOffsets {
-    geometry: SpriteFenceGeometry,
+    geometry: [f64; 4],
     direction: f64,
     size: f64,
+    rotation_style: ScratchRotationStyle,
     points: [(f64, f64); 4],
 }
 
@@ -485,6 +549,7 @@ struct ScratchTargetInstance {
     x: f64,
     y: f64,
     direction: f64,
+    rotation_style: ScratchRotationStyle,
     size: f64,
     visible: bool,
     values: Vec<Option<ScratchValue>>,
@@ -848,6 +913,7 @@ impl ScratchState {
                 x: 0.0,
                 y: 0.0,
                 direction: 90.0,
+                rotation_style: ScratchRotationStyle::AllAround,
                 size: 100.0,
                 visible: true,
                 values: Vec::new(),
@@ -904,6 +970,7 @@ impl ScratchState {
                 x: 0.0,
                 y: 0.0,
                 direction: 90.0,
+                rotation_style: ScratchRotationStyle::AllAround,
                 size: 100.0,
                 visible: true,
                 values: Vec::new(),
@@ -965,6 +1032,7 @@ impl ScratchState {
                 x: 0.0,
                 y: 0.0,
                 direction: 90.0,
+                rotation_style: ScratchRotationStyle::AllAround,
                 size: 100.0,
                 visible: true,
                 values: Vec::new(),
@@ -1310,6 +1378,7 @@ impl ScratchState {
                     x: instance.x,
                     y: instance.y,
                     direction: instance.direction,
+                    rotation_style: instance.rotation_style,
                     size: instance.size,
                     visible: instance.visible,
                     costume_index: instance.costume_index,
@@ -1560,6 +1629,13 @@ impl ScratchState {
             self.fence_geometry.resize(target + 1, None);
         }
         self.fence_geometry[target] = Some(geometry);
+        for instance in self
+            .instances
+            .iter_mut()
+            .filter(|instance| instance.target == target)
+        {
+            instance.fence_offsets = None;
+        }
     }
 
     pub fn set_original_visual(&mut self, target: usize, direction: f64, size: f64, visible: bool) {
@@ -1573,6 +1649,20 @@ impl ScratchState {
             }
             instance.size = size.max(0.0);
             instance.visible = visible;
+        }
+    }
+
+    pub fn set_original_rotation_style(&mut self, target: usize, style: &str) {
+        let Some(style) = ScratchRotationStyle::from_scratch(style) else {
+            return;
+        };
+        if let Some(instance) = self
+            .instances
+            .iter_mut()
+            .find(|instance| instance.target == target && instance.original && !instance.is_stage)
+        {
+            instance.rotation_style = style;
+            instance.fence_offsets = None;
         }
     }
 
@@ -1664,6 +1754,97 @@ impl ScratchState {
 
     pub fn direction(&self) -> f64 {
         self.instances[self.current_instance].direction
+    }
+
+    pub fn x_position(&self) -> f64 {
+        scratch_motion_coordinate(self.instances[self.current_instance].x)
+    }
+
+    pub fn y_position(&self) -> f64 {
+        scratch_motion_coordinate(self.instances[self.current_instance].y)
+    }
+
+    pub fn set_rotation_style(&mut self, style: &str) {
+        let Some(style) = ScratchRotationStyle::from_scratch(style) else {
+            return;
+        };
+        let instance = &mut self.instances[self.current_instance];
+        if instance.is_stage || instance.rotation_style == style {
+            return;
+        }
+        instance.rotation_style = style;
+        instance.fence_offsets = None;
+        self.request_redraw();
+    }
+
+    pub fn move_steps(&mut self, steps: f64) {
+        let instance = &self.instances[self.current_instance];
+        if instance.is_stage {
+            return;
+        }
+        let radians = (90.0 - instance.direction) * std::f64::consts::PI / 180.0;
+        let x = instance.x + steps * radians.cos();
+        let y = instance.y + steps * radians.sin();
+        self.set_xy(x, y);
+    }
+
+    pub fn bounce_on_edge(&mut self) {
+        let instance_id = self.current_instance;
+        let Some(bounds) = self.transformed_bounds(instance_id, true) else {
+            return;
+        };
+        let left = (240.0 + bounds[0]).max(0.0);
+        let top = (180.0 - bounds[3]).max(0.0);
+        let right = (240.0 - bounds[1]).max(0.0);
+        let bottom = (180.0 + bounds[2]).max(0.0);
+        let mut edge = 0;
+        let mut minimum = f64::INFINITY;
+        for (index, distance) in [left, top, right, bottom].into_iter().enumerate() {
+            if distance < minimum {
+                minimum = distance;
+                edge = index;
+            }
+        }
+        if minimum > 0.0 {
+            return;
+        }
+
+        let direction = self.instances[instance_id].direction;
+        let radians = (90.0 - direction) * std::f64::consts::PI / 180.0;
+        let mut dx = radians.cos();
+        let mut dy = -radians.sin();
+        match edge {
+            0 => dx = dx.abs().max(0.2),
+            1 => dy = dy.abs().max(0.2),
+            2 => dx = -dx.abs().max(0.2),
+            _ => dy = -dy.abs().max(0.2),
+        }
+        self.set_direction(dy.atan2(dx) * 180.0 / std::f64::consts::PI + 90.0);
+        self.keep_current_instance_in_stage();
+    }
+
+    fn keep_current_instance_in_stage(&mut self) {
+        let instance_id = self.current_instance;
+        // scratch uses the opaque bounds for edge bounce, then keeps that outline inside the stage.
+        let Some(bounds) = self.transformed_bounds(instance_id, true) else {
+            return;
+        };
+        let mut dx = 0.0;
+        let mut dy = 0.0;
+        if bounds[0] < -240.0 {
+            dx += -240.0 - bounds[0];
+        }
+        if bounds[1] > 240.0 {
+            dx += 240.0 - bounds[1];
+        }
+        if bounds[3] > 180.0 {
+            dy += 180.0 - bounds[3];
+        }
+        if bounds[2] < -180.0 {
+            dy += -180.0 - bounds[2];
+        }
+        let instance = &self.instances[instance_id];
+        self.set_xy(instance.x + dx, instance.y + dy);
     }
 
     pub fn direction_for_instance(&self, instance: usize) -> Option<f64> {
@@ -2011,48 +2192,53 @@ impl ScratchState {
         let target = instance.target;
         let direction = instance.direction;
         let size = instance.size;
+        let rotation_style = instance.rotation_style;
         let instance_x = instance.x;
         let instance_y = instance.y;
-        let Some(geometry) = self.fence_geometry.get(target).copied().flatten() else {
+        let Some(geometry) = self.fence_geometry.get(target).and_then(Option::as_ref) else {
             return (x, y);
         };
+        let geometry_key = [
+            geometry.width,
+            geometry.height,
+            geometry.rotation_center_x,
+            geometry.rotation_center_y,
+        ];
         let cache = self.instances[instance_id].fence_offsets;
         let offsets = cache
             .filter(|cache| {
-                cache.geometry == geometry && cache.direction == direction && cache.size == size
+                cache.geometry == geometry_key
+                    && cache.direction == direction
+                    && cache.size == size
+                    && cache.rotation_style == rotation_style
             })
             .map(|cache| cache.points)
             .unwrap_or_else(|| {
-                // cache the rotated costume corners until its bounds or transform changes.
-                let radians = (90.0 - direction).to_radians();
+                // cache the transformed costume corners until its bounds or style changes.
+                let (rendered_direction, flip_x) =
+                    rotation_style.rendered_direction_and_flip(direction);
+                let radians =
+                    (90.0 - rendered_direction) * std::f64::consts::PI / 180.0;
                 let cos = radians.cos();
                 let sin = radians.sin();
                 let scale = size / 100.0;
-                let corners = [
-                    (-geometry.rotation_center_x, geometry.rotation_center_y),
-                    (
-                        geometry.width - geometry.rotation_center_x,
+                let points = costume_corners(geometry).map(|(local_x, local_y)| {
+                    transform_costume_point(
+                        local_x,
+                        local_y,
+                        geometry.rotation_center_x,
                         geometry.rotation_center_y,
-                    ),
-                    (
-                        -geometry.rotation_center_x,
-                        geometry.rotation_center_y - geometry.height,
-                    ),
-                    (
-                        geometry.width - geometry.rotation_center_x,
-                        geometry.rotation_center_y - geometry.height,
-                    ),
-                ];
-                let points = corners.map(|(local_x, local_y)| {
-                    (
-                        (local_x * cos - local_y * sin) * scale,
-                        (local_x * sin + local_y * cos) * scale,
+                        cos,
+                        sin,
+                        flip_x,
+                        scale,
                     )
                 });
                 self.instances[instance_id].fence_offsets = Some(CachedFenceOffsets {
-                    geometry,
+                    geometry: geometry_key,
                     direction,
                     size,
+                    rotation_style,
                     points,
                 });
                 points
@@ -2088,6 +2274,68 @@ impl ScratchState {
             fenced_y = (instance_y + (fence_y - min_y)).floor();
         }
         (fenced_x, fenced_y)
+    }
+
+    fn transformed_bounds(&self, instance_id: usize, use_silhouette: bool) -> Option<[f64; 4]> {
+        let instance = self.instances.get(instance_id)?;
+        let geometry = self.fence_geometry.get(instance.target)?.as_ref()?;
+        let (rendered_direction, flip_x) = instance
+            .rotation_style
+            .rendered_direction_and_flip(instance.direction);
+        let radians = (90.0 - rendered_direction) * std::f64::consts::PI / 180.0;
+        let cos = radians.cos();
+        let sin = radians.sin();
+        let scale = instance.size / 100.0;
+        let mut bounds = [
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ];
+        let mut include = |x: f64, y: f64| {
+            let (offset_x, offset_y) = transform_costume_point(
+                x,
+                y,
+                geometry.rotation_center_x,
+                geometry.rotation_center_y,
+                cos,
+                sin,
+                flip_x,
+                scale,
+            );
+            // scratch's renderer stores transformed hull points and drawable positions as float32.
+            let (x, y) = if use_silhouette {
+                (
+                    (instance.x.round() + offset_x) as f32 as f64,
+                    (instance.y.round() + offset_y) as f32 as f64,
+                )
+            } else {
+                (offset_x + instance.x, offset_y + instance.y)
+            };
+            bounds[0] = bounds[0].min(x);
+            bounds[1] = bounds[1].max(x);
+            bounds[2] = bounds[2].min(y);
+            bounds[3] = bounds[3].max(y);
+        };
+        let outline = if use_silhouette {
+            geometry.bounds_hull.as_deref()
+        } else {
+            None
+        };
+        if let Some(outline) = outline {
+            if outline.is_empty() {
+                return None;
+            }
+            for point in outline {
+                // scratch's drawable transform places hull samples at texel centers.
+                include(point[0] + 0.5, point[1] + 0.5);
+            }
+        } else {
+            for (x, y) in costume_corners(geometry) {
+                include(x, y);
+            }
+        }
+        (bounds[0].is_finite() && bounds[1].is_finite()).then_some(bounds)
     }
 
     pub fn change_x_by(&mut self, dx: f64) {
@@ -2127,6 +2375,7 @@ impl ScratchState {
             x: 0.0,
             y: 0.0,
             direction: 90.0,
+            rotation_style: ScratchRotationStyle::AllAround,
             size: 100.0,
             visible: true,
             values: vec![None; self.values.len()],
@@ -2206,6 +2455,7 @@ impl ScratchState {
             x: self.instances[source_instance].x,
             y: self.instances[source_instance].y,
             direction: self.instances[source_instance].direction,
+            rotation_style: self.instances[source_instance].rotation_style,
             size: self.instances[source_instance].size,
             visible: self.instances[source_instance].visible,
             values: vec![None; self.values.len()],
@@ -2429,8 +2679,8 @@ fn local_datetime() -> OffsetDateTime {
 mod tests {
     use super::{
         BubbleKind, ObservableEvent, PenDot, PenStroke, RuntimeInputEvent, ScratchListMetadata,
-        ScratchSoundEffect, ScratchState, ScratchValue, ScratchVariableMetadata,
-        SpriteFenceGeometry, pointer_click_activates,
+        ScratchRotationStyle, ScratchSoundEffect, ScratchState, ScratchValue,
+        ScratchVariableMetadata, SpriteFenceGeometry, pointer_click_activates,
     };
     use crate::runtime::PenCommand;
     use crate::runtime::{ScratchList, list_snapshot_key, scratch_to_number};
@@ -2755,6 +3005,7 @@ mod tests {
                 height,
                 rotation_center_x: width / 2.0,
                 rotation_center_y: height / 2.0,
+                bounds_hull: None,
             },
         );
         state.set_current_instance(state.original_instance(1).unwrap());
@@ -2816,6 +3067,61 @@ mod tests {
         assert_eq!(y, 0.0);
     }
 
+    // move steps follows stored scratch direction and the same fenced position path.
+    #[test]
+    fn move_steps_uses_scratch_heading_and_keeps_target_instance_identity() {
+        let mut state = fenced_state(40.0, 30.0);
+        let original = state.current_instance();
+        state.move_steps(10.0);
+        assert_eq!(state.position(original), Some((10.0, 0.0)));
+        state.set_direction(0.0);
+        state.move_steps(10.0);
+        assert_eq!(state.position(original), Some((10.0, 10.0)));
+
+        let clone = state.create_clone(original, 1, 300).unwrap();
+        state.set_current_instance(clone);
+        state.set_direction(-90.0);
+        state.move_steps(5.0);
+        assert_eq!(state.position(clone), Some((5.0, 10.0)));
+        assert_eq!(state.position(original), Some((10.0, 10.0)));
+    }
+
+    // edge bounce uses the transformed costume outline and fences the resulting pose.
+    #[test]
+    fn edge_bounce_reflects_from_the_nearest_contact_and_keeps_style_state() {
+        let mut state = fenced_state(20.0, 20.0);
+        let target = state.instances[state.current_instance].target;
+        state.set_target_fence_geometry(
+            target,
+            SpriteFenceGeometry {
+                width: 20.0,
+                height: 20.0,
+                rotation_center_x: 10.0,
+                rotation_center_y: 10.0,
+                bounds_hull: Some(vec![[0.5, 0.5], [19.5, 0.5], [19.5, 19.5], [0.5, 19.5]]),
+            },
+        );
+        state.set_rotation_style("left-right");
+        state.set_direction(0.0);
+        state.set_xy(0.0, 180.0);
+        state.bounce_on_edge();
+        assert_eq!(state.direction(), 180.0);
+        assert_eq!(state.position(state.current_instance()), Some((0.0, 171.0)));
+        let layer = state.observable_snapshot(0).layers.pop().unwrap();
+        assert_eq!(layer.rotation_style, ScratchRotationStyle::LeftRight);
+    }
+
+    // report coordinates at scratch's integer precision without altering stored doubles.
+    #[test]
+    fn motion_reporters_round_only_values_within_scratch_precision() {
+        let mut state = fenced_state(20.0, 20.0);
+        let instance = state.current_instance();
+        state.set_xy(12.0000000001, -4.125);
+        assert_eq!(state.position(instance), Some((12.0000000001, -4.125)));
+        assert_eq!(state.x_position(), 12.0);
+        assert_eq!(state.y_position(), -4.125);
+    }
+
     #[test]
     fn clone_motion_and_visual_state_are_instance_local_and_fenced() {
         let mut state = fenced_state(100.0, 60.0);
@@ -2858,8 +3164,9 @@ mod tests {
             height: 80.0,
             rotation_center_x: 60.0,
             rotation_center_y: 40.0,
+            bounds_hull: None,
         };
-        state.set_target_fence_geometry(0, first_geometry);
+        state.set_target_fence_geometry(0, first_geometry.clone());
         state.set_xy(20.0, 30.0);
         let original_cache = state.instances[0].fence_offsets.unwrap();
 
@@ -2877,13 +3184,18 @@ mod tests {
 
         let second_geometry = SpriteFenceGeometry {
             width: 200.0,
-            ..first_geometry
+            ..first_geometry.clone()
         };
-        state.set_target_fence_geometry(0, second_geometry);
+        state.set_target_fence_geometry(0, second_geometry.clone());
         state.set_xy(25.0, 35.0);
         assert_eq!(
             state.instances[0].fence_offsets.unwrap().geometry,
-            second_geometry
+            [
+                second_geometry.width,
+                second_geometry.height,
+                second_geometry.rotation_center_x,
+                second_geometry.rotation_center_y,
+            ]
         );
     }
 

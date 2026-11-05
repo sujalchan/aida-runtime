@@ -5,7 +5,7 @@ struct SpriteTransform {
     direction: f32,
     scale: f32,
     visible: f32,
-    _padding0: f32,
+    flip_x: f32,
     _padding1: f32,
     _padding2: f32,
     effects_0: vec4<f32>,
@@ -95,10 +95,11 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
         return output;
     }
 
-    let local = vec2<f32>(
+    let local_unflipped = vec2<f32>(
         uv.x * transform.logical_size.x - transform.rotation_center.x,
         transform.rotation_center.y - uv.y * transform.logical_size.y,
     ) * transform.scale;
+    let local = vec2<f32>(local_unflipped.x * transform.flip_x, local_unflipped.y);
     // scratch direction 90° is the costume's unrotated, right-facing pose;
     // zero degrees points up. convert that compass-style direction into the
     // rotation from the costume's native orientation.

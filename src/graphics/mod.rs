@@ -34,6 +34,7 @@ pub(crate) fn fence_geometries(
                     height: logical_size[1] as f64,
                     rotation_center_x: costume.rotation_center_x / resolution as f64,
                     rotation_center_y: costume.rotation_center_y / resolution as f64,
+                    bounds_hull: Some(sprite.opaque_bounds_hull(resolution as f64)),
                 },
             ))
         })
@@ -75,6 +76,7 @@ mod fence_geometry_tests {
                 height: geometry.height,
                 rotation_center_x: geometry.rotation_center_x,
                 rotation_center_y: geometry.rotation_center_y,
+                bounds_hull: geometry.bounds_hull.clone(),
             },
         );
         let sprite = state.original_instance(1).unwrap();

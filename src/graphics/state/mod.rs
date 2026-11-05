@@ -180,7 +180,8 @@ struct SpriteTransform {
     direction: f32,
     scale: f32,
     visible: f32,
-    padding: [f32; 3],
+    flip_x: f32,
+    padding: [f32; 2],
     effects_0: [f32; 4],
     effects_1: [f32; 4],
 }

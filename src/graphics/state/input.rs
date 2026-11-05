@@ -28,17 +28,23 @@ fn apply_runtime_layer_transform(
     layer: &crate::runtime::LayerSnapshot,
 ) -> bool {
     let position = [layer.x as f32, layer.y as f32];
-    let direction = layer.direction as f32;
+    let (rendered_direction, flip_x) = layer
+        .rotation_style
+        .rendered_direction_and_flip(layer.direction);
+    let direction = rendered_direction as f32;
     let scale = layer.size as f32 / 100.0;
+    let flip_x = flip_x as f32;
     let visible = if layer.visible { 1.0 } else { 0.0 };
     let changed = transform.position != position
         || transform.direction != direction
         || transform.scale != scale
+        || transform.flip_x != flip_x
         || transform.visible != visible;
     if changed {
         transform.position = position;
         transform.direction = direction;
         transform.scale = scale;
+        transform.flip_x = flip_x;
         transform.visible = visible;
     }
     changed
@@ -51,8 +57,8 @@ fn sprite_monitor_updates(
     let mut updates = Vec::new();
     for layer in layers.iter().filter(|layer| layer.original) {
         for (property, value) in [
-            ("x", layer.x),
-            ("y", layer.y),
+            ("x", crate::runtime::scratch_motion_coordinate(layer.x)),
+            ("y", crate::runtime::scratch_motion_coordinate(layer.y)),
             ("direction", layer.direction),
             ("size", layer.size),
         ] {
@@ -853,6 +859,7 @@ mod clone_transform_tests {
             x,
             y,
             direction,
+            rotation_style: crate::runtime::ScratchRotationStyle::AllAround,
             size,
             visible,
             costume_index: 0,
@@ -899,6 +906,7 @@ mod clone_transform_tests {
             x: 0.0,
             y: 0.0,
             direction: 90.0,
+            rotation_style: crate::runtime::ScratchRotationStyle::AllAround,
             size,
             visible: true,
             costume_index: 0,
@@ -913,6 +921,88 @@ mod clone_transform_tests {
             updates,
             vec![("__sprite/Sprite1/size".to_owned(), "125".to_owned())]
         );
+    }
+
+    // keep motion monitor strings tied to the original target's live state.
+    #[test]
+    fn motion_monitor_updates_follow_live_target_coordinates() {
+        let variable_layer = VariableLayer::new(vec![
+            VariableMonitor::new("Sprite1: x position", "0", 0.0, 0.0)
+                .with_value_key("__sprite/Sprite1/x"),
+            VariableMonitor::new("Sprite1: y position", "0", 0.0, 0.0)
+                .with_value_key("__sprite/Sprite1/y"),
+            VariableMonitor::new("Sprite1: direction", "90", 0.0, 0.0)
+                .with_value_key("__sprite/Sprite1/direction"),
+        ])
+        .unwrap();
+        let layer = |original, x, y, direction| LayerSnapshot {
+            target_index: 1,
+            target: "Sprite1".to_owned(),
+            instance_id: if original { 1 } else { 2 },
+            original,
+            x,
+            y,
+            direction,
+            rotation_style: crate::runtime::ScratchRotationStyle::AllAround,
+            size: 100.0,
+            visible: true,
+            costume_index: 0,
+            bubble: None,
+        };
+        let updates = sprite_monitor_updates(
+            &variable_layer,
+            &[
+                layer(true, 10.0000000001, -2.0, -45.0),
+                layer(false, 99.0, 88.0, 180.0),
+            ],
+        );
+        assert_eq!(
+            updates,
+            vec![
+                ("__sprite/Sprite1/x".to_owned(), "10".to_owned()),
+                ("__sprite/Sprite1/y".to_owned(), "-2".to_owned()),
+                ("__sprite/Sprite1/direction".to_owned(), "-45".to_owned()),
+            ]
+        );
+    }
+
+    // apply rotation styles to each displayed drawable while retaining stored direction.
+    #[test]
+    fn renderer_applies_rotation_style_direction_and_flip() {
+        let mut transform: SpriteTransform = bytemuck::Zeroable::zeroed();
+        let mut layer = LayerSnapshot {
+            target_index: 1,
+            target: "Sprite1".to_owned(),
+            instance_id: 1,
+            original: true,
+            x: 3.0,
+            y: 4.0,
+            direction: -15.0,
+            rotation_style: crate::runtime::ScratchRotationStyle::LeftRight,
+            size: 100.0,
+            visible: true,
+            costume_index: 0,
+            bubble: None,
+        };
+        apply_runtime_layer_transform(&mut transform, &layer);
+        assert_eq!(transform.direction, 90.0);
+        assert_eq!(transform.flip_x, -1.0);
+        assert_eq!(transform.position, [3.0, 4.0]);
+
+        layer.direction = 15.0;
+        assert!(apply_runtime_layer_transform(&mut transform, &layer));
+        assert_eq!(transform.direction, 90.0);
+        assert_eq!(transform.flip_x, 1.0);
+
+        layer.rotation_style = crate::runtime::ScratchRotationStyle::DontRotate;
+        layer.direction = -135.0;
+        assert!(!apply_runtime_layer_transform(&mut transform, &layer));
+        assert_eq!(transform.direction, 90.0);
+        assert_eq!(transform.flip_x, 1.0);
+
+        layer.rotation_style = crate::runtime::ScratchRotationStyle::AllAround;
+        assert!(apply_runtime_layer_transform(&mut transform, &layer));
+        assert_eq!(transform.direction, -135.0);
     }
 
     #[test]
@@ -954,7 +1044,7 @@ fn costume_contains_point(
     let radians = (90.0 - transform.direction).to_radians();
     let cosine = radians.cos();
     let sine = radians.sin();
-    let local_x = (cosine * dx + sine * dy) / transform.scale;
+    let local_x = (cosine * dx + sine * dy) / transform.scale * transform.flip_x;
     let local_y = (-sine * dx + cosine * dy) / transform.scale;
     let u = (local_x + transform.rotation_center[0]) / logical_size[0];
     let v = (transform.rotation_center[1] - local_y) / logical_size[1];
@@ -1015,7 +1105,8 @@ mod mouse_tests {
             direction: 90.0,
             scale: 1.0,
             visible: 0.0,
-            padding: [0.0; 3],
+            flip_x: 1.0,
+            padding: [0.0; 2],
             effects_0: [0.0; 4],
             effects_1: [0.0; 4],
         };
