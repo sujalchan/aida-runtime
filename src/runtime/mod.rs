@@ -32,10 +32,11 @@ pub use value::pointer_click_activates;
 pub use value::scratch_motion_coordinate;
 #[allow(unused_imports)]
 pub use value::{
-    BubbleKind, BubbleSnapshot, CachedListIndex, LayerSnapshot, ListSnapshot, ObservableEvent, ReporterSnapshot,
-    RuntimeInputEvent, RuntimeSnapshot, ScratchInput, ScratchListMetadata, ScratchRotationStyle,
-    ScratchSoundEffect, ScratchState, ScratchValue, ScratchValueView, ScratchVariableMetadata,
-    SpriteFenceGeometry, VariableSnapshot, list_snapshot_key, variable_snapshot_key,
+    BubbleKind, BubbleSnapshot, CachedListIndex, LayerSnapshot, ListSnapshot, ObservableEvent,
+    ReporterSnapshot, RuntimeInputEvent, RuntimeSnapshot, ScratchInput, ScratchListMetadata,
+    ScratchRotationStyle, ScratchSoundEffect, ScratchState, ScratchValue, ScratchValueView,
+    ScratchVariableMetadata, SpriteFenceGeometry, VariableSnapshot, list_snapshot_key,
+    variable_snapshot_key,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -74,7 +75,11 @@ impl PenDot {
             color: self.color,
             // Dot alignment uses the clamped diameter; preserve invalid values
             // for the renderer's normal finite-value validation.
-            diameter: if self.diameter.is_finite() { self.diameter.max(1.0) } else { self.diameter },
+            diameter: if self.diameter.is_finite() {
+                self.diameter.max(1.0)
+            } else {
+                self.diameter
+            },
             pixel_offset: self.pixel_offset,
         }
     }

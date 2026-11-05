@@ -12,7 +12,10 @@ impl ScratchValue {
     /// is identical to the text of that number. Other dynamic values fall back.
     #[inline]
     pub fn number_or_nan(&self) -> f64 {
-        match self { Self::Number(value) => *value, _ => f64::NAN }
+        match self {
+            Self::Number(value) => *value,
+            _ => f64::NAN,
+        }
     }
 
     pub fn canonical_number(&self) -> Option<f64> {
@@ -330,7 +333,9 @@ pub struct CachedListIndex(ScratchValueView<'static>);
 
 impl CachedListIndex {
     #[inline]
-    pub fn is_numeric(self) -> bool { matches!(self.0, ScratchValueView::Number(_)) }
+    pub fn is_numeric(self) -> bool {
+        matches!(self.0, ScratchValueView::Number(_))
+    }
 
     pub fn new(value: &ScratchValue) -> Self {
         match value {
@@ -345,7 +350,9 @@ impl CachedListIndex {
 
 impl ScratchInput for CachedListIndex {
     #[inline]
-    fn scratch_view(&self) -> ScratchValueView<'_> { self.0 }
+    fn scratch_view(&self) -> ScratchValueView<'_> {
+        self.0
+    }
 }
 
 /// a value that a scratch operator can inspect without taking ownership.
@@ -704,6 +711,19 @@ impl ScratchVariableMetadata {
 }
 
 impl ScratchState {
+    /// Allow generated numeric locals to defer writes only when no renderer,
+    /// visible monitor, or event sink can observe the values before the
+    /// generated region commits them. Generated code commits before every
+    /// scheduler yield, where other scripts can observe shared state.
+    pub fn can_defer_variable_writes(&self, slots: &[usize]) -> bool {
+        self.event_sink.is_none()
+            && slots.iter().all(|slot| {
+                self.variables
+                    .get(*slot)
+                    .is_some_and(|metadata| !metadata.monitor_visible)
+            })
+    }
+
     /// clear the previous frame's request before stepping generated scripts.
     pub fn begin_tick(&mut self) {
         self.redraw_requested = false;
@@ -1260,7 +1280,10 @@ impl ScratchState {
         if self.event_sink.is_none()
             && slot >= self.list_metadata.len()
             && self.instances[self.current_instance].lists.len() >= self.lists.len()
-            && self.variables.get(slot).is_some_and(|metadata| !metadata.is_stage && !metadata.monitor_visible)
+            && self
+                .variables
+                .get(slot)
+                .is_some_and(|metadata| !metadata.is_stage && !metadata.monitor_visible)
         {
             let instance = &mut self.instances[self.current_instance];
             if let Some(Some(previous)) = instance.values.get_mut(slot) {
@@ -1273,26 +1296,45 @@ impl ScratchState {
 
     /// Copy a shared-list item into a sprite-local variable, reusing an
     /// existing text allocation when the write has no observers.
-    pub fn set_local_from_shared_list<const CACHED: bool>(&mut self, slot: usize, list_slot: usize, index: impl ScratchInput) -> CachedListIndex {
+    pub fn set_local_from_shared_list<const CACHED: bool>(
+        &mut self,
+        slot: usize,
+        list_slot: usize,
+        index: impl ScratchInput,
+    ) -> CachedListIndex {
         if self.event_sink.is_none()
             && slot >= self.list_metadata.len()
-            && self.variables.get(slot).is_some_and(|metadata| !metadata.is_stage && !metadata.monitor_visible)
+            && self
+                .variables
+                .get(slot)
+                .is_some_and(|metadata| !metadata.is_stage && !metadata.monitor_visible)
             && self.instances[self.current_instance].lists.len() >= self.lists.len()
-            && self.instances[self.current_instance].values.get(slot).is_some_and(Option::is_some)
+            && self.instances[self.current_instance]
+                .values
+                .get(slot)
+                .is_some_and(Option::is_some)
         {
-            let (source, cached_index) = if CACHED { self.lists[list_slot].get_with_cached_selector(&index) } else {
+            let (source, cached_index) = if CACHED {
+                self.lists[list_slot].get_with_cached_selector(&index)
+            } else {
                 let source = self.lists[list_slot].get(&index);
                 (source, CachedListIndex::new(source))
             };
-            if let Some(Some(destination)) = self.instances[self.current_instance].values.get_mut(slot) {
+            if let Some(Some(destination)) =
+                self.instances[self.current_instance].values.get_mut(slot)
+            {
                 match (destination, source) {
-                    (ScratchValue::Text(destination), ScratchValue::Text(source)) => destination.clone_from(source),
+                    (ScratchValue::Text(destination), ScratchValue::Text(source)) => {
+                        destination.clone_from(source)
+                    }
                     (destination, source) => *destination = source.clone(),
                 }
                 return cached_index;
             }
         }
-        let (value, cached_index) = if CACHED { self.list(list_slot).get_with_cached_selector(index) } else {
+        let (value, cached_index) = if CACHED {
+            self.list(list_slot).get_with_cached_selector(index)
+        } else {
             let value = self.list(list_slot).get(index);
             (value, CachedListIndex::new(value))
         };
@@ -1594,11 +1636,19 @@ impl ScratchState {
 
     // Renderer snapshots retain list identity and visibility, but hidden list
     // payloads must not materialize compact lists or pin their backing storage.
-    pub fn observable_snapshot_filtered(&self, tick: usize, include_hidden_items: bool) -> RuntimeSnapshot {
+    pub fn observable_snapshot_filtered(
+        &self,
+        tick: usize,
+        include_hidden_items: bool,
+    ) -> RuntimeSnapshot {
         static EMPTY_ITEMS: std::sync::LazyLock<Arc<Vec<ScratchValue>>> =
             std::sync::LazyLock::new(|| Arc::new(Vec::new()));
         let list_items = |list: &ScratchList, visible: bool| {
-            if include_hidden_items || visible { list.shared_items() } else { Arc::clone(&EMPTY_ITEMS) }
+            if include_hidden_items || visible {
+                list.shared_items()
+            } else {
+                Arc::clone(&EMPTY_ITEMS)
+            }
         };
         let mut snapshot = RuntimeSnapshot {
             tick,
@@ -1818,7 +1868,12 @@ impl ScratchState {
         self.observable_snapshot_filtered_with_timer(tick, now_millis, true)
     }
 
-    pub fn observable_snapshot_filtered_with_timer(&self, tick: usize, now_millis: u64, include_hidden_items: bool) -> RuntimeSnapshot {
+    pub fn observable_snapshot_filtered_with_timer(
+        &self,
+        tick: usize,
+        now_millis: u64,
+        include_hidden_items: bool,
+    ) -> RuntimeSnapshot {
         let mut snapshot = self.observable_snapshot_filtered(tick, include_hidden_items);
         snapshot.project_timer_millis = self.project_timer_millis(now_millis);
         snapshot.project_timer_epoch = self.project_timer_epoch;
@@ -2397,7 +2452,8 @@ impl ScratchState {
         match self.pending_pen_commands.last_mut() {
             Some(PenCommand::Strokes(strokes) | PenCommand::Mixed(strokes)) => strokes.push(stroke),
             _ => {
-                self.pending_pen_commands.push(PenCommand::Strokes(vec![stroke]));
+                self.pending_pen_commands
+                    .push(PenCommand::Strokes(vec![stroke]));
                 self.coalesce_small_pen_batches();
             }
         }
@@ -2407,12 +2463,19 @@ impl ScratchState {
     // buffers keep their compact representation and clears/stamps stay barriers.
     fn coalesce_small_pen_batches(&mut self) {
         const RUN: usize = 16;
-        let Some(start) = self.pending_pen_commands.len().checked_sub(RUN) else { return };
-        if !self.pending_pen_commands[start..].iter().all(|command| match command {
-            PenCommand::Dots(dots) => dots.len() <= 4,
-            PenCommand::Strokes(strokes) => strokes.len() <= 4,
-            _ => false,
-        }) { return; }
+        let Some(start) = self.pending_pen_commands.len().checked_sub(RUN) else {
+            return;
+        };
+        if !self.pending_pen_commands[start..]
+            .iter()
+            .all(|command| match command {
+                PenCommand::Dots(dots) => dots.len() <= 4,
+                PenCommand::Strokes(strokes) => strokes.len() <= 4,
+                _ => false,
+            })
+        {
+            return;
+        }
         let batches = self.pending_pen_commands.split_off(start);
         let mut marks = Vec::with_capacity(RUN * 2);
         for batch in batches {
@@ -2475,11 +2538,19 @@ impl ScratchState {
             });
             (changed, stroke)
         };
+        let drew_pen_stroke = stroke.is_some();
         if let Some(stroke) = stroke {
             self.push_pen_stroke(stroke);
         }
         if changed {
-            self.request_redraw();
+            let instance = &self.instances[self.current_instance];
+            if drew_pen_stroke || instance.visible || instance.bubble.is_some() {
+                self.request_redraw();
+            } else {
+                // Keep position monitors and other presentation observers
+                // current without rebuilding/rendering the hidden sprite.
+                self.request_presentation();
+            }
         }
     }
 
@@ -2513,8 +2584,7 @@ impl ScratchState {
                 // cache the transformed costume corners until its bounds or style changes.
                 let (rendered_direction, flip_x) =
                     rotation_style.rendered_direction_and_flip(direction);
-                let radians =
-                    (90.0 - rendered_direction) * std::f64::consts::PI / 180.0;
+                let radians = (90.0 - rendered_direction) * std::f64::consts::PI / 180.0;
                 let cos = radians.cos();
                 let sin = radians.sin();
                 let scale = size / 100.0;
@@ -2536,7 +2606,6 @@ impl ScratchState {
                     size,
                     rotation_style,
                     points,
-
                 });
                 points
             });
@@ -3292,6 +3361,28 @@ mod tests {
         state
     }
 
+    #[test]
+    fn deferred_variable_writes_require_unobserved_slots() {
+        let mut state = ScratchState::with_project_data(
+            vec![0.0.into(), 0.0.into()],
+            vec![
+                ScratchVariableMetadata::for_target("hidden", "hidden", "Stage", 0, true)
+                    .with_monitor_visible(false),
+                ScratchVariableMetadata::for_target("visible", "visible", "Stage", 0, true)
+                    .with_monitor_visible(true),
+            ],
+            vec![],
+            vec![],
+            vec![],
+        );
+        assert!(state.can_defer_variable_writes(&[0]));
+        assert!(!state.can_defer_variable_writes(&[0, 1]));
+        assert!(!state.can_defer_variable_writes(&[2]));
+        let (sender, _receiver) = std::sync::mpsc::channel();
+        state.set_event_sink(Some(sender));
+        assert!(!state.can_defer_variable_writes(&[0]));
+    }
+
     fn fenced_state(width: f64, height: f64) -> ScratchState {
         let mut state = ScratchState::new(Vec::new());
         state.register_target(1, "Sprite", false);
@@ -3312,13 +3403,29 @@ mod tests {
     #[test]
     fn alternating_pen_marks_preserve_order_through_batching() {
         let mut state = ScratchState::new(Vec::new());
-        let dot = PenDot { position: [1.0, 2.0], color: [0.2, 0.3, 0.4, 0.5], diameter: 3.0, pixel_offset: 0.0 };
-        let stroke = PenStroke { start: [1.0, 2.0], end: [3.0, 4.0], color: dot.color, diameter: dot.diameter, pixel_offset: 0.0 };
-        for _ in 0..20 { state.push_pen_dot(dot); state.push_pen_stroke(stroke); }
+        let dot = PenDot {
+            position: [1.0, 2.0],
+            color: [0.2, 0.3, 0.4, 0.5],
+            diameter: 3.0,
+            pixel_offset: 0.0,
+        };
+        let stroke = PenStroke {
+            start: [1.0, 2.0],
+            end: [3.0, 4.0],
+            color: dot.color,
+            diameter: dot.diameter,
+            pixel_offset: 0.0,
+        };
+        for _ in 0..20 {
+            state.push_pen_dot(dot);
+            state.push_pen_stroke(stroke);
+        }
         state.clear_pen();
         state.push_pen_dot(dot);
         let commands = state.take_pending_pen_commands();
-        assert!(matches!(commands.as_slice(), [PenCommand::Mixed(marks), PenCommand::Clear, PenCommand::Dots(last)] if marks.len() == 40 && marks.chunks_exact(2).all(|pair| pair[0] == dot.as_stroke() && pair[1] == stroke) && last == &[dot]));
+        assert!(
+            matches!(commands.as_slice(), [PenCommand::Mixed(marks), PenCommand::Clear, PenCommand::Dots(last)] if marks.len() == 40 && marks.chunks_exact(2).all(|pair| pair[0] == dot.as_stroke() && pair[1] == stroke) && last == &[dot])
+        );
     }
 
     #[test]
@@ -3698,7 +3805,10 @@ mod tests {
         let visible_snapshot = state.observable_snapshot(2);
         assert!(visible_snapshot.lists[0].visible);
         assert_eq!(visible_snapshot.lists[0].items.len(), capacity);
-        assert_eq!(visible_snapshot.lists[0].items[0], ScratchValue::Number(0.0));
+        assert_eq!(
+            visible_snapshot.lists[0].items[0],
+            ScratchValue::Number(0.0)
+        );
         assert_eq!(
             visible_snapshot.lists[0].items[capacity / 2],
             ScratchValue::Number((capacity / 2) as f64)
@@ -3712,9 +3822,12 @@ mod tests {
     #[test]
     fn renderer_snapshot_skips_hidden_compact_items_until_visible() {
         let mut state = ScratchState::with_project_data(
-            vec![], vec![],
+            vec![],
+            vec![],
             vec![ScratchList::new(vec![1.0.into(), 2.0.into()])],
-            vec![ScratchListMetadata::for_target("id", "items", "Stage", 0, true)],
+            vec![ScratchListMetadata::for_target(
+                "id", "items", "Stage", 0, true,
+            )],
             vec![false],
         );
         state.list_mut(0).with_numeric_replacements(|batch| {
@@ -4253,6 +4366,42 @@ mod tests {
         assert!(!state.redraw_requested());
         state.change_x_by(1.0);
         assert!(state.redraw_requested());
+    }
+
+    #[test]
+    fn hidden_sprite_motion_updates_position_without_a_sprite_redraw() {
+        let mut state = ScratchState::new(Vec::new());
+        state.register_target(0, "Sprite1", false);
+        state.set_original_visual(0, 90.0, 100.0, false);
+        state.begin_tick();
+
+        state.set_xy(12.0, -7.0);
+        assert_eq!(state.position(state.current_instance()), Some((12.0, -7.0)));
+        assert!(!state.redraw_requested());
+        assert!(state.presentation_requested());
+        let hidden = state.observable_snapshot(0);
+        assert_eq!(hidden.layers.len(), 1);
+        assert!(!hidden.layers[0].visible);
+        assert_eq!((hidden.layers[0].x, hidden.layers[0].y), (12.0, -7.0));
+
+        state.presentation_consumed();
+        state.pen_down();
+        state.set_xy(24.0, -14.0);
+        assert!(state.redraw_requested());
+        assert!(
+            matches!(state.take_pending_pen_commands().last(), Some(PenCommand::Strokes(strokes))
+            if strokes.last().is_some_and(|stroke| stroke.start == [12.0, -7.0] && stroke.end == [24.0, -14.0]))
+        );
+        let hidden = state.observable_snapshot(1);
+        assert_eq!(hidden.layers.len(), 1);
+        assert_eq!((hidden.layers[0].x, hidden.layers[0].y), (24.0, -14.0));
+
+        state.set_visible(true);
+        let snapshot = state.observable_snapshot(2);
+        assert_eq!(
+            snapshot.layers.last().map(|layer| (layer.x, layer.y)),
+            Some((24.0, -14.0))
+        );
     }
 
     #[test]

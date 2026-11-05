@@ -1,11 +1,3 @@
-pub(crate) static P: [std::sync::atomic::AtomicU64; 8] = [const { std::sync::atomic::AtomicU64::new(0) }; 8];
-pub(crate) static SAMPLES: [std::sync::atomic::AtomicU64; 32] = [const { std::sync::atomic::AtomicU64::new(0) }; 32];
-pub(crate) static SAMPLE_NS: [std::sync::atomic::AtomicU64; 32] = [const { std::sync::atomic::AtomicU64::new(0) }; 32];
-thread_local! { static COUNTER: std::cell::Cell<u32> = const { std::cell::Cell::new(0) }; }
-pub(crate) struct Guard(usize, Option<std::time::Instant>);
-impl Guard { pub fn new(i:usize)->Self { let take=COUNTER.with(|c| {let n=c.get().wrapping_add(1);c.set(n);n%1024==0});Self(i.min(31),take.then(std::time::Instant::now)) } }
-impl Drop for Guard { fn drop(&mut self) { if let Some(t)=self.1 { SAMPLE_NS[self.0].fetch_add(t.elapsed().as_nanos() as u64,Ordering::Relaxed);SAMPLES[self.0].fetch_add(1,Ordering::Relaxed); } } }
-pub(crate) fn prof(i:usize,t:std::time::Instant){P[i].fetch_add(t.elapsed().as_micros() as u64,Ordering::Relaxed);}
 #[rustfmt::skip]
 mod program;
 #[allow(dead_code)]
@@ -305,7 +297,6 @@ fn run_worker(
     inputs: &mpsc::Receiver<RuntimeInputEvent>,
 ) -> Result<usize, String> {
     let _ = execution_start.recv();
-    let measure_start = Instant::now();
     let mut pacer = runtime::TickPacer::new(pacing, runtime::SystemPacingMechanism::new());
     let mut ticks = 0;
     let mut stopped_externally = false;
@@ -324,7 +315,7 @@ fn run_worker(
         }
         let tick_started = pacer.begin_tick();
         let was_complete = program.is_complete();
-        let p=Instant::now(); let status = advance_tick(program, pacing, tick_started, &pacer, Some(inputs)); prof(0,p);
+        let status = advance_tick(program, pacing, tick_started, &pacer, Some(inputs));
         ticks += 1;
         let live_monitor_due =
             program.has_live_sensing_monitors() && Instant::now() >= next_live_monitor_update;
@@ -332,7 +323,7 @@ fn run_worker(
             || live_monitor_due
             || (matches!(status, SchedulerStatus::Complete) && !was_complete);
         if presentation_requested {
-            let p=Instant::now(); publish_snapshot(
+            publish_snapshot(
                 program,
                 ticks,
                 latest,
@@ -340,12 +331,12 @@ fn run_worker(
                 proxy,
                 notification_pending,
             );
-            prof(1,p); if live_monitor_due {
+            if live_monitor_due {
                 next_live_monitor_update = Instant::now() + live_monitor_interval;
             }
         }
         if presentation_requested && pacing != PacingMode::Turbo {
-            let p=Instant::now(); let ok=wait_for_renderer(acknowledgements,ticks,stop); prof(2,p); if !ok {
+            if !wait_for_renderer(acknowledgements, ticks, stop) {
                 stopped_externally = true;
                 break;
             }
@@ -415,7 +406,6 @@ fn run_worker(
         proxy,
         notification_pending,
     );
-    eprintln!("RASTER_PROFILE seconds={:.6} totals={:?} sample_counts={:?} sample_ns={:?}",measure_start.elapsed().as_secs_f64(),P.iter().map(|x|x.load(Ordering::Relaxed)).collect::<Vec<_>>(),SAMPLES.iter().map(|x|x.load(Ordering::Relaxed)).collect::<Vec<_>>(),SAMPLE_NS.iter().map(|x|x.load(Ordering::Relaxed)).collect::<Vec<_>>());
     Ok(ticks)
 }
 

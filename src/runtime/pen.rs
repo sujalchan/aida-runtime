@@ -374,7 +374,10 @@ mod tests {
     fn generated_rgb_fast_path_keeps_exact_color_and_alpha() {
         let mut state = PenColorState::default();
         state.set_rgb_color_without_hsv(0x80123456_u32 as f64);
-        assert_eq!(state.rgba, [18.0 / 255.0, 52.0 / 255.0, 86.0 / 255.0, 128.0 / 255.0]);
+        assert_eq!(
+            state.rgba,
+            [18.0 / 255.0, 52.0 / 255.0, 86.0 / 255.0, 128.0 / 255.0]
+        );
         assert!((state.transparency - (100.0 * (1.0 - 128.0 / 255.0))).abs() < 0.00001);
     }
 

@@ -375,7 +375,17 @@ mod tests {
 
     #[test]
     fn canonical_integer_text_and_numbers_compare_identically() {
-        let inputs = [ScratchValue::Number(f64::NAN), ScratchValue::Number(f64::INFINITY), ScratchValue::Number(-0.0), ScratchValue::Number(240.0), ScratchValue::Text(String::new()), ScratchValue::Text("  ".into()), ScratchValue::Text("banana".into()), ScratchValue::Boolean(false), ScratchValue::Undefined];
+        let inputs = [
+            ScratchValue::Number(f64::NAN),
+            ScratchValue::Number(f64::INFINITY),
+            ScratchValue::Number(-0.0),
+            ScratchValue::Number(240.0),
+            ScratchValue::Text(String::new()),
+            ScratchValue::Text("  ".into()),
+            ScratchValue::Text("banana".into()),
+            ScratchValue::Boolean(false),
+            ScratchValue::Undefined,
+        ];
         for input in &inputs {
             for (text, number) in [("0", 0.0), ("240", 240.0), ("-240", -240.0)] {
                 assert_eq!(scratch_compare(input, text), scratch_compare(input, number));

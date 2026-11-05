@@ -4,6 +4,40 @@ use crate::runtime::SpriteSensingCostume;
 use crate::runtime::{RuntimeInputEvent, RuntimeSnapshot, ScratchValue};
 use std::sync::Arc;
 
+fn same_rendered_layer(
+    left: &crate::runtime::LayerSnapshot,
+    right: &crate::runtime::LayerSnapshot,
+) -> bool {
+    if left.target_index != right.target_index
+        || left.instance_id != right.instance_id
+        || left.original != right.original
+        || left.target != right.target
+        || left.visible != right.visible
+        || left.bubble != right.bubble
+    {
+        return false;
+    }
+    if !left.visible && left.bubble.is_none() {
+        return true;
+    }
+    left.x == right.x
+        && left.y == right.y
+        && left.direction == right.direction
+        && left.rotation_style == right.rotation_style
+        && left.size == right.size
+        && left.costume_index == right.costume_index
+}
+
+fn rendered_layers_changed(
+    previous: &[crate::runtime::LayerSnapshot],
+    current: &[crate::runtime::LayerSnapshot],
+) -> bool {
+    previous.len() != current.len()
+        || previous
+            .iter()
+            .any(|old| !current.iter().any(|new| same_rendered_layer(old, new)))
+}
+
 fn timer_sample_for_snapshot(
     current_epoch: u64,
     current_millis: u64,
@@ -149,7 +183,10 @@ impl GraphicsState {
             &snapshot.layers,
         ));
         let monitors_changed = self.write_changed_monitors(&updates)?;
-        let layers_changed = self.last_runtime_layers != snapshot.layers;
+        // Hidden sprites still publish their real positions in snapshots for
+        // motion monitors and later show blocks, but position-only changes do
+        // not dirty their GPU transforms or force sprite layer work.
+        let layers_changed = rendered_layers_changed(&self.last_runtime_layers, &snapshot.layers);
         let backdrop_index = snapshot
             .backdrop_index
             .min(self.backdrops.len().saturating_sub(1));
@@ -184,6 +221,17 @@ impl GraphicsState {
                         .copied()
                 };
                 if let Some(index) = index {
+                    if !layer.visible
+                        && layer.bubble.is_none()
+                        && self.last_runtime_layers.iter().any(|previous| {
+                            previous.target_index == layer.target_index
+                                && previous.instance_id == layer.instance_id
+                                && !previous.visible
+                                && previous.bubble.is_none()
+                        })
+                    {
+                        continue;
+                    }
                     let sprite = &mut self.sprites[index];
                     if !sprite.costumes.is_empty() {
                         sprite.current_costume = layer.costume_index.min(sprite.costumes.len() - 1);
@@ -843,11 +891,41 @@ fn pick_topmost_visible_instance(
 #[cfg(test)]
 mod clone_transform_tests {
     use super::{
-        SpriteTransform, apply_runtime_layer_transform, sprite_monitor_updates,
-        timer_sample_for_snapshot,
+        SpriteTransform, apply_runtime_layer_transform, rendered_layers_changed,
+        sprite_monitor_updates, timer_sample_for_snapshot,
     };
     use crate::graphics::variables::{VariableLayer, VariableMonitor};
     use crate::runtime::LayerSnapshot;
+
+    #[test]
+    fn hidden_position_changes_do_not_dirty_rendered_layers() {
+        let layer = |x, visible| LayerSnapshot {
+            target_index: 1,
+            target: "Sprite1".to_owned(),
+            instance_id: 1,
+            original: true,
+            x,
+            y: 0.0,
+            direction: 90.0,
+            rotation_style: crate::runtime::ScratchRotationStyle::AllAround,
+            size: 100.0,
+            visible,
+            costume_index: 0,
+            bubble: None,
+        };
+        assert!(!rendered_layers_changed(
+            &[layer(0.0, false)],
+            &[layer(50.0, false)]
+        ));
+        assert!(rendered_layers_changed(
+            &[layer(0.0, true)],
+            &[layer(0.0, false)]
+        ));
+        assert!(rendered_layers_changed(
+            &[layer(0.0, false)],
+            &[layer(50.0, true)]
+        ));
+    }
 
     #[test]
     fn clone_drawable_transforms_remain_independent_and_deleted_layers_disappear() {

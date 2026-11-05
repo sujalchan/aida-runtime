@@ -1,6 +1,6 @@
 use super::{
-    CachedListIndex, ScratchInput, ScratchValue, ScratchValueView, operators::to_text, scratch_equals,
-    scratch_random, scratch_to_number,
+    CachedListIndex, ScratchInput, ScratchValue, ScratchValueView, operators::to_text,
+    scratch_equals, scratch_random, scratch_to_number,
 };
 use serde::de::{IgnoredAny, MapAccess, SeqAccess, Visitor};
 use std::{
@@ -236,7 +236,8 @@ impl ScratchList {
         let Some(index) = resolve_numeric_index(index, self.items.len()) else {
             return (false, false);
         };
-        let changed = !matches!(&self.items[index], ScratchValue::Number(current) if *current == item);
+        let changed =
+            !matches!(&self.items[index], ScratchValue::Number(current) if *current == item);
         if changed {
             Arc::make_mut(&mut self.items)[index] = ScratchValue::Number(item);
         }
@@ -319,13 +320,20 @@ impl ScratchList {
     /// Return the original item and a cached selector derived from it. The
     /// cache is dropped on every mutation and never changes list contents.
     #[inline]
-    pub fn get_with_cached_selector(&self, index: impl ScratchInput) -> (&ScratchValue, CachedListIndex) {
+    pub fn get_with_cached_selector(
+        &self,
+        index: impl ScratchInput,
+    ) -> (&ScratchValue, CachedListIndex) {
         let item_index = match resolve_index(index, self.length(), false) {
             ListIndex::Item(index) => index,
-            ListIndex::All | ListIndex::Invalid => return (&EMPTY_ITEM, CachedListIndex::new(&EMPTY_ITEM)),
+            ListIndex::All | ListIndex::Invalid => {
+                return (&EMPTY_ITEM, CachedListIndex::new(&EMPTY_ITEM));
+            }
         };
         let items = self.current_items();
-        let selectors = self.cached_selectors.get_or_init(|| Arc::new(items.iter().map(CachedListIndex::new).collect()));
+        let selectors = self
+            .cached_selectors
+            .get_or_init(|| Arc::new(items.iter().map(CachedListIndex::new).collect()));
         (&items[item_index], selectors[item_index])
     }
 
@@ -574,7 +582,10 @@ mod tests {
         assert_eq!(list.get_cached_number(1.0), 12.0);
         assert_eq!(list.get_cached_number(2.0), 0.0);
         assert_eq!(list.get_cached_number(3.0), 0.0);
-        assert_eq!(list.get_with_cached_selector(2.0).0, &ScratchValue::Text("last".into()));
+        assert_eq!(
+            list.get_with_cached_selector(2.0).0,
+            &ScratchValue::Text("last".into())
+        );
         let snapshot = list.clone();
         assert!(list.replace(1.0, "35".into()));
         assert_eq!(list.get_cached_number(1.0), 35.0);
@@ -583,7 +594,9 @@ mod tests {
         assert_eq!(list.get_cached_number(2.0), 0.0);
         list.replace_all(vec![2.0.into(), 3.0.into()]);
         assert_eq!(list.get_cached_number(1.0), 2.0);
-        list.with_numeric_replacements(|items| { items.replace_number_and_equals(1.0, 9.0, 9.0); });
+        list.with_numeric_replacements(|items| {
+            items.replace_number_and_equals(1.0, 9.0, 9.0);
+        });
         assert_eq!(list.get_cached_number(1.0), 9.0);
     }
 
@@ -617,13 +630,34 @@ mod tests {
     #[test]
     fn numeric_replacement_can_read_back_through_the_same_validated_index() {
         let mut list = ScratchList::new(vec![ScratchValue::Number(0.0), "old".into()]);
-        assert_eq!(list.replace_number_and_equals(2.0, 17.0, 17.0), (true, true));
-        assert_eq!(list.replace_number_and_equals(2.0, 17.0, 17.0), (false, true));
-        assert_eq!(list.replace_number_and_equals(2.9, 18.0, 18.0), (true, true));
-        assert_eq!(list.replace_number_and_equals(0.0, 17.0, 17.0), (false, false));
-        assert_eq!(list.replace_number_and_equals(-1.0, 19.0, 19.0), (false, false));
-        assert_eq!(list.replace_number_and_equals(3.0, 20.0, 20.0), (false, false));
-        assert_eq!(list.replace_number_and_equals(f64::NAN, 21.0, 21.0), (false, false));
+        assert_eq!(
+            list.replace_number_and_equals(2.0, 17.0, 17.0),
+            (true, true)
+        );
+        assert_eq!(
+            list.replace_number_and_equals(2.0, 17.0, 17.0),
+            (false, true)
+        );
+        assert_eq!(
+            list.replace_number_and_equals(2.9, 18.0, 18.0),
+            (true, true)
+        );
+        assert_eq!(
+            list.replace_number_and_equals(0.0, 17.0, 17.0),
+            (false, false)
+        );
+        assert_eq!(
+            list.replace_number_and_equals(-1.0, 19.0, 19.0),
+            (false, false)
+        );
+        assert_eq!(
+            list.replace_number_and_equals(3.0, 20.0, 20.0),
+            (false, false)
+        );
+        assert_eq!(
+            list.replace_number_and_equals(f64::NAN, 21.0, 21.0),
+            (false, false)
+        );
         assert_eq!(
             list.replace_number_and_equals(f64::INFINITY, 22.0, 22.0),
             (false, false)
@@ -748,7 +782,10 @@ mod tests {
         let length = 172_800;
         let mut list = ScratchList::new(vec![ScratchValue::Number(0.0); length]);
 
-        assert_eq!(list.replace_number_and_equals(1.0, 11.0, 11.0), (true, true));
+        assert_eq!(
+            list.replace_number_and_equals(1.0, 11.0, 11.0),
+            (true, true)
+        );
         assert_eq!(
             list.replace_number_and_equals((length / 2) as f64, 22.0, 22.0),
             (true, true)
@@ -759,10 +796,7 @@ mod tests {
         );
         assert_eq!(list.length(), length);
         assert_eq!(list.get(1.0), &ScratchValue::Number(11.0));
-        assert_eq!(
-            list.get((length / 2) as f64),
-            &ScratchValue::Number(22.0)
-        );
+        assert_eq!(list.get((length / 2) as f64), &ScratchValue::Number(22.0));
         assert_eq!(list.get(length as f64), &ScratchValue::Number(33.0));
     }
 

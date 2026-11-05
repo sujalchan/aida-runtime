@@ -48,7 +48,7 @@ impl GraphicsState {
 
         // both offscreen layers are ready before the surface is acquired.
         if self.pen_texture_dirty {
-            let p=Instant::now();self.render_pending_pen_operations(&mut encoder);crate::prof(7,p);
+            self.render_pending_pen_operations(&mut encoder);
         }
         let surface_acquire_started = Instant::now();
         let frame = match self.surface.get_current_texture() {
