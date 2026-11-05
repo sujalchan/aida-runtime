@@ -1923,6 +1923,11 @@ impl ScratchState {
         std::mem::take(&mut self.pending_pen_commands)
     }
 
+    /// report whether ordered pen marks can be accumulated before presentation.
+    pub fn has_pending_pen_commands(&self) -> bool {
+        !self.pending_pen_commands.is_empty()
+    }
+
     #[inline]
     fn push_pen_dot(&mut self, dot: PenDot) {
         // group adjacent pen-down points into a compact renderer upload.

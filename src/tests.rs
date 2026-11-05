@@ -325,6 +325,7 @@ fn think_fixture_resumes_timed_blocks_with_stage_progress_and_stops_in_order() {
                 frame_interval.mul_f64(0.75),
                 || clock.0.get(),
                 || redraw_requested.get(),
+                || false,
                 || {
                     let status = program.advance_frame();
                     redraw_requested.set(program.redraw_requested());

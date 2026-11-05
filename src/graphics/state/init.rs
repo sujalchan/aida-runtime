@@ -743,7 +743,8 @@ impl GraphicsState {
         {
             config.format = format;
         }
-        config.present_mode = wgpu::PresentMode::AutoVsync;
+        // let the runtime's fps pacer own frame timing instead of blocking each update on vblank.
+        config.present_mode = wgpu::PresentMode::AutoNoVsync;
         surface.configure(&device, &config);
 
         let viewport = StageViewport::for_window(size.width, size.height); // calculate the centered 4:3 stage viewport

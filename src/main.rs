@@ -425,15 +425,19 @@ fn advance_tick(
     }
     program.begin_tick();
     let redraw_requested = std::cell::Cell::new(false);
+    // batch pen commands only while unpresented marks remain queued.
+    let pen_marks_pending = std::cell::Cell::new(false);
     runtime::run_tick(
         pacing,
         started,
         budget,
         || pacer.now(),
         || redraw_requested.get(),
+        || pen_marks_pending.get(),
         || {
             let status = program.advance_frame();
             redraw_requested.set(program.redraw_requested());
+            pen_marks_pending.set(program.state().has_pending_pen_commands());
             status
         },
     )

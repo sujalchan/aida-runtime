@@ -2,16 +2,21 @@ use std::time::Duration;
 
 use super::{PacingMode, SchedulerStatus};
 
-/// run complete scheduler rounds until Scratch's per-frame work and redraw gates stop the tick.
+// allow one extra fair round so pen writes can share a presentation without running away.
+const MAX_PEN_BATCH_ROUNDS_PER_PRESENT: usize = 2;
+
+/// run fair scheduler rounds until the frame work budget or an unbatchable redraw is reached.
 pub fn run_tick(
     mode: PacingMode,
     started: Duration,
     budget: Duration,
     mut now: impl FnMut() -> Duration,
     mut redraw_requested: impl FnMut() -> bool,
+    mut pen_marks_pending: impl FnMut() -> bool,
     mut advance_round: impl FnMut() -> SchedulerStatus,
 ) -> SchedulerStatus {
     let mut last_status = SchedulerStatus::Progressed;
+    let mut pen_batch_rounds = 0;
     loop {
         if now().saturating_sub(started) >= budget {
             return last_status;
@@ -23,8 +28,17 @@ pub fn run_tick(
             | SchedulerStatus::WaitingForSignal
             | SchedulerStatus::Complete => return last_status,
         }
+        // present pen-only batches after two fair rounds, while other redraws keep their boundary.
         if mode != PacingMode::Turbo && redraw_requested() {
-            return last_status;
+            if !pen_marks_pending() {
+                return last_status;
+            }
+            pen_batch_rounds += 1;
+            if pen_batch_rounds >= MAX_PEN_BATCH_ROUNDS_PER_PRESENT {
+                return last_status;
+            }
+        } else {
+            pen_batch_rounds = 0;
         }
     }
 }
@@ -46,6 +60,7 @@ mod tests {
             Duration::from_millis(15),
             || Duration::from_millis(1),
             || steps.get() >= 1,
+            || false,
             || {
                 steps.set(steps.get() + 1);
                 SchedulerStatus::Progressed
@@ -66,6 +81,7 @@ mod tests {
             Duration::from_millis(15),
             || time.get(),
             || true,
+            || false,
             || {
                 steps.set(steps.get() + 1);
                 step_time.set(step_time.get() + Duration::from_millis(5));
@@ -77,7 +93,7 @@ mod tests {
     }
 
     #[test]
-    fn paced_mode_repeats_fair_rounds_until_a_visible_change_or_budget() {
+    fn paced_mode_repeats_fair_rounds_until_the_work_budget_without_redraws() {
         let time = Rc::new(Cell::new(Duration::ZERO));
         let step_time = Rc::clone(&time);
         let rounds = Cell::new(0);
@@ -86,6 +102,7 @@ mod tests {
             Duration::ZERO,
             Duration::from_millis(15),
             || time.get(),
+            || false,
             || false,
             || {
                 rounds.set(rounds.get() + 1);
@@ -98,6 +115,28 @@ mod tests {
     }
 
     #[test]
+    fn pending_pen_marks_allow_one_extra_ordered_round_before_presentation() {
+        let time = Rc::new(Cell::new(Duration::ZERO));
+        let step_time = Rc::clone(&time);
+        let rounds = Cell::new(0);
+        let status = run_tick(
+            PacingMode::Paced(Duration::from_millis(20)),
+            Duration::ZERO,
+            Duration::from_millis(15),
+            || time.get(),
+            || true,
+            || true,
+            || {
+                rounds.set(rounds.get() + 1);
+                step_time.set(time.get() + Duration::from_millis(5));
+                SchedulerStatus::Progressed
+            },
+        );
+        assert_eq!(status, SchedulerStatus::Progressed);
+        assert_eq!(rounds.get(), 2);
+    }
+
+    #[test]
     fn sleeping_scripts_end_the_tick_without_early_resume() {
         let calls = Cell::new(0);
         let status = run_tick(
@@ -105,6 +144,7 @@ mod tests {
             Duration::ZERO,
             Duration::from_millis(15),
             || Duration::from_millis(1),
+            || false,
             || false,
             || {
                 calls.set(calls.get() + 1);
@@ -126,6 +166,7 @@ mod tests {
             Duration::from_millis(15),
             || time.get(),
             || steps.get() > 0,
+            || false,
             || {
                 // a generated warp continuation only returns at its safety yield.
                 worker_time.set(Duration::from_millis(501));
@@ -149,6 +190,7 @@ mod tests {
             Duration::from_millis(15),
             || Duration::from_millis(1),
             || requested.get(),
+            || false,
             || {
                 state.set_xy(24.0, -9.0);
                 state.request_redraw();
