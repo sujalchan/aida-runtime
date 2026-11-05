@@ -33,9 +33,27 @@ impl PenColorState {
         self.hue = hue * 100.0 / 360.0;
         self.saturation = saturation * 100.0;
         self.brightness = brightness * 100.0;
+        // keep the source rgb bytes exact while retaining hsv state for later controls.
+        self.rgba = [
+            rgb[0] as f32 / 255.0,
+            rgb[1] as f32 / 255.0,
+            rgb[2] as f32 / 255.0,
+            alpha as f32 / 255.0,
+        ];
         self.transparency = 100.0 * (1.0 - alpha as f64 / 255.0);
         self.legacy_shade = self.brightness / 2.0;
-        self.update_rgba();
+    }
+
+    pub(crate) fn set_rgb_color_without_hsv(&mut self, input: impl ScratchInput) {
+        let (rgb, alpha) = parse_scratch_color(input.scratch_view());
+        // skip unused hsv state when the generated target has no hsv color blocks.
+        self.rgba = [
+            rgb[0] as f32 / 255.0,
+            rgb[1] as f32 / 255.0,
+            rgb[2] as f32 / 255.0,
+            alpha as f32 / 255.0,
+        ];
+        self.transparency = 100.0 * (1.0 - alpha as f64 / 255.0);
     }
 
     pub fn set_or_change_parameter(
@@ -349,6 +367,34 @@ mod tests {
         assert!((state.rgba[3] - 128.0 / 255.0).abs() < 0.00001);
         state.set_rgb_color("#bad-color");
         assert_eq!(state.rgba, [0.0, 0.0, 0.0, 1.0]);
+    }
+
+    // the generated fast path preserves exact rgb channels and alpha.
+    #[test]
+    fn generated_rgb_fast_path_keeps_exact_color_and_alpha() {
+        let mut state = PenColorState::default();
+        state.set_rgb_color_without_hsv(0x80123456_u32 as f64);
+        assert_eq!(state.rgba, [18.0 / 255.0, 52.0 / 255.0, 86.0 / 255.0, 128.0 / 255.0]);
+        assert!((state.transparency - (100.0 * (1.0 - 128.0 / 255.0))).abs() < 0.00001);
+    }
+
+    // rgb assignment must leave valid hsv state for a later color-parameter block.
+    #[test]
+    fn rgb_color_preserves_channels_and_hsv_controls() {
+        let mut state = PenColorState::default();
+        state.set_rgb_color(0x123456_u32 as f64);
+        assert_eq!(state.rgba, [18.0 / 255.0, 52.0 / 255.0, 86.0 / 255.0, 1.0]);
+        assert!((state.hue - 58.333333333333336).abs() < 0.00001);
+        assert!((state.saturation - 79.06976744186046).abs() < 0.00001);
+        assert!((state.brightness - 33.72549019607843).abs() < 0.00001);
+        state.set_or_change_parameter("saturation", 50.0, false);
+        assert!((state.hue - 58.333333333333336).abs() < 0.00001);
+        assert_eq!(state.saturation, 50.0);
+        assert!((state.brightness - 33.72549019607843).abs() < 0.00001);
+        let expected_rgb = super::hsv_to_rgb(state.hue * 3.6, 0.5, state.brightness / 100.0);
+        for (actual, expected) in state.rgba[..3].iter().zip(expected_rgb) {
+            assert!((*actual - expected as f32).abs() < 0.000001);
+        }
     }
 
     #[test]

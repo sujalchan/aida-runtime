@@ -496,7 +496,9 @@ fn publish_snapshot(
     proxy: &winit::event_loop::EventLoopProxy<renderer::RendererEvent>,
     notification_pending: &AtomicBool,
 ) {
-    let snapshot = program.observable_snapshot(ticks);
+    let mut snapshot = program.observable_snapshot(ticks);
+    // hidden list payloads are not renderer data and must not pin list capacity.
+    snapshot.release_hidden_list_items();
     let pen_commands = program.take_pending_pen_commands();
     enqueue_pen_commands(pending_pen_commands, pen_commands);
     let snapshot = Arc::new(snapshot);

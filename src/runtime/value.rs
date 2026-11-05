@@ -440,6 +440,19 @@ pub struct RuntimeSnapshot {
     pub layers: Vec<LayerSnapshot>,
 }
 
+impl RuntimeSnapshot {
+    // release hidden list storage before a graphical snapshot crosses threads.
+    pub(crate) fn release_hidden_list_items(&mut self) {
+        static EMPTY_ITEMS: std::sync::LazyLock<Arc<Vec<ScratchValue>>> =
+            std::sync::LazyLock::new(|| Arc::new(Vec::new()));
+        for list in &mut self.lists {
+            if !list.visible {
+                list.items = Arc::clone(&EMPTY_ITEMS);
+            }
+        }
+    }
+}
+
 pub fn variable_snapshot_key(
     target: &str,
     name: &str,
@@ -1691,6 +1704,13 @@ impl ScratchState {
             .set_rgb_color(color);
     }
 
+    /// use the generated fast path when this target has no hsv-based pen controls.
+    pub fn set_pen_rgb_color_without_hsv(&mut self, color: impl super::ScratchInput) {
+        self.instances[self.current_instance]
+            .pen_color
+            .set_rgb_color_without_hsv(color);
+    }
+
     pub fn clear_pen(&mut self) {
         self.pending_pen_commands.push(PenCommand::Clear);
         self.request_redraw();
@@ -2409,6 +2429,7 @@ mod tests {
     };
     use crate::runtime::PenCommand;
     use crate::runtime::{ScratchList, list_snapshot_key, scratch_to_number};
+    use std::sync::Arc;
 
     #[test]
     fn pointer_click_timing_excludes_drags_overlays_and_outside_presses() {
@@ -2997,6 +3018,69 @@ mod tests {
         assert_eq!(state.list(1).contents(), "imported second");
         state.set_current_instance(sprite_instance);
         assert_eq!(state.list(0).contents(), "local");
+    }
+
+    // releasing hidden snapshots lets clear and refill reuse all 172,800 slots.
+    #[test]
+    fn graphical_hidden_list_snapshots_release_storage_for_capacity_reuse() {
+        let capacity = 172_800;
+        let mut state = ScratchState::with_project_data(
+            Vec::new(),
+            Vec::new(),
+            vec![ScratchList::new(
+                (0..capacity)
+                    .map(|value| ScratchValue::Number(value as f64))
+                    .collect(),
+            )],
+            vec![ScratchListMetadata::for_target(
+                "stage-list",
+                "number",
+                "Stage",
+                0,
+                true,
+            )],
+            vec![false],
+        );
+        let original_capacity = state.list(0).shared_items().capacity();
+        let mut snapshot = state.observable_snapshot(1);
+        assert_eq!(Arc::strong_count(&state.list(0).shared_items()), 3);
+
+        snapshot.release_hidden_list_items();
+        assert!(snapshot.lists[0].items.is_empty());
+        assert_eq!(Arc::strong_count(&state.list(0).shared_items()), 2);
+        assert!(state.list_mut(0).delete_all());
+        assert_eq!(state.list(0).shared_items().capacity(), original_capacity);
+
+        let mut next_item = 0.0;
+        state.list_mut(0).add_generated_numbers(capacity, || {
+            let value = next_item;
+            next_item += 1.0;
+            value
+        });
+        assert_eq!(state.list(0).length(), capacity);
+        assert_eq!(state.list(0).get(1.0), &ScratchValue::Number(0.0));
+        assert_eq!(
+            state.list(0).get((capacity / 2 + 1) as f64),
+            &ScratchValue::Number((capacity / 2) as f64)
+        );
+        assert_eq!(
+            state.list(0).get(capacity as f64),
+            &ScratchValue::Number((capacity - 1) as f64)
+        );
+
+        state.set_list_visible(0, true);
+        let visible_snapshot = state.observable_snapshot(2);
+        assert!(visible_snapshot.lists[0].visible);
+        assert_eq!(visible_snapshot.lists[0].items.len(), capacity);
+        assert_eq!(visible_snapshot.lists[0].items[0], ScratchValue::Number(0.0));
+        assert_eq!(
+            visible_snapshot.lists[0].items[capacity / 2],
+            ScratchValue::Number((capacity / 2) as f64)
+        );
+        assert_eq!(
+            visible_snapshot.lists[0].items[capacity - 1],
+            ScratchValue::Number((capacity - 1) as f64)
+        );
     }
 
     #[test]
