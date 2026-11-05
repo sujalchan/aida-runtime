@@ -1,5 +1,5 @@
 use super::{
-    ScratchInput, ScratchValue, ScratchValueView, operators::to_text, scratch_equals,
+    CachedListIndex, ScratchInput, ScratchValue, ScratchValueView, operators::to_text, scratch_equals,
     scratch_random, scratch_to_number,
 };
 use serde::de::{IgnoredAny, MapAccess, SeqAccess, Visitor};
@@ -19,6 +19,7 @@ pub struct ScratchList {
     numeric_items: Option<Arc<Vec<f64>>>,
     // Shared snapshots and generic borrowed reads materialize this cache lazily.
     materialized_items: OnceLock<Arc<Vec<ScratchValue>>>,
+    cached_selectors: OnceLock<Arc<Vec<CachedListIndex>>>,
     // true only when constructors or generated operations establish numeric-only contents.
     all_numbers: bool,
 }
@@ -32,6 +33,7 @@ impl ScratchList {
             items: Arc::new(items),
             numeric_items: None,
             materialized_items: OnceLock::new(),
+            cached_selectors: OnceLock::new(),
             all_numbers,
         }
     }
@@ -60,6 +62,7 @@ impl ScratchList {
     // General mutations switch back to the dynamic representation. Cached
     // snapshots remain independent, and read-only access can materialize lazily.
     fn materialize_for_mutation(&mut self) {
+        self.cached_selectors.take();
         if let Some(numbers) = self.numeric_items.take() {
             self.items = self.materialized_items.take().unwrap_or_else(|| {
                 Arc::new(numbers.iter().copied().map(ScratchValue::Number).collect())
@@ -73,6 +76,11 @@ impl ScratchList {
 
     pub fn shared_items(&self) -> Arc<Vec<ScratchValue>> {
         Arc::clone(self.current_items())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_materialized_numeric_items(&self) -> bool {
+        self.numeric_items.is_some() && self.materialized_items.get().is_some()
     }
 
     pub(crate) fn shares_storage_with(&self, other: &Self) -> bool {
@@ -245,6 +253,7 @@ impl ScratchList {
             items: Arc::clone(EMPTY.get_or_init(|| Arc::new(Vec::new()))),
             numeric_items: None,
             materialized_items: OnceLock::new(),
+            cached_selectors: OnceLock::new(),
             all_numbers: true,
         }
     }
@@ -254,6 +263,7 @@ impl ScratchList {
         &mut self,
         run: impl FnOnce(&mut NumericListReplacements<'_>) -> R,
     ) -> R {
+        self.cached_selectors.take();
         if self.all_numbers {
             if self.numeric_items.is_none() {
                 let numbers = self
@@ -293,11 +303,36 @@ impl ScratchList {
         }
     }
 
+    #[inline]
     pub fn get(&self, index: impl ScratchInput) -> &ScratchValue {
+        if let ScratchValueView::Number(number) = index.scratch_view() {
+            return resolve_numeric_index(number, self.length())
+                .and_then(|index| self.current_items().get(index))
+                .unwrap_or(&EMPTY_ITEM);
+        }
         match resolve_index(index, self.length(), false) {
             ListIndex::Item(index) => &self.current_items()[index],
             ListIndex::All | ListIndex::Invalid => &EMPTY_ITEM,
         }
+    }
+
+    /// Return the original item and a cached selector derived from it. The
+    /// cache is dropped on every mutation and never changes list contents.
+    #[inline]
+    pub fn get_with_cached_selector(&self, index: impl ScratchInput) -> (&ScratchValue, CachedListIndex) {
+        let item_index = match resolve_index(index, self.length(), false) {
+            ListIndex::Item(index) => index,
+            ListIndex::All | ListIndex::Invalid => return (&EMPTY_ITEM, CachedListIndex::new(&EMPTY_ITEM)),
+        };
+        let items = self.current_items();
+        let selectors = self.cached_selectors.get_or_init(|| Arc::new(items.iter().map(CachedListIndex::new).collect()));
+        (&items[item_index], selectors[item_index])
+    }
+
+    #[inline]
+    pub fn get_cached_number(&self, index: impl ScratchInput) -> f64 {
+        let (_, selector) = self.get_with_cached_selector(index);
+        scratch_to_number(selector)
     }
 
     pub fn length(&self) -> usize {
@@ -532,6 +567,25 @@ fn resolve_numeric_index(index: f64, length: usize) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::{SCRATCH_LIST_LIMIT, ScratchList, ScratchValue, scratch_equals};
+
+    #[test]
+    fn cached_selector_reads_preserve_values_and_invalidate_on_mutation() {
+        let mut list = ScratchList::new(vec!["12".into(), "last".into(), "NaN".into(), 4.0.into()]);
+        assert_eq!(list.get_cached_number(1.0), 12.0);
+        assert_eq!(list.get_cached_number(2.0), 0.0);
+        assert_eq!(list.get_cached_number(3.0), 0.0);
+        assert_eq!(list.get_with_cached_selector(2.0).0, &ScratchValue::Text("last".into()));
+        let snapshot = list.clone();
+        assert!(list.replace(1.0, "35".into()));
+        assert_eq!(list.get_cached_number(1.0), 35.0);
+        assert_eq!(snapshot.get_cached_number(1.0), 12.0);
+        assert!(list.delete(2.0));
+        assert_eq!(list.get_cached_number(2.0), 0.0);
+        list.replace_all(vec![2.0.into(), 3.0.into()]);
+        assert_eq!(list.get_cached_number(1.0), 2.0);
+        list.with_numeric_replacements(|items| { items.replace_number_and_equals(1.0, 9.0, 9.0); });
+        assert_eq!(list.get_cached_number(1.0), 9.0);
+    }
 
     #[test]
     fn numeric_replacement_and_equality_keep_scratch_index_and_number_rules() {

@@ -32,7 +32,7 @@ pub use value::pointer_click_activates;
 pub use value::scratch_motion_coordinate;
 #[allow(unused_imports)]
 pub use value::{
-    BubbleKind, BubbleSnapshot, LayerSnapshot, ListSnapshot, ObservableEvent, ReporterSnapshot,
+    BubbleKind, BubbleSnapshot, CachedListIndex, LayerSnapshot, ListSnapshot, ObservableEvent, ReporterSnapshot,
     RuntimeInputEvent, RuntimeSnapshot, ScratchInput, ScratchListMetadata, ScratchRotationStyle,
     ScratchSoundEffect, ScratchState, ScratchValue, ScratchValueView, ScratchVariableMetadata,
     SpriteFenceGeometry, VariableSnapshot, list_snapshot_key, variable_snapshot_key,
@@ -43,6 +43,8 @@ pub enum PenCommand {
     Clear,
     Dots(Vec<PenDot>),
     Strokes(Vec<PenStroke>),
+    // An ordered run of points and strokes, with points encoded as zero-length strokes.
+    Mixed(Vec<PenStroke>),
     Stamp {
         target_name: String,
         position: [f32; 2],
@@ -62,6 +64,20 @@ pub struct PenDot {
     pub color: [f32; 4],
     pub diameter: f32,
     pub pixel_offset: f32,
+}
+
+impl PenDot {
+    pub(crate) fn as_stroke(self) -> PenStroke {
+        PenStroke {
+            start: self.position,
+            end: self.position,
+            color: self.color,
+            // Dot alignment uses the clamped diameter; preserve invalid values
+            // for the renderer's normal finite-value validation.
+            diameter: if self.diameter.is_finite() { self.diameter.max(1.0) } else { self.diameter },
+            pixel_offset: self.pixel_offset,
+        }
+    }
 }
 
 // encode fixed pen dropdown choices once in generated code instead of matching strings per block.

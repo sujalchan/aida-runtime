@@ -15,7 +15,26 @@ fn pen_pixel_center_offset(diameter: f32, texture_width: u32) -> f32 {
 impl GraphicsState {
     pub(crate) fn write_pen_commands(&mut self, commands: Vec<PenCommand>) {
         let mut changed = false;
+        // Large alternating dot/stroke streams otherwise require thousands of
+        // draw calls. A zero-length stroke uses the same circular coverage as
+        // a dot, so combine them in their original order between barriers.
+        let commands = if commands.len() >= 256
+            && commands
+                .iter()
+                .any(|command| matches!(command, PenCommand::Dots(_)))
+            && commands
+                .iter()
+                .any(|command| matches!(command, PenCommand::Strokes(_)))
+        {
+            coalesce_large_pen_stream(commands)
+        } else {
+            commands
+        };
         for command in commands {
+            let command = match command {
+                PenCommand::Mixed(strokes) => PenCommand::Strokes(strokes),
+                other => other,
+            };
             match command {
                 PenCommand::Clear => {
                     self.pending_pen_ops.push(PendingPenOp::Clear);
@@ -83,6 +102,7 @@ impl GraphicsState {
                         changed = true;
                     }
                 }
+                PenCommand::Mixed(_) => unreachable!("mixed marks are normalized above"),
                 PenCommand::Stamp {
                     target_name,
                     position,
@@ -205,21 +225,28 @@ impl GraphicsState {
 
         if self.pen_uploaded_count < required {
             let first = self.pen_uploaded_count;
-            for batch in &self.pen_stroke_batches {
-                let batch_end = batch.start + batch.strokes.len();
-                if batch_end <= first {
-                    continue;
-                }
-                let batch_offset = first.saturating_sub(batch.start);
-                let strokes = &batch.strokes[batch_offset..];
-                if strokes.is_empty() {
-                    continue;
-                }
-                let write_offset = batch.start + batch_offset;
+            // Coalesce the ordered CPU batches into one GPU upload. The draw
+            // ranges still refer to the original indices and preserve barriers.
+            if let Some(batch) = self
+                .pen_stroke_batches
+                .iter()
+                .find(|batch| batch.start <= first && batch.start + batch.strokes.len() == required)
+            {
                 self.queue.write_buffer(
                     &self.pen_instances,
-                    (write_offset * std::mem::size_of::<PenInstance>()) as u64,
-                    bytemuck::cast_slice(strokes),
+                    (first * std::mem::size_of::<PenInstance>()) as u64,
+                    bytemuck::cast_slice(&batch.strokes[first - batch.start..]),
+                );
+            } else {
+                let batches = self
+                    .pen_stroke_batches
+                    .iter()
+                    .map(|batch| (batch.start, batch.strokes.as_slice()));
+                let pending = collect_pending_instances(first, required, batches);
+                self.queue.write_buffer(
+                    &self.pen_instances,
+                    (first * std::mem::size_of::<PenInstance>()) as u64,
+                    bytemuck::cast_slice(&pending),
                 );
             }
             self.pen_uploaded_count = required;
@@ -241,21 +268,26 @@ impl GraphicsState {
 
         if self.pen_dot_uploaded_count < required {
             let first = self.pen_dot_uploaded_count;
-            for batch in &self.pen_dot_batches {
-                let batch_end = batch.start + batch.dots.len();
-                if batch_end <= first {
-                    continue;
-                }
-                let batch_offset = first.saturating_sub(batch.start);
-                let dots = &batch.dots[batch_offset..];
-                if dots.is_empty() {
-                    continue;
-                }
-                let write_offset = batch.start + batch_offset;
+            if let Some(batch) = self
+                .pen_dot_batches
+                .iter()
+                .find(|batch| batch.start <= first && batch.start + batch.dots.len() == required)
+            {
                 self.queue.write_buffer(
                     &self.pen_dots,
-                    (write_offset * std::mem::size_of::<PenDotInstance>()) as u64,
-                    bytemuck::cast_slice(dots),
+                    (first * std::mem::size_of::<PenDotInstance>()) as u64,
+                    bytemuck::cast_slice(&batch.dots[first - batch.start..]),
+                );
+            } else {
+                let batches = self
+                    .pen_dot_batches
+                    .iter()
+                    .map(|batch| (batch.start, batch.dots.as_slice()));
+                let pending = collect_pending_instances(first, required, batches);
+                self.queue.write_buffer(
+                    &self.pen_dots,
+                    (first * std::mem::size_of::<PenDotInstance>()) as u64,
+                    bytemuck::cast_slice(&pending),
                 );
             }
             self.pen_dot_uploaded_count = required;
@@ -282,6 +314,42 @@ impl GraphicsState {
         self.upload_pending_pen_instances();
         self.upload_pending_pen_dots();
     }
+}
+
+fn coalesce_large_pen_stream(commands: Vec<PenCommand>) -> Vec<PenCommand> {
+    let mut result = Vec::new();
+    let mut strokes = Vec::new();
+    for command in commands {
+        match command {
+            PenCommand::Dots(dots) => strokes.extend(dots.into_iter().map(PenDot::as_stroke)),
+            PenCommand::Strokes(batch) | PenCommand::Mixed(batch) => strokes.extend(batch),
+            barrier => {
+                if !strokes.is_empty() {
+                    result.push(PenCommand::Strokes(std::mem::take(&mut strokes)));
+                }
+                result.push(barrier);
+            }
+        }
+    }
+    if !strokes.is_empty() {
+        result.push(PenCommand::Strokes(strokes));
+    }
+    result
+}
+
+// Batch indices are contiguous even when their draw operations are interleaved.
+fn collect_pending_instances<'a, T: Copy + 'a>(
+    first: usize,
+    total: usize,
+    batches: impl Iterator<Item = (usize, &'a [T])>,
+) -> Vec<T> {
+    let mut pending = Vec::with_capacity(total - first);
+    for (start, values) in batches {
+        let offset = first.saturating_sub(start).min(values.len());
+        pending.extend_from_slice(&values[offset..]);
+    }
+    debug_assert_eq!(pending.len(), total - first);
+    pending
 }
 
 fn append_dot_range(operations: &mut Vec<PendingPenOp>, start: u32, end: u32) {
@@ -323,7 +391,8 @@ fn sanitize_stamp_effects(transform: &mut SpriteTransform) {
 #[cfg(test)]
 mod tests {
     use super::{
-        PendingPenOp, append_dot_range, append_stroke_range, pen_pixel_center_offset,
+        PenCommand, PenDot, PenStroke, PendingPenOp, append_dot_range, append_stroke_range,
+        coalesce_large_pen_stream, collect_pending_instances, pen_pixel_center_offset,
         pending_stamp_upload_range,
     };
 
@@ -373,6 +442,43 @@ mod tests {
                 PendingPenOp::Dots { start: 9, end: 10 }
             ]
         ));
+    }
+
+    #[test]
+    fn gpu_upload_collects_only_the_pending_suffix() {
+        let a = [1, 2, 3];
+        let b = [4, 5];
+        let c = [6, 7];
+        assert_eq!(
+            collect_pending_instances(2, 7, [(0, &a[..]), (3, &b[..]), (5, &c[..])].into_iter()),
+            vec![3, 4, 5, 6, 7]
+        );
+    }
+
+    #[test]
+    fn large_pen_stream_preserves_order_and_clear_barriers() {
+        let dot = PenDot {
+            position: [1.0, 2.0],
+            color: [0.2, 0.3, 0.4, 0.5],
+            diameter: 3.0,
+            pixel_offset: 0.0,
+        };
+        let line = PenStroke {
+            start: [2.0, 3.0],
+            end: [4.0, 5.0],
+            color: [0.5; 4],
+            diameter: 2.0,
+            pixel_offset: 0.0,
+        };
+        let commands = coalesce_large_pen_stream(vec![
+            PenCommand::Dots(vec![dot]),
+            PenCommand::Strokes(vec![line]),
+            PenCommand::Clear,
+            PenCommand::Dots(vec![dot]),
+        ]);
+        assert!(
+            matches!(commands.as_slice(), [PenCommand::Strokes(first), PenCommand::Clear, PenCommand::Strokes(last)] if first.len() == 2 && first[0].start == dot.position && first[0].end == dot.position && first[0].color == dot.color && first[0].diameter == dot.diameter && first[1] == line && last.len() == 1 && last[0].start == dot.position)
+        );
     }
 
     #[test]

@@ -124,7 +124,7 @@ impl RendererApp {
         };
         self.pending_snapshot_tick = snapshot.tick;
         if let Some(graphics) = self.graphics.as_mut() {
-            match graphics.sync_runtime_snapshot(&snapshot, pen_commands) {
+            let p=std::time::Instant::now();let r=graphics.sync_runtime_snapshot(&snapshot,pen_commands);crate::prof(3,p);match r {
                 Ok(true) => {
                     graphics.window().request_redraw();
                     self.redraw_pending = true;
@@ -170,10 +170,11 @@ impl RendererApp {
             self.dev_mode && (self.dragging_variable || graphics.variable_shadow_is_animating());
         let tick = self.pending_snapshot_tick;
         let acknowledgement_sender = &self.acknowledgement_sender;
-        match graphics.render_with_present_ack(|| {
+        let p=std::time::Instant::now(); let r=graphics.render_with_present_ack(|| {
             let _ = acknowledgement_sender.send(tick);
-        }) {
+        }); crate::prof(4,p); match r {
             RenderOutcome::Presented => {
+                crate::P[5].fetch_add(1,std::sync::atomic::Ordering::Relaxed);
                 if let Some(sender) = self.execution_start_sender.take() {
                     let _ = sender.send(());
                 }
