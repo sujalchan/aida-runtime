@@ -3,7 +3,10 @@ use super::{
     scratch_random, scratch_to_number,
 };
 use serde::de::{IgnoredAny, MapAccess, SeqAccess, Visitor};
-use std::{fmt, sync::Arc};
+use std::{
+    fmt,
+    sync::{Arc, OnceLock},
+};
 
 pub const SCRATCH_LIST_LIMIT: usize = 200_000;
 
@@ -11,16 +14,24 @@ static EMPTY_ITEM: ScratchValue = ScratchValue::Text(String::new());
 
 #[derive(Debug, Clone)]
 pub struct ScratchList {
+    // `items` is authoritative unless the optional compact numeric form is active.
     items: Arc<Vec<ScratchValue>>,
+    numeric_items: Option<Arc<Vec<f64>>>,
+    // Shared snapshots and generic borrowed reads materialize this cache lazily.
+    materialized_items: OnceLock<Arc<Vec<ScratchValue>>>,
     // true only when constructors or generated operations establish numeric-only contents.
     all_numbers: bool,
 }
 
 impl ScratchList {
     pub fn new(items: Vec<ScratchValue>) -> Self {
-        let all_numbers = items.is_empty();
+        let all_numbers = items
+            .iter()
+            .all(|item| matches!(item, ScratchValue::Number(_)));
         Self {
             items: Arc::new(items),
+            numeric_items: None,
+            materialized_items: OnceLock::new(),
             all_numbers,
         }
     }
@@ -37,19 +48,43 @@ impl ScratchList {
         Self::new(items)
     }
 
+    fn current_items(&self) -> &Arc<Vec<ScratchValue>> {
+        match &self.numeric_items {
+            Some(numbers) => self.materialized_items.get_or_init(|| {
+                Arc::new(numbers.iter().copied().map(ScratchValue::Number).collect())
+            }),
+            None => &self.items,
+        }
+    }
+
+    // General mutations switch back to the dynamic representation. Cached
+    // snapshots remain independent, and read-only access can materialize lazily.
+    fn materialize_for_mutation(&mut self) {
+        if let Some(numbers) = self.numeric_items.take() {
+            self.items = self.materialized_items.take().unwrap_or_else(|| {
+                Arc::new(numbers.iter().copied().map(ScratchValue::Number).collect())
+            });
+        }
+    }
+
     pub fn items(&self) -> &[ScratchValue] {
-        &self.items
+        self.current_items()
     }
 
     pub fn shared_items(&self) -> Arc<Vec<ScratchValue>> {
-        Arc::clone(&self.items)
+        Arc::clone(self.current_items())
     }
 
     pub(crate) fn shares_storage_with(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.items, &other.items)
+        match (&self.numeric_items, &other.numeric_items) {
+            (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+            (None, None) => Arc::ptr_eq(&self.items, &other.items),
+            _ => false,
+        }
     }
 
     pub fn add(&mut self, item: ScratchValue) -> bool {
+        self.materialize_for_mutation();
         if self.items.len() >= SCRATCH_LIST_LIMIT {
             return false;
         }
@@ -60,6 +95,7 @@ impl ScratchList {
 
     // reserve one shared vector mutation for batches emitted from safe warp loops.
     pub fn add_generated(&mut self, count: usize, mut item: impl FnMut() -> ScratchValue) -> bool {
+        self.materialize_for_mutation();
         let count = count.min(SCRATCH_LIST_LIMIT.saturating_sub(self.items.len()));
         if count == 0 {
             return false;
@@ -78,6 +114,7 @@ impl ScratchList {
 
     // append statically numeric reporters without per-item dynamic type checks.
     pub fn add_generated_numbers(&mut self, count: usize, mut item: impl FnMut() -> f64) -> bool {
+        self.materialize_for_mutation();
         let count = count.min(SCRATCH_LIST_LIMIT.saturating_sub(self.items.len()));
         if count == 0 {
             return false;
@@ -91,11 +128,15 @@ impl ScratchList {
     }
 
     pub fn replace_all(&mut self, items: Vec<ScratchValue>) {
-        self.all_numbers = items.is_empty();
+        self.materialize_for_mutation();
+        self.all_numbers = items
+            .iter()
+            .all(|item| matches!(item, ScratchValue::Number(_)));
         self.items = Arc::new(items);
     }
 
     pub fn delete(&mut self, index: impl ScratchInput) -> bool {
+        self.materialize_for_mutation();
         match resolve_index(index, self.items.len(), true) {
             ListIndex::All => self.delete_all(),
             ListIndex::Item(index) => {
@@ -111,6 +152,7 @@ impl ScratchList {
 
     // clear shared lists without cloning saved items, and keep the allocation for a refill.
     pub fn delete_all(&mut self) -> bool {
+        self.materialize_for_mutation();
         if self.items.is_empty() {
             self.all_numbers = true;
             return false;
@@ -131,6 +173,7 @@ impl ScratchList {
     }
 
     pub fn insert(&mut self, item: ScratchValue, index: impl ScratchInput) -> bool {
+        self.materialize_for_mutation();
         let index = match resolve_index(index, self.items.len().saturating_add(1), false) {
             ListIndex::Item(index) => index,
             ListIndex::All | ListIndex::Invalid => return false,
@@ -148,6 +191,7 @@ impl ScratchList {
     }
 
     pub fn replace(&mut self, index: impl ScratchInput, item: ScratchValue) -> bool {
+        self.materialize_for_mutation();
         if let ListIndex::Item(index) = resolve_index(index, self.items.len(), false) {
             if self.items[index] != item {
                 self.all_numbers &= matches!(&item, ScratchValue::Number(_));
@@ -158,33 +202,128 @@ impl ScratchList {
         false
     }
 
+    /// replace a numeric one-based item without building dynamic Scratch values.
+    #[inline]
+    pub fn replace_number(&mut self, index: f64, item: f64) -> bool {
+        self.materialize_for_mutation();
+        let Some(index) = resolve_numeric_index(index, self.items.len()) else {
+            return false;
+        };
+        if matches!(&self.items[index], ScratchValue::Number(current) if *current == item) {
+            return false;
+        }
+        Arc::make_mut(&mut self.items)[index] = ScratchValue::Number(item);
+        true
+    }
+
+    /// replace a numeric slot and compare the value read back using one resolved index.
+    #[inline]
+    pub fn replace_number_and_equals(
+        &mut self,
+        index: f64,
+        item: f64,
+        expected: f64,
+    ) -> (bool, bool) {
+        self.materialize_for_mutation();
+        let Some(index) = resolve_numeric_index(index, self.items.len()) else {
+            return (false, false);
+        };
+        let changed = !matches!(&self.items[index], ScratchValue::Number(current) if *current == item);
+        if changed {
+            Arc::make_mut(&mut self.items)[index] = ScratchValue::Number(item);
+        }
+        let matches = match &self.items[index] {
+            ScratchValue::Number(actual) => scratch_equals(*actual, &expected),
+            _ => unreachable!("numeric replacement stores a number before reading it back"),
+        };
+        (changed, matches)
+    }
+
+    pub(crate) fn batch_placeholder() -> Self {
+        static EMPTY: OnceLock<Arc<Vec<ScratchValue>>> = OnceLock::new();
+        Self {
+            items: Arc::clone(EMPTY.get_or_init(|| Arc::new(Vec::new()))),
+            numeric_items: None,
+            materialized_items: OnceLock::new(),
+            all_numbers: true,
+        }
+    }
+
+    /// Borrow the authoritative items once for a synchronous generated batch.
+    pub fn with_numeric_replacements<R>(
+        &mut self,
+        run: impl FnOnce(&mut NumericListReplacements<'_>) -> R,
+    ) -> R {
+        if self.all_numbers {
+            if self.numeric_items.is_none() {
+                let numbers = self
+                    .items
+                    .iter()
+                    .map(|item| match item {
+                        ScratchValue::Number(number) => *number,
+                        _ => unreachable!("numeric list invariant"),
+                    })
+                    .collect();
+                self.numeric_items = Some(Arc::new(numbers));
+            }
+            self.materialized_items.take();
+            let items = Arc::make_mut(self.numeric_items.as_mut().unwrap());
+            run(&mut NumericListReplacements::Numbers(items))
+        } else {
+            self.materialize_for_mutation();
+            let items = Arc::make_mut(&mut self.items);
+            run(&mut NumericListReplacements::Values(items))
+        }
+    }
+
+    /// compare a numeric list item while keeping the general Scratch path available.
+    #[inline]
+    pub fn equals_number(&self, index: f64, value: f64) -> Option<bool> {
+        if !self.all_numbers {
+            return None;
+        }
+        let index = resolve_numeric_index(index, self.length())?;
+        match &self.current_items()[index] {
+            ScratchValue::Number(item) => Some(
+                item.partial_cmp(&value)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .is_eq(),
+            ),
+            _ => None,
+        }
+    }
+
     pub fn get(&self, index: impl ScratchInput) -> &ScratchValue {
-        match resolve_index(index, self.items.len(), false) {
-            ListIndex::Item(index) => &self.items[index],
+        match resolve_index(index, self.length(), false) {
+            ListIndex::Item(index) => &self.current_items()[index],
             ListIndex::All | ListIndex::Invalid => &EMPTY_ITEM,
         }
     }
 
     pub fn length(&self) -> usize {
-        self.items.len()
+        self.numeric_items
+            .as_ref()
+            .map_or_else(|| self.items.len(), |items| items.len())
     }
 
     pub fn contains(&self, item: impl ScratchInput) -> bool {
-        self.items.iter().any(|value| scratch_equals(value, &item))
+        self.current_items()
+            .iter()
+            .any(|value| scratch_equals(value, &item))
     }
 
     pub fn item_number(&self, item: impl ScratchInput) -> usize {
         // compare numeric entries directly while preserving scratch fallback for mixed lists.
         let query = item.scratch_view();
         let index = if let ScratchValueView::Number(search) = query {
-            self.items.iter().position(|value| match value {
+            self.current_items().iter().position(|value| match value {
                 ScratchValue::Number(candidate) if !search.is_nan() && !candidate.is_nan() => {
                     *candidate == search
                 }
                 _ => scratch_equals(value, &item),
             })
         } else {
-            self.items
+            self.current_items()
                 .iter()
                 .position(|value| scratch_equals(value, &item))
         };
@@ -192,19 +331,75 @@ impl ScratchList {
     }
 
     pub fn contents(&self) -> String {
-        let single_letter_items = self.items.iter().all(|item| match item {
+        let single_letter_items = self.current_items().iter().all(|item| match item {
             ScratchValue::Text(text) => text.encode_utf16().count() == 1,
             ScratchValue::Number(_) | ScratchValue::Boolean(_) | ScratchValue::Undefined => false,
         });
         let separator = if single_letter_items { "" } else { " " };
         let mut output = String::new();
-        for (index, item) in self.items.iter().enumerate() {
+        for (index, item) in self.current_items().iter().enumerate() {
             if index != 0 {
                 output.push_str(separator);
             }
             output.push_str(&to_text(item.scratch_view()));
         }
         output
+    }
+}
+
+/// A non-suspending numeric replacement batch over the original list storage.
+pub enum NumericListReplacements<'a> {
+    Values(&'a mut [ScratchValue]),
+    Numbers(&'a mut [f64]),
+}
+
+impl NumericListReplacements<'_> {
+    #[inline]
+    pub fn replace_number_and_equals(
+        &mut self,
+        index: f64,
+        item: f64,
+        expected: f64,
+    ) -> (bool, bool) {
+        // Saturating conversion truncates positive values, maps NaN/negative
+        // to zero and maps infinity beyond the maximum possible Vec length.
+        let Some(index) = (index as usize).checked_sub(1) else {
+            return (false, false);
+        };
+        match self {
+            Self::Values(items) => {
+                let Some(slot) = items.get_mut(index) else {
+                    return (false, false);
+                };
+                let changed = !matches!(slot, ScratchValue::Number(current) if *current == item);
+                if changed {
+                    *slot = ScratchValue::Number(item);
+                }
+                let ScratchValue::Number(actual) = slot else {
+                    unreachable!("numeric replacement stores a number");
+                };
+                (changed, numeric_equals(*actual, expected))
+            }
+            Self::Numbers(items) => {
+                let Some(slot) = items.get_mut(index) else {
+                    return (false, false);
+                };
+                let changed = *slot != item;
+                if changed {
+                    *slot = item;
+                }
+                (changed, numeric_equals(*slot, expected))
+            }
+        }
+    }
+}
+
+#[inline]
+fn numeric_equals(actual: f64, expected: f64) -> bool {
+    if !actual.is_nan() && !expected.is_nan() {
+        actual == expected
+    } else {
+        scratch_equals(actual, expected)
     }
 }
 
@@ -216,7 +411,7 @@ impl Default for ScratchList {
 
 impl PartialEq for ScratchList {
     fn eq(&self, other: &Self) -> bool {
-        self.items == other.items
+        self.items() == other.items()
     }
 }
 
@@ -322,9 +517,200 @@ fn resolve_index(index: impl ScratchInput, length: usize, accept_all: bool) -> L
     }
 }
 
+#[inline]
+fn resolve_numeric_index(index: f64, length: usize) -> Option<usize> {
+    if !index.is_finite() {
+        return None;
+    }
+    let index = index.floor();
+    if index < 1.0 || index > length as f64 {
+        return None;
+    }
+    Some(index as usize - 1)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{SCRATCH_LIST_LIMIT, ScratchList, ScratchValue};
+    use super::{SCRATCH_LIST_LIMIT, ScratchList, ScratchValue, scratch_equals};
+
+    #[test]
+    fn numeric_replacement_and_equality_keep_scratch_index_and_number_rules() {
+        let mut list = ScratchList::new(vec![
+            ScratchValue::Number(0.0),
+            ScratchValue::Number(0.0),
+            ScratchValue::Number(0.0),
+        ]);
+
+        assert!(list.replace_number(2.9, 17.0));
+        assert_eq!(list.length(), 3);
+        assert_eq!(list.get(2.0), &ScratchValue::Number(17.0));
+        assert_eq!(list.equals_number(2.0, 17.0), Some(true));
+        assert_eq!(list.equals_number(2.0, 18.0), Some(false));
+        assert!(!list.replace_number(2.1, 17.0));
+        assert!(!list.replace_number(0.9, 12.0));
+        assert!(!list.replace_number(f64::INFINITY, 12.0));
+        assert_eq!(list.length(), 3);
+
+        let nan_list = ScratchList::new(vec![ScratchValue::Number(f64::NAN)]);
+        assert_eq!(nan_list.equals_number(1.0, 42.0), Some(true));
+
+        let mut mixed = ScratchList::new(vec![ScratchValue::Number(1.0), "two".into()]);
+        assert_eq!(mixed.equals_number(1.0, 1.0), None);
+        assert!(mixed.replace_number(2.0, 3.0));
+        assert_eq!(mixed.get(2.0), &ScratchValue::Number(3.0));
+    }
+
+    #[test]
+    fn numeric_replacement_can_read_back_through_the_same_validated_index() {
+        let mut list = ScratchList::new(vec![ScratchValue::Number(0.0), "old".into()]);
+        assert_eq!(list.replace_number_and_equals(2.0, 17.0, 17.0), (true, true));
+        assert_eq!(list.replace_number_and_equals(2.0, 17.0, 17.0), (false, true));
+        assert_eq!(list.replace_number_and_equals(2.9, 18.0, 18.0), (true, true));
+        assert_eq!(list.replace_number_and_equals(0.0, 17.0, 17.0), (false, false));
+        assert_eq!(list.replace_number_and_equals(-1.0, 19.0, 19.0), (false, false));
+        assert_eq!(list.replace_number_and_equals(3.0, 20.0, 20.0), (false, false));
+        assert_eq!(list.replace_number_and_equals(f64::NAN, 21.0, 21.0), (false, false));
+        assert_eq!(
+            list.replace_number_and_equals(f64::INFINITY, 22.0, 22.0),
+            (false, false)
+        );
+        assert_eq!(list.get(2.0), &ScratchValue::Number(18.0));
+        assert_eq!(
+            list.replace_number_and_equals(1.0, f64::NAN, f64::NAN),
+            (true, true)
+        );
+    }
+
+    #[test]
+    fn numeric_batch_matches_general_replacement_for_mixed_and_invalid_items() {
+        let original = ScratchList::new(vec!["text".into(), 2.0.into()]);
+        let mut general = original.clone();
+        let mut batched = original;
+        let cases = [
+            (1.9, 7.0, 7.0),
+            (2.0, 2.0, 2.0),
+            (0.0, 3.0, 3.0),
+            (-1.0, 3.0, 3.0),
+            (3.0, 3.0, 3.0),
+            (f64::NAN, 3.0, 3.0),
+            (f64::INFINITY, 3.0, 3.0),
+            (1.0, f64::NAN, f64::NAN),
+        ];
+        let expected: Vec<_> = cases
+            .iter()
+            .map(|&(index, item, expected)| {
+                let changed = general.replace(index, ScratchValue::Number(item));
+                (changed, scratch_equals(general.get(index), expected))
+            })
+            .collect();
+        let observed = batched.with_numeric_replacements(|batch| {
+            cases
+                .iter()
+                .map(|&(index, item, expected)| {
+                    batch.replace_number_and_equals(index, item, expected)
+                })
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(observed, expected);
+        assert_eq!(batched.length(), general.length());
+        assert!(matches!(batched.get(1.0), ScratchValue::Number(n) if n.is_nan()));
+        assert_eq!(batched.get(2.0), general.get(2.0));
+    }
+
+    #[test]
+    fn compact_numeric_batch_matches_general_path_for_edge_cases() {
+        let mut ordinary = ScratchList::new(vec![0.0.into(), 2.0.into()]);
+        let mut compact = ordinary.clone();
+        let cases = [
+            (1.9, 7.0, 7.0),
+            (2.0, 2.0, 2.0),
+            (0.0, 3.0, 3.0),
+            (-1.0, 3.0, 3.0),
+            (3.0, 3.0, 3.0),
+            (f64::NAN, 3.0, 3.0),
+            (f64::INFINITY, 3.0, 3.0),
+            (f64::NEG_INFINITY, 3.0, 3.0),
+            (1.0, f64::NAN, f64::NAN),
+        ];
+        let expected: Vec<_> = cases
+            .iter()
+            .map(|&(index, item, expected)| {
+                let changed = ordinary.replace(index, ScratchValue::Number(item));
+                (changed, scratch_equals(ordinary.get(index), expected))
+            })
+            .collect();
+        let observed = compact.with_numeric_replacements(|batch| {
+            cases
+                .iter()
+                .map(|&(index, item, expected)| {
+                    batch.replace_number_and_equals(index, item, expected)
+                })
+                .collect::<Vec<_>>()
+        });
+        assert!(compact.numeric_items.is_some());
+        assert_eq!(observed, expected);
+        assert!(matches!(compact.get(1.0), ScratchValue::Number(n) if n.is_nan()));
+        assert_eq!(compact.get(2.0), ordinary.get(2.0));
+    }
+
+    #[test]
+    fn compact_batches_keep_snapshots_clones_and_general_edits_coherent() {
+        let mut list = ScratchList::new(vec![1.0.into(), 2.0.into(), 3.0.into()]);
+        let original = list.shared_items();
+        list.with_numeric_replacements(|batch| {
+            assert_eq!(batch.replace_number_and_equals(2.0, 8.0, 8.0), (true, true));
+        });
+        assert!(list.numeric_items.is_some());
+        assert_eq!(list.length(), 3);
+        let first_snapshot = list.shared_items();
+        let clone = list.clone();
+        assert!(list.shares_storage_with(&clone));
+        list.with_numeric_replacements(|batch| {
+            assert_eq!(batch.replace_number_and_equals(1.9, 7.0, 7.0), (true, true));
+            assert_eq!(
+                batch.replace_number_and_equals(f64::INFINITY, 9.0, 9.0),
+                (false, false)
+            );
+        });
+        assert!(!list.shares_storage_with(&clone));
+        assert_eq!(original[1], ScratchValue::Number(2.0));
+        assert_eq!(first_snapshot[0], ScratchValue::Number(1.0));
+        assert_eq!(clone.get(1.0), &ScratchValue::Number(1.0));
+        assert_eq!(list.get(1.0), &ScratchValue::Number(7.0));
+        assert_eq!(list.get(2.0), &ScratchValue::Number(8.0));
+        assert!(list.replace(2.0, "edited".into()));
+        assert!(list.numeric_items.is_none());
+        assert_eq!(list.get(2.0), &ScratchValue::Text("edited".into()));
+        assert_eq!(first_snapshot[1], ScratchValue::Number(8.0));
+        assert!(list.insert(4.0.into(), 3.0));
+        assert!(list.delete(1.0));
+        assert_eq!(list.length(), 3);
+        assert_eq!(list.get(1.0), &ScratchValue::Text("edited".into()));
+    }
+
+    #[test]
+    fn numeric_replacement_keeps_large_list_length_and_boundary_values() {
+        // exercise replacement against the fixture's full list length.
+        let length = 172_800;
+        let mut list = ScratchList::new(vec![ScratchValue::Number(0.0); length]);
+
+        assert_eq!(list.replace_number_and_equals(1.0, 11.0, 11.0), (true, true));
+        assert_eq!(
+            list.replace_number_and_equals((length / 2) as f64, 22.0, 22.0),
+            (true, true)
+        );
+        assert_eq!(
+            list.replace_number_and_equals(length as f64, 33.0, 33.0),
+            (true, true)
+        );
+        assert_eq!(list.length(), length);
+        assert_eq!(list.get(1.0), &ScratchValue::Number(11.0));
+        assert_eq!(
+            list.get((length / 2) as f64),
+            &ScratchValue::Number(22.0)
+        );
+        assert_eq!(list.get(length as f64), &ScratchValue::Number(33.0));
+    }
 
     #[test]
     fn preserves_values_and_mutates_with_scratch_indices() {

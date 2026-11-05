@@ -1212,6 +1212,87 @@ impl ScratchState {
         self.publish_variable_change(change, slot);
     }
 
+    /// store a compiler-proven numeric stage value without cloning monitor state.
+    #[inline]
+    pub fn set_shared_number(&mut self, slot: usize, value: f64) {
+        if self.event_sink.is_some() {
+            self.set_shared(slot, ScratchValue::Number(value));
+            return;
+        }
+        let Some(ScratchValue::Number(previous)) = self.values.get(slot) else {
+            self.set_shared(slot, ScratchValue::Number(value));
+            return;
+        };
+        let changed = *previous != value;
+        let notify = self
+            .variables
+            .get(slot)
+            .is_some_and(|metadata| metadata.monitor_visible);
+        self.values[slot] = ScratchValue::Number(value);
+        if changed && notify {
+            self.request_presentation();
+        }
+    }
+
+    /// store a compiler-proven numeric sprite value without cloning monitor state.
+    #[inline]
+    pub fn set_local_number(&mut self, slot: usize, value: f64) {
+        if self.event_sink.is_some() {
+            self.set(slot, ScratchValue::Number(value));
+            return;
+        }
+        let current_instance = self.current_instance;
+        let Some(metadata) = self.variables.get(slot) else {
+            self.set(slot, ScratchValue::Number(value));
+            return;
+        };
+        let instance = &self.instances[current_instance];
+        let previous = instance
+            .values
+            .get(slot)
+            .and_then(Option::as_ref)
+            .unwrap_or(&self.values[slot]);
+        let ScratchValue::Number(previous) = previous else {
+            self.set(slot, ScratchValue::Number(value));
+            return;
+        };
+        let changed = *previous != value;
+        let notify = metadata.monitor_visible
+            && instance.original
+            && instance.target == metadata.target_index;
+        if self.instances[current_instance].values.len() < self.values.len() {
+            self.instances[current_instance]
+                .values
+                .resize(self.values.len(), None);
+        }
+        self.instances[current_instance].values[slot] = Some(ScratchValue::Number(value));
+        if changed && notify {
+            self.request_presentation();
+        }
+    }
+
+    /// Update an existing numeric sprite slot in place in a synchronous batch.
+    #[inline(always)]
+    pub fn set_existing_local_number(&mut self, slot: usize, value: f64) {
+        if self.event_sink.is_none()
+            && let Some(instance) = self.instances.get_mut(self.current_instance)
+            && let Some(Some(ScratchValue::Number(previous))) = instance.values.get_mut(slot)
+        {
+            let changed = *previous != value;
+            let notify = self.variables.get(slot).is_some_and(|metadata| {
+                metadata.monitor_visible
+                    && instance.original
+                    && instance.target == metadata.target_index
+            });
+            *previous = value;
+            if changed && notify {
+                self.request_presentation();
+            }
+            return;
+        }
+        self.set_local_number(slot, value);
+    }
+
     /// apply a scratch-converted numeric change directly to a stage variable.
     #[inline]
     pub fn change_shared(&mut self, slot: usize, change: f64) {
@@ -1220,6 +1301,29 @@ impl ScratchState {
         add_to_scratch_value(&mut self.values[slot], change);
         self.finish_monitored_variable_write(slot, monitor_value);
         self.publish_variable_change(old_value, slot);
+    }
+
+    /// update a compiler-proven numeric stage value without cloning monitor state.
+    #[inline]
+    pub fn change_shared_number(&mut self, slot: usize, change: f64) {
+        if self.event_sink.is_some() {
+            self.change_shared(slot, change);
+            return;
+        }
+        let Some(ScratchValue::Number(previous)) = self.values.get(slot) else {
+            self.change_shared(slot, change);
+            return;
+        };
+        let previous = *previous;
+        let next = scratch_number_operand(previous) + change;
+        let notify = self
+            .variables
+            .get(slot)
+            .is_some_and(|metadata| metadata.monitor_visible);
+        self.values[slot] = ScratchValue::Number(next);
+        if notify && previous != next {
+            self.request_presentation();
+        }
     }
 
     /// change a sprite-local variable for the current instance.
@@ -1262,6 +1366,44 @@ impl ScratchState {
         }
         self.finish_monitored_variable_write(slot, monitor_value);
         self.publish_variable_change(old_value, slot);
+    }
+
+    /// update a compiler-proven numeric sprite value without cloning monitor state.
+    #[inline]
+    pub fn change_local_number(&mut self, slot: usize, change: f64) {
+        if self.event_sink.is_some() {
+            self.change_local_by(slot, change);
+            return;
+        }
+        let current_instance = self.current_instance;
+        let Some(metadata) = self.variables.get(slot) else {
+            self.change_local_by(slot, change);
+            return;
+        };
+        let instance = &self.instances[current_instance];
+        let previous = instance
+            .values
+            .get(slot)
+            .and_then(Option::as_ref)
+            .unwrap_or(&self.values[slot]);
+        let ScratchValue::Number(previous) = previous else {
+            self.change_local_by(slot, change);
+            return;
+        };
+        let previous = *previous;
+        let next = scratch_number_operand(previous) + change;
+        let notify = metadata.monitor_visible
+            && instance.original
+            && instance.target == metadata.target_index;
+        if self.instances[current_instance].values.len() < self.values.len() {
+            self.instances[current_instance]
+                .values
+                .resize(self.values.len(), None);
+        }
+        self.instances[current_instance].values[slot] = Some(ScratchValue::Number(next));
+        if notify && previous != next {
+            self.request_presentation();
+        }
     }
 
     fn monitored_variable_value(&self, slot: usize) -> Option<ScratchValue> {
@@ -1589,6 +1731,21 @@ impl ScratchState {
                 .unwrap();
         }
         &mut self.lists[slot]
+    }
+
+    /// Run a synchronous generated batch with a Stage list borrowed once.
+    /// The generated closure must access this list only through `items`; it
+    /// cannot invoke or yield to another script before returning.
+    pub fn with_stage_numeric_list_batch<R>(
+        &mut self,
+        slot: usize,
+        run: impl FnOnce(&mut Self, &mut super::list::NumericListReplacements<'_>) -> R,
+    ) -> R {
+        debug_assert!(self.list_metadata[slot].is_stage);
+        let mut list = std::mem::replace(&mut self.lists[slot], ScratchList::batch_placeholder());
+        let result = list.with_numeric_replacements(|items| run(self, items));
+        self.lists[slot] = list;
+        result
     }
 
     pub fn set_current_instance(&mut self, instance: usize) {
@@ -3401,6 +3558,90 @@ mod tests {
     }
 
     #[test]
+    fn stage_numeric_batch_restores_authoritative_list_and_keeps_snapshots() {
+        let mut state = ScratchState::with_project_data(
+            vec![],
+            vec![],
+            vec![ScratchList::new(vec!["old".into(), 2.0.into()])],
+            vec![ScratchListMetadata::for_target(
+                "id", "items", "Stage", 0, true,
+            )],
+            vec![true],
+        );
+        let snapshot = state.observable_snapshot(0);
+        let result = state.with_stage_numeric_list_batch(0, |state, list| {
+            assert_eq!(list.replace_number_and_equals(1.9, 7.0, 7.0), (true, true));
+            assert_eq!(
+                list.replace_number_and_equals(0.0, 8.0, 8.0),
+                (false, false)
+            );
+            assert_eq!(list.replace_number_and_equals(2.0, 2.0, 2.0), (false, true));
+            state.list_changed_result(0, true);
+            42
+        });
+        assert_eq!(result, 42);
+        assert_eq!(state.list(0).length(), 2);
+        assert_eq!(state.list(0).get(1.0), &ScratchValue::Number(7.0));
+        assert_eq!(snapshot.lists[0].items[0], ScratchValue::Text("old".into()));
+        assert!(state.presentation_requested());
+        let key = list_snapshot_key("Stage", "items", "id", None);
+        state.apply_input(RuntimeInputEvent::ListSetItem {
+            key,
+            index: 1,
+            value: "edited".into(),
+        });
+        assert_eq!(state.list(0).get(1.0), &ScratchValue::Text("edited".into()));
+    }
+
+    #[test]
+    fn compact_stage_list_snapshots_and_monitor_edits_follow_batch_changes() {
+        let mut state = ScratchState::with_project_data(
+            vec![],
+            vec![],
+            vec![ScratchList::new(
+                (0..200).map(|n| ScratchValue::Number(n as f64)).collect(),
+            )],
+            vec![ScratchListMetadata::for_target(
+                "id", "items", "Stage", 0, true,
+            )],
+            vec![true],
+        );
+        let before = state.observable_snapshot(0);
+        state.with_stage_numeric_list_batch(0, |state, list| {
+            let (changed, matches) = list.replace_number_and_equals(175.0, 999.0, 999.0);
+            assert!(changed && matches);
+            state.list_changed_result(0, changed);
+        });
+        let scrolled_snapshot = state.observable_snapshot(1);
+        assert_eq!(before.lists[0].items[174], ScratchValue::Number(174.0));
+        assert_eq!(
+            scrolled_snapshot.lists[0].items[174],
+            ScratchValue::Number(999.0)
+        );
+        state.with_stage_numeric_list_batch(0, |_, list| {
+            assert_eq!(
+                list.replace_number_and_equals(175.0, 888.0, 888.0),
+                (true, true)
+            );
+        });
+        assert_eq!(
+            scrolled_snapshot.lists[0].items[174],
+            ScratchValue::Number(999.0)
+        );
+        let key = list_snapshot_key("Stage", "items", "id", None);
+        state.apply_input(RuntimeInputEvent::ListSetItem {
+            key,
+            index: 175,
+            value: "edited".into(),
+        });
+        assert_eq!(
+            state.list(0).get(175.0),
+            &ScratchValue::Text("edited".into())
+        );
+        assert_eq!(state.list(0).length(), 200);
+    }
+
+    #[test]
     fn clone_positions_inherit_and_then_change_independently() {
         let mut state = ScratchState::new(vec![]);
         state.register_target(0, "Stage", true);
@@ -3443,6 +3684,44 @@ mod tests {
     }
 
     #[test]
+    fn existing_local_number_preserves_events_monitor_and_clone_scope() {
+        let mut state = ScratchState::with_metadata(
+            vec![ScratchValue::Text("initial".into())],
+            vec![
+                ScratchVariableMetadata::for_target("local", "score", "Sprite", 1, false)
+                    .with_monitor_visible(true),
+            ],
+        );
+        state.register_target(0, "Stage", true);
+        state.register_target(1, "Sprite", false);
+        let original = state.original_instance(1).unwrap();
+        state.set_current_instance(original);
+        // The first nonnumeric write uses the general fallback.
+        state.set_existing_local_number(0, 2.0);
+        assert_eq!(state.get(0), &ScratchValue::Number(2.0));
+        state.presentation_consumed();
+        state.set_existing_local_number(0, 3.0);
+        assert_eq!(state.get(0), &ScratchValue::Number(3.0));
+        assert!(state.presentation_requested());
+        let clone = state.create_clone(original, 1, 300).unwrap();
+        state.set_current_instance(clone);
+        state.presentation_consumed();
+        state.set_existing_local_number(0, 4.0);
+        assert!(!state.presentation_requested());
+        assert_eq!(state.get(0), &ScratchValue::Number(4.0));
+        state.set_current_instance(original);
+        assert_eq!(state.get(0), &ScratchValue::Number(3.0));
+        let (tx, rx) = std::sync::mpsc::channel();
+        state.set_event_sink(Some(tx));
+        state.set_existing_local_number(0, 5.0);
+        assert_eq!(state.get(0), &ScratchValue::Number(5.0));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ObservableEvent::VariableChange { .. })
+        ));
+    }
+
+    #[test]
     fn shared_variable_fast_access_ignores_clone_local_storage() {
         let mut state = clone_test_state();
         let clone = state.create_clone(1, 1, 300).unwrap();
@@ -3477,6 +3756,45 @@ mod tests {
         assert!(
             matches!(state.get_shared(4), ScratchValue::Number(value) if value.is_sign_negative())
         );
+    }
+
+    // exercise the compiled numeric change path, including its first dynamic-value fallback.
+    #[test]
+    fn numeric_change_fast_paths_preserve_scope_and_monitor_updates() {
+        let mut state = ScratchState::with_metadata(
+            vec![
+                ScratchValue::Text(" 2.5 ".to_owned()),
+                ScratchValue::Text("3".to_owned()),
+            ],
+            vec![
+                ScratchVariableMetadata::for_target("stage", "shared", "Stage", 0, true)
+                    .with_monitor_visible(true),
+                ScratchVariableMetadata::for_target("local", "score", "Sprite", 1, false)
+                    .with_monitor_visible(true),
+            ],
+        );
+        state.register_target(0, "Stage", true);
+        state.register_target(1, "Sprite", false);
+        let original = state.original_instance(1).unwrap();
+        state.begin_tick();
+
+        state.change_shared_number(0, 1.0);
+        assert_eq!(state.get_shared(0), &ScratchValue::Number(3.5));
+        assert!(state.presentation_requested());
+        state.presentation_consumed();
+        state.change_shared_number(0, 1.0);
+        assert_eq!(state.get_shared(0), &ScratchValue::Number(4.5));
+        assert!(state.presentation_requested());
+
+        state.set_current_instance(original);
+        state.change_local_number(1, 2.0);
+        assert_eq!(state.get(1), &ScratchValue::Number(5.0));
+        let clone = state.create_clone(original, 1, 300).unwrap();
+        state.set_current_instance(clone);
+        state.change_local_number(1, 4.0);
+        assert_eq!(state.get(1), &ScratchValue::Number(9.0));
+        state.set_current_instance(original);
+        assert_eq!(state.get(1), &ScratchValue::Number(5.0));
     }
 
     #[test]

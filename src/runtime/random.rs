@@ -40,6 +40,7 @@ impl ScratchRandom {
     }
 
     /// sample using preconverted bounds while preserving the integer endpoint rule.
+    #[inline]
     pub fn between_with_integer_bounds(&mut self, from: f64, to: f64, integer_bounds: bool) -> f64 {
         let (low, high) = if from <= to { (from, to) } else { (to, from) };
         if low == high {
