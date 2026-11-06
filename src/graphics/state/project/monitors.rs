@@ -43,26 +43,15 @@ pub(in crate::graphics::state) fn project_monitors(
                 .map(|variable| variable.name.as_str())
                 .or_else(|| list.map(|list| list.name.as_str()))
                 .unwrap_or(fallback_name);
-            let name = if kind == MonitorKind::ScalarVariable
-                && target.is_some_and(|target| !target.is_stage)
-            {
-                format!(
-                    "{}: {}",
-                    target.map_or("", |target| target.name.as_str()),
-                    base_name
-                )
-            } else if kind == MonitorKind::Reporter && target.is_some_and(|target| !target.is_stage)
-            {
-                format!(
-                    "{}: {}",
-                    target.unwrap().name,
-                    monitor_label(&monitor.opcode, &monitor.params)
-                )
-            } else if kind == MonitorKind::ScalarVariable || kind == MonitorKind::List {
+            let monitor_name = if kind == MonitorKind::ScalarVariable || kind == MonitorKind::List {
                 base_name.to_owned()
             } else {
                 monitor_label(&monitor.opcode, &monitor.params)
             };
+            let name = target.map_or_else(
+                || monitor_name.clone(),
+                |target| format!("{}: {monitor_name}", target.name),
+            );
             let value_key = if monitor.opcode == "sensing_timer" {
                 "timer".to_owned()
             } else if let Some(target) = target {
@@ -226,7 +215,7 @@ fn monitor_label(
         "motion_yposition" => "y position",
         "motion_direction" => "direction",
         "looks_size" => "size",
-        "sound_volume" => "volume",
+        "sound_volume" => "Volume",
         "sensing_answer" => "answer",
         "sensing_loudness" => "loudness",
         "sensing_timer" => "timer",

@@ -76,11 +76,23 @@ fn sprite_costume_metrics(
     sprite: &Sprite,
 ) -> ([f32; 2], [f32; 2]) {
     let costume = target.costumes.get(costume_index);
-    let resolution = costume
+    let raw_resolution = costume
         .and_then(|costume| costume.bitmap_resolution)
-        .unwrap_or(1.0)
-        .max(1.0) as f32;
-    let logical_size = sprite.logical_size(resolution);
+        .unwrap_or(1.0);
+    let resolution = if raw_resolution == 0.0 {
+        2.0
+    } else if raw_resolution.is_finite() && raw_resolution > 0.0 {
+        raw_resolution
+    } else {
+        1.0
+    } as f32;
+    let logical_size = costume
+        .and_then(|costume| costume.logical_size)
+        .filter(|[width, height]| {
+            width.is_finite() && height.is_finite() && *width >= 0.0 && *height >= 0.0
+        })
+        .map(|[width, height]| [width as f32, height as f32])
+        .unwrap_or_else(|| sprite.logical_size(resolution));
     let default_x = logical_size[0] * 0.5;
     let default_y = logical_size[1] * 0.5;
     (

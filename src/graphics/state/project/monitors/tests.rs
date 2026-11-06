@@ -7,7 +7,7 @@ fn project_monitors_keep_owner_scope_category_and_list_mode() {
             r#"{
                 "targets": [
                     {"name":"Stage","isStage":true,"variables":{"global-id":["score",7]},"lists":{"stage-list":["stage items",["a","b"]]}},
-                    {"name":"Sprite1","isStage":false,"variables":{"local-id":["score",5]}},
+                    {"name":"Sprite1","isStage":false,"variables":{"local-id":["score",5]},"lists":{"sprite-list":["items",["x"]]}},
                     {"name":"Sprite2","isStage":false,"variables":{"local-id-2":["score",9]}}
                 ],
                 "monitors": [
@@ -15,7 +15,8 @@ fn project_monitors_keep_owner_scope_category_and_list_mode() {
                     {"id":"local-id-2","mode":"default","opcode":"data_variable","params":{"VARIABLE":"score"},"spriteName":"Sprite2","value":9,"x":10,"y":60,"visible":true},
                     {"id":"global-id","mode":"default","opcode":"data_variable","params":{"VARIABLE":"score"},"spriteName":null,"value":7,"x":10,"y":100,"visible":true},
                     {"id":"stage-list","mode":"list","opcode":"data_listcontents","params":{"LIST":"stage items"},"spriteName":null,"value":2,"width":120,"height":150,"visible":true},
-                    {"id":"plus","mode":"large","opcode":"operator_add","params":{},"spriteName":null,"value":3,"visible":true}
+                    {"id":"plus","mode":"large","opcode":"operator_add","params":{},"spriteName":null,"value":3,"visible":true},
+                    {"id":"sprite-list","mode":"list","opcode":"data_listcontents","params":{"LIST":"items"},"spriteName":"Sprite1","value":1,"visible":true}
                 ]
             }"#,
         )
@@ -23,7 +24,7 @@ fn project_monitors_keep_owner_scope_category_and_list_mode() {
     let monitors = project_monitors(&project);
     assert_eq!(monitors[0].name, "Sprite1: score");
     assert_eq!(monitors[1].name, "Sprite2: score");
-    assert_eq!(monitors[2].name, "score");
+    assert_eq!(monitors[2].name, "Stage: score");
     assert_ne!(monitors[0].value_key, monitors[1].value_key);
     assert_eq!(monitors[3].kind, MonitorKind::List);
     assert_eq!(monitors[3].category, MonitorCategory::Lists);
@@ -33,6 +34,54 @@ fn project_monitors_keep_owner_scope_category_and_list_mode() {
     assert_eq!(monitors[4].kind, MonitorKind::Reporter);
     assert_eq!(monitors[4].category, MonitorCategory::Operators);
     assert_eq!(monitors[4].display_mode, MonitorDisplayMode::ValueOnly);
+    assert_eq!(monitors[3].name, "Stage: stage items");
+    assert_eq!(monitors[5].name, "Sprite1: items");
+}
+
+#[test]
+fn sensing_of_fixture_labels_stage_volume_with_its_owner() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../aida-ast/tests/src/sensing-of.sb3"
+    );
+    let json = aida_ast::extractor::read_project_json(path).unwrap();
+    let project = aida_ast::parser::parse_project(&json).unwrap();
+    let monitors = project_monitors(&project);
+
+    assert!(project.monitors.iter().any(|monitor| {
+        monitor.opcode == "sound_volume"
+            && monitor
+                .sprite_name
+                .as_deref()
+                .is_none_or(|owner| owner == "Stage")
+    }));
+    assert!(
+        monitors
+            .iter()
+            .any(|monitor| monitor.name == "Stage: Volume")
+    );
+}
+
+#[test]
+fn costume_size_fixture_labels_owned_looks_reporters() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../aida-ast/tests/src/costume-size.sb3"
+    );
+    let json = aida_ast::extractor::read_project_json(path).unwrap();
+    let project = aida_ast::parser::parse_project(&json).unwrap();
+    let monitors = project_monitors(&project);
+
+    for label in [
+        "Sprite1: size",
+        "Sprite1: costume number",
+        "Sprite1: costume name",
+    ] {
+        assert!(
+            monitors.iter().any(|monitor| monitor.name == label),
+            "missing monitor label {label}"
+        );
+    }
 }
 
 #[test]

@@ -23,12 +23,56 @@ fn to_number(value: ScratchValueView<'_>) -> f64 {
             if text.is_empty() {
                 0.0
             } else {
-                text.parse::<f64>().unwrap_or(0.0)
+                scratch_text_to_number(text)
             }
         }
     };
 
     if number.is_nan() { 0.0 } else { number }
+}
+
+fn scratch_text_to_number(text: &str) -> f64 {
+    match text {
+        "Infinity" | "+Infinity" => return f64::INFINITY,
+        "-Infinity" => return f64::NEG_INFINITY,
+        _ => {}
+    }
+    if matches!(text.as_bytes().first(), Some(b'i' | b'I' | b'+' | b'-')) {
+        let unsigned = text
+            .strip_prefix('+')
+            .or_else(|| text.strip_prefix('-'))
+            .unwrap_or(text);
+        if unsigned.eq_ignore_ascii_case("inf") || unsigned.eq_ignore_ascii_case("infinity") {
+            return 0.0;
+        }
+    }
+
+    let bytes = text.as_bytes();
+    let radix = if bytes.first() == Some(&b'0') {
+        match bytes.get(1) {
+            Some(b'x' | b'X') => Some(16_u32),
+            Some(b'b' | b'B') => Some(2_u32),
+            Some(b'o' | b'O') => Some(8_u32),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    if let Some(radix) = radix {
+        let digits = &text[2..];
+        if digits.is_empty() {
+            return 0.0;
+        }
+        return digits
+            .chars()
+            .try_fold(0.0, |number, character| {
+                character
+                    .to_digit(radix)
+                    .map(|digit| number * f64::from(radix) + f64::from(digit))
+            })
+            .unwrap_or(0.0);
+    }
+    text.parse::<f64>().unwrap_or(0.0)
 }
 
 /// Convert a Scratch value to a number using Scratch's arithmetic rules.
@@ -424,6 +468,11 @@ mod tests {
     fn converts_scratch_values_to_numbers() {
         assert_eq!(scratch_to_number(5.5), 5.5);
         assert_eq!(scratch_to_number(" 5.5 "), 5.5);
+        assert_eq!(scratch_to_number("0x10"), 16.0);
+        assert_eq!(scratch_to_number("0b101"), 5.0);
+        assert_eq!(scratch_to_number("0o17"), 15.0);
+        assert_eq!(scratch_to_number("Infinity"), f64::INFINITY);
+        assert_eq!(scratch_to_number("-Infinity"), f64::NEG_INFINITY);
         assert_eq!(scratch_to_number(true), 1.0);
         assert_eq!(scratch_to_number("not a number"), 0.0);
         assert_eq!(scratch_to_number(f64::NAN), 0.0);

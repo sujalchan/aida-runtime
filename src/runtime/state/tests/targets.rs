@@ -273,6 +273,180 @@ fn keyboard_reporter_uses_the_executing_instances_current_costume_name() {
     assert!(state.key_pressed(state.costume_number_name(false)));
 }
 
+fn sized_costume_state(costumes: Vec<(String, Option<[f64; 2]>)>) -> ScratchState {
+    let mut state = ScratchState::new(Vec::new());
+    state.register_target(0, "Stage", true);
+    state.register_target(1, "Sprite1", false);
+    state.set_target_costumes_with_sizes(1, costumes, 0);
+    state.set_current_instance(state.original_instance(1).unwrap());
+    state
+}
+
+fn stored_size(state: &ScratchState) -> f64 {
+    state.instances[state.current_instance].size
+}
+
+#[test]
+fn costume_size_matches_scratch_bounds_and_keeps_fractional_storage() {
+    let mut state = sized_costume_state(vec![("costume1".to_owned(), Some([61.49876, 117.72954]))]);
+
+    state.set_size(-100.0);
+    let minimum = stored_size(&state);
+    assert!((minimum - 8.1302452277).abs() < 1e-9);
+    state.change_size_by(10.0);
+    assert!((stored_size(&state) - (minimum + 10.0)).abs() < 1e-12);
+    assert_eq!(state.size_reporter(), 18.0);
+
+    state.set_size(1.0e21);
+    assert!((stored_size(&state) - 458.6784251429).abs() < 1e-9);
+    state.change_size_by(-10.0);
+    assert_eq!(state.size_reporter(), 449.0);
+}
+
+#[test]
+fn costume_dimensions_select_width_and_height_minimum_and_maximum_bounds() {
+    let mut state = sized_costume_state(vec![
+        ("width minimum".to_owned(), Some([10.0, 20.0])),
+        ("height minimum".to_owned(), Some([20.0, 10.0])),
+        ("width maximum".to_owned(), Some([100.0, 10.0])),
+        ("height maximum".to_owned(), Some([10.0, 100.0])),
+    ]);
+
+    state.set_size(-100.0);
+    assert_eq!(stored_size(&state), 50.0);
+    state.switch_costume_to("height minimum".into());
+    state.set_size(-100.0);
+    assert_eq!(stored_size(&state), 50.0);
+    state.switch_costume_to("width maximum".into());
+    state.set_size(f64::INFINITY);
+    assert_eq!(stored_size(&state), 720.0);
+    state.switch_costume_to("height maximum".into());
+    state.set_size(f64::INFINITY);
+    assert_eq!(stored_size(&state), 540.0);
+}
+
+#[test]
+fn costume_switch_preserves_size_then_clamps_against_the_new_costume() {
+    let mut state = sized_costume_state(vec![
+        ("small".to_owned(), Some([10.0, 20.0])),
+        ("large".to_owned(), Some([100.0, 100.0])),
+    ]);
+    state.set_size(400.0);
+    assert_eq!(stored_size(&state), 400.0);
+
+    state.switch_costume_to("large".into());
+    assert_eq!(stored_size(&state), 400.0);
+    state.set_size(1.0e21);
+    assert_eq!(stored_size(&state), 540.0);
+}
+
+#[test]
+fn costume_switch_uses_scratch_numeric_rounding_and_ignores_unknown_choices() {
+    let mut state = sized_costume_state(vec![
+        ("one".to_owned(), Some([100.0, 100.0])),
+        ("two".to_owned(), Some([100.0, 100.0])),
+    ]);
+
+    state.switch_costume_to(1.5.into());
+    assert_eq!(state.costume_number_name(true), ScratchValue::Number(2.0));
+    state.switch_costume_to("0.5".into());
+    assert_eq!(state.costume_number_name(true), ScratchValue::Number(1.0));
+    state.switch_costume_to("unknown costume".into());
+    assert_eq!(state.costume_number_name(true), ScratchValue::Number(1.0));
+    state.switch_costume_to(true.into());
+    assert_eq!(state.costume_number_name(true), ScratchValue::Number(1.0));
+    state.switch_costume_to("next costume".into());
+    assert_eq!(state.costume_number_name(true), ScratchValue::Number(2.0));
+    state.switch_costume_to(f64::INFINITY.into());
+    assert_eq!(state.costume_number_name(true), ScratchValue::Number(1.0));
+}
+
+#[test]
+fn next_costume_cycles_and_clone_size_and_costume_state_are_independent() {
+    let mut state = sized_costume_state(vec![
+        ("small".to_owned(), Some([10.0, 20.0])),
+        ("large".to_owned(), Some([100.0, 100.0])),
+    ]);
+    let original = state.current_instance();
+    state.set_size(400.0);
+    let clone = state.create_clone(original, 1, 300).unwrap();
+    assert_eq!(state.instances[clone].size, 400.0);
+
+    state.set_current_instance(clone);
+    state.set_size(-100.0);
+    assert_eq!(stored_size(&state), 50.0);
+    state.next_costume();
+    assert_eq!(state.costume_number_name(true), ScratchValue::Number(2.0));
+    assert_eq!(
+        state.costume_number_name(false),
+        ScratchValue::Text("large".to_owned())
+    );
+    state.set_size(1.0e21);
+    assert_eq!(stored_size(&state), 540.0);
+
+    state.set_current_instance(original);
+    assert_eq!(stored_size(&state), 400.0);
+    assert_eq!(
+        state.costume_number_name(false),
+        ScratchValue::Text("small".to_owned())
+    );
+}
+
+#[test]
+fn size_inputs_follow_scratch_number_conversion_and_reporter_rounding() {
+    let mut state = sized_costume_state(vec![("bitmap".to_owned(), Some([100.0, 100.0]))]);
+
+    state.set_size("25.5");
+    assert_eq!(stored_size(&state), 25.5);
+    assert_eq!(state.size_reporter(), 26.0);
+    state.set_size("0x10");
+    assert_eq!(stored_size(&state), 16.0);
+    state.set_size(25.499);
+    assert_eq!(state.size_reporter(), 25.0);
+
+    for input in ["", "not a number"] {
+        state.set_size(input);
+        assert_eq!(stored_size(&state), 5.0);
+    }
+    state.set_size(true);
+    assert_eq!(stored_size(&state), 5.0);
+    state.set_size(false);
+    assert_eq!(stored_size(&state), 5.0);
+    state.set_size(f64::NAN);
+    assert_eq!(stored_size(&state), 5.0);
+    state.set_size(f64::NEG_INFINITY);
+    assert_eq!(stored_size(&state), 5.0);
+    state.set_size(f64::INFINITY);
+    assert_eq!(stored_size(&state), 540.0);
+    state.set_size("Infinity");
+    assert_eq!(stored_size(&state), 540.0);
+    state.set_size("-Infinity");
+    assert_eq!(stored_size(&state), 5.0);
+    state.set_size(-1.0e21);
+    assert_eq!(stored_size(&state), 5.0);
+}
+
+#[test]
+fn stage_and_missing_costume_metadata_do_not_change_size() {
+    let mut state = sized_costume_state(vec![("unknown".to_owned(), None)]);
+    state.set_size(250.0);
+    assert_eq!(stored_size(&state), 250.0);
+
+    state.set_current_instance(state.original_instance(0).unwrap());
+    state.set_size(250.0);
+    state.change_size_by(-50.0);
+    assert_eq!(stored_size(&state), 100.0);
+}
+
+#[test]
+fn zero_sized_costume_uses_scratch_zero_dimension_limits() {
+    let mut state = sized_costume_state(vec![("empty".to_owned(), Some([0.0, 0.0]))]);
+    state.set_size(-100.0);
+    assert_eq!(stored_size(&state), 100.0);
+    state.set_size(1000.0);
+    assert_eq!(stored_size(&state), 1000.0);
+}
+
 #[test]
 fn hidden_sprite_motion_updates_position_without_a_sprite_redraw() {
     let mut state = ScratchState::new(Vec::new());

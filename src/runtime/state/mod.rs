@@ -1,10 +1,11 @@
 //! Authoritative Scratch project state and its implementation.
 
+use super::operators::to_text;
 use super::{
     CachedListIndex, PenColorParameter, PenColorState, PenCommand, PenDot, PenStroke,
     RealtimeAudio, ScratchInput, ScratchList, ScratchValue, ScratchValueView, SoundLibrary,
-    SoundParameters, SoundRuntime, scratch_number_operand, scratch_random, scratch_string,
-    scratch_to_number,
+    SoundParameters, SoundRuntime, scratch_number_operand, scratch_random, scratch_round,
+    scratch_string, scratch_to_number,
 };
 use std::collections::HashSet;
 use std::fmt::Debug;
@@ -23,7 +24,7 @@ mod variables;
 use lists::ListMonitorEdit;
 use sensing::{RuntimeInputState, default_username};
 use snapshots::SpeechBubble;
-use targets::ScratchTargetInstance;
+use targets::{ScratchCostumeMetadata, ScratchTargetInstance};
 
 pub use monitors::{
     ScratchListMetadata, ScratchVariableMetadata, list_snapshot_key, variable_snapshot_key,
@@ -48,7 +49,7 @@ pub struct ScratchState {
     current_instance: usize,
     pending_clones: Vec<usize>,
     target_names: Vec<(usize, String, bool)>,
-    target_costumes: Vec<(usize, Vec<String>)>,
+    target_costumes: Vec<Vec<ScratchCostumeMetadata>>,
     fence_geometry: Vec<Option<SpriteFenceGeometry>>,
     event_sink: Option<Sender<ObservableEvent>>,
     input: RuntimeInputState,

@@ -112,6 +112,55 @@ pub(super) struct ScratchTargetInstance {
     pub(super) volume: f64,
 }
 
+#[derive(Debug, Clone)]
+pub(super) struct ScratchCostumeMetadata {
+    pub(super) name: String,
+    size_bounds: Option<(f64, f64)>,
+}
+
+impl ScratchCostumeMetadata {
+    fn new(name: String, logical_size: Option<[f64; 2]>) -> Self {
+        let size_bounds = logical_size
+            .filter(|[width, height]| {
+                width.is_finite() && height.is_finite() && *width >= 0.0 && *height >= 0.0
+            })
+            .map(|[width, height]| {
+                let min_scale = 1.0_f64.min((5.0 / width).max(5.0 / height));
+                let max_scale = ((1.5 * 480.0) / width).min((1.5 * 360.0) / height);
+                (min_scale, max_scale)
+            });
+        Self { name, size_bounds }
+    }
+}
+
+fn wrapped_costume_index(index: f64, costume_count: usize) -> usize {
+    let rounded = super::scratch_round(index);
+    if !rounded.is_finite() || costume_count == 0 {
+        return 0;
+    }
+    rounded.rem_euclid(costume_count as f64) as usize
+}
+
+fn costume_number_from_text(text: &str) -> Option<f64> {
+    let text = text.trim();
+    if text.is_empty() || matches!(text, "inf" | "+inf" | "-inf" | "INF" | "+INF" | "-INF") {
+        return None;
+    }
+    if let Some(hex) = text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
+        return u64::from_str_radix(hex, 16).ok().map(|value| value as f64);
+    }
+    if let Some(binary) = text.strip_prefix("0b").or_else(|| text.strip_prefix("0B")) {
+        return u64::from_str_radix(binary, 2)
+            .ok()
+            .map(|value| value as f64);
+    }
+    if let Some(octal) = text.strip_prefix("0o").or_else(|| text.strip_prefix("0O")) {
+        return u64::from_str_radix(octal, 8).ok().map(|value| value as f64);
+    }
+    let number = text.parse::<f64>().ok()?;
+    (!number.is_nan()).then_some(number)
+}
+
 impl ScratchState {
     pub fn set_backdrops(&mut self, names: Vec<String>, current_index: usize) {
         self.backdrop_names = names;
@@ -261,6 +310,40 @@ impl ScratchState {
         }
     }
 
+    /// update the executing sprite's Scratch size from an input value.
+    pub fn set_size(&mut self, value: impl super::ScratchInput) {
+        let requested_size = super::scratch_to_number(value);
+        let instance = &self.instances[self.current_instance];
+        if instance.is_stage {
+            return;
+        }
+        let size_bounds = self
+            .target_costumes
+            .get(instance.target)
+            .and_then(|costumes| costumes.get(instance.costume_index))
+            .and_then(|costume| costume.size_bounds);
+        let size = if let Some((min_scale, max_scale)) = size_bounds {
+            (requested_size / 100.0).max(min_scale).min(max_scale) * 100.0
+        } else {
+            // Older generated modules registered names without skin dimensions.
+            requested_size.max(0.0)
+        };
+        let instance = &mut self.instances[self.current_instance];
+        if instance.size == size {
+            return;
+        }
+        instance.size = size;
+        instance.fence_offsets = None;
+        self.request_redraw();
+    }
+
+    /// apply Scratch's size change block to the executing sprite.
+    pub fn change_size_by(&mut self, value: impl super::ScratchInput) {
+        let change = super::scratch_to_number(value);
+        let current_size = self.instances[self.current_instance].size;
+        self.set_size(current_size + change);
+    }
+
     pub fn set_original_rotation_style(&mut self, target: usize, style: &str) {
         let Some(style) = ScratchRotationStyle::from_scratch(style) else {
             return;
@@ -275,17 +358,39 @@ impl ScratchState {
         }
     }
 
-    // register costume names and initialize the current costume for this target.
+    // Compatibility entry point for generated programs without resolved asset metadata.
     pub fn set_target_costumes(&mut self, target: usize, names: Vec<String>, current: usize) {
-        if let Some((_, existing)) = self
-            .target_costumes
-            .iter_mut()
-            .find(|(index, _)| *index == target)
-        {
-            *existing = names;
-        } else {
-            self.target_costumes.push((target, names));
+        let costumes = names
+            .into_iter()
+            .map(|name| ScratchCostumeMetadata::new(name, None))
+            .collect();
+        self.set_target_costume_metadata(target, costumes, current);
+    }
+
+    // Register immutable costume names and precomputed size limits for each target.
+    pub fn set_target_costumes_with_sizes(
+        &mut self,
+        target: usize,
+        costumes: Vec<(String, Option<[f64; 2]>)>,
+        current: usize,
+    ) {
+        let costumes = costumes
+            .into_iter()
+            .map(|(name, logical_size)| ScratchCostumeMetadata::new(name, logical_size))
+            .collect();
+        self.set_target_costume_metadata(target, costumes, current);
+    }
+
+    fn set_target_costume_metadata(
+        &mut self,
+        target: usize,
+        costumes: Vec<ScratchCostumeMetadata>,
+        current: usize,
+    ) {
+        if self.target_costumes.len() <= target {
+            self.target_costumes.resize_with(target + 1, Vec::new);
         }
+        self.target_costumes[target] = costumes;
         if let Some(instance) = self
             .instances
             .iter_mut()
@@ -297,32 +402,57 @@ impl ScratchState {
 
     // resolve costume names and 1-based numeric choices using scratch's costume wrapping.
     pub fn switch_costume_to(&mut self, value: ScratchValue) {
-        let target = self.instances[self.current_instance].target;
-        let Some((_, names)) = self
-            .target_costumes
-            .iter()
-            .find(|(index, _)| *index == target)
-        else {
+        let instance = &self.instances[self.current_instance];
+        let target = instance.target;
+        let current = instance.costume_index;
+        let Some(costumes) = self.target_costumes.get(target) else {
             return;
         };
-        if names.is_empty() {
+        if costumes.is_empty() {
             return;
         }
-        let choice = match value.scratch_view() {
-            super::ScratchValueView::Number(number) => Some(number),
-            super::ScratchValueView::Boolean(value) => Some(f64::from(value)),
-            super::ScratchValueView::Text(text) => names
+        let index = match value.scratch_view() {
+            super::ScratchValueView::Number(number) => {
+                Some(wrapped_costume_index(number - 1.0, costumes.len()))
+            }
+            super::ScratchValueView::Boolean(value) => {
+                let text = if value { "true" } else { "false" };
+                costumes.iter().position(|costume| costume.name == text)
+            }
+            super::ScratchValueView::Text(text) => costumes
                 .iter()
-                .position(|name| name == text)
-                .map(|index| index as f64 + 1.0)
-                .or_else(|| text.parse::<f64>().ok()),
+                .position(|costume| costume.name == text)
+                .or_else(|| match text {
+                    "next costume" => {
+                        Some(wrapped_costume_index(current as f64 + 1.0, costumes.len()))
+                    }
+                    "previous costume" => {
+                        Some(wrapped_costume_index(current as f64 - 1.0, costumes.len()))
+                    }
+                    _ => costume_number_from_text(text)
+                        .map(|number| wrapped_costume_index(number - 1.0, costumes.len())),
+                }),
             super::ScratchValueView::Undefined => None,
         };
-        let Some(choice) = choice.filter(|number| number.is_finite()) else {
+        let Some(index) = index else {
             return;
         };
-        let rounded = (choice + 0.5).floor();
-        let index = ((rounded - 1.0).rem_euclid(names.len() as f64)) as usize;
+        let instance = &mut self.instances[self.current_instance];
+        if instance.costume_index != index {
+            instance.costume_index = index;
+            self.request_redraw();
+        }
+    }
+
+    pub fn next_costume(&mut self) {
+        let instance = &self.instances[self.current_instance];
+        let Some(costumes) = self.target_costumes.get(instance.target) else {
+            return;
+        };
+        if costumes.is_empty() {
+            return;
+        }
+        let index = wrapped_costume_index(instance.costume_index as f64 + 1.0, costumes.len());
         let instance = &mut self.instances[self.current_instance];
         if instance.costume_index != index {
             instance.costume_index = index;
@@ -333,23 +463,24 @@ impl ScratchState {
     // report the executing instance's selected costume using scratch's 1-based numbering.
     pub fn costume_number_name(&self, number: bool) -> ScratchValue {
         let instance = &self.instances[self.current_instance];
-        let Some((_, names)) = self
-            .target_costumes
-            .iter()
-            .find(|(index, _)| *index == instance.target)
-        else {
+        let Some(costumes) = self.target_costumes.get(instance.target) else {
             return ScratchValue::Text(String::new());
         };
         if number {
             ScratchValue::Number(instance.costume_index as f64 + 1.0)
         } else {
             ScratchValue::Text(
-                names
+                costumes
                     .get(instance.costume_index)
-                    .cloned()
+                    .map(|costume| costume.name.clone())
                     .unwrap_or_default(),
             )
         }
+    }
+
+    /// report the executing sprite's size with Scratch's reporter rounding.
+    pub fn size_reporter(&self) -> f64 {
+        super::scratch_round(self.instances[self.current_instance].size)
     }
 
     // update only the executing target's visibility and request a visual frame.
@@ -715,6 +846,123 @@ impl ScratchState {
             .iter()
             .find(|(_, target_name, is_stage)| target_name == name && !is_stage)
             .map(|(target, _, _)| *target)
+    }
+
+    /// read a static `sensing_of` selection from the original named target.
+    /// The optional variable slot is compiler-resolved; `None` means no scalar
+    /// variable exists for this target and property.
+    pub fn sensing_of_target_slot(
+        &self,
+        target: usize,
+        property: &str,
+        variable_slot: Option<usize>,
+    ) -> ScratchValue {
+        self.sensing_of_target(target, property, variable_slot, false)
+    }
+
+    fn sensing_of_target(
+        &self,
+        target: usize,
+        property: &str,
+        variable_slot: Option<usize>,
+        lookup_variable_by_name: bool,
+    ) -> ScratchValue {
+        let Some(instance_id) = self.original_instance(target) else {
+            return ScratchValue::Number(0.0);
+        };
+        let instance = &self.instances[instance_id];
+
+        if instance.is_stage {
+            let built_in = match property {
+                "backdrop #" | "background #" => {
+                    Some(ScratchValue::Number(self.backdrop_index as f64 + 1.0))
+                }
+                "backdrop name" => Some(match self.backdrop_names.get(self.backdrop_index) {
+                    Some(name) => ScratchValue::Text(name.clone()),
+                    None => ScratchValue::Text(String::new()),
+                }),
+                "volume" => Some(ScratchValue::Number(instance.volume)),
+                _ => None,
+            };
+            if let Some(value) = built_in {
+                return value;
+            }
+        } else {
+            let built_in = match property {
+                "x position" => Some(ScratchValue::Number(instance.x)),
+                "y position" => Some(ScratchValue::Number(instance.y)),
+                "direction" => Some(ScratchValue::Number(instance.direction)),
+                "costume #" => Some(ScratchValue::Number(instance.costume_index as f64 + 1.0)),
+                "costume name" => Some(ScratchValue::Text(
+                    self.target_costumes
+                        .get(target)
+                        .and_then(|costumes| costumes.get(instance.costume_index))
+                        .map(|costume| costume.name.clone())
+                        .unwrap_or_default(),
+                )),
+                "size" => Some(ScratchValue::Number(instance.size)),
+                "volume" => Some(ScratchValue::Number(instance.volume)),
+                _ => None,
+            };
+            if let Some(value) = built_in {
+                return value;
+            }
+        }
+
+        let slot = variable_slot
+            .filter(|slot| {
+                self.variables.get(*slot).is_some_and(|metadata| {
+                    metadata.name == property
+                        && metadata.target_index == target
+                        && metadata.is_stage == instance.is_stage
+                })
+            })
+            .or_else(|| {
+                if lookup_variable_by_name {
+                    self.variables.iter().position(|metadata| {
+                        metadata.name == property
+                            && metadata.target_index == target
+                            && metadata.is_stage == instance.is_stage
+                    })
+                } else {
+                    None
+                }
+            });
+        let value = slot.and_then(|slot| {
+            if instance.is_stage {
+                self.values.get(slot)
+            } else {
+                instance
+                    .values
+                    .get(slot)
+                    .and_then(Option::as_ref)
+                    .or_else(|| self.values.get(slot))
+            }
+        });
+        value.cloned().unwrap_or(ScratchValue::Number(0.0))
+    }
+
+    /// resolve a runtime object expression using Scratch's string conversion.
+    pub fn sensing_of_by_name(
+        &self,
+        object: impl super::ScratchInput,
+        property: &str,
+    ) -> ScratchValue {
+        let name = super::to_text(object.scratch_view());
+        let target = if name == "_stage_" {
+            self.target_names
+                .iter()
+                .find(|(_, _, is_stage)| *is_stage)
+                .map(|(target, _, _)| *target)
+        } else {
+            self.target_names
+                .iter()
+                .find(|(_, target_name, is_stage)| !is_stage && target_name == name.as_ref())
+                .map(|(target, _, _)| *target)
+        };
+        target.map_or(ScratchValue::Number(0.0), |target| {
+            self.sensing_of_target(target, property, None, true)
+        })
     }
 
     pub fn register_target(&mut self, target: usize, name: impl Into<String>, is_stage: bool) {
