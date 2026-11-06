@@ -1,4 +1,4 @@
-﻿use std::{
+use std::{
     path::PathBuf,
     sync::atomic::AtomicBool,
     sync::{Arc, RwLock, mpsc},
@@ -14,17 +14,43 @@ use winit::{
     window::{WindowAttributes, WindowId},
 };
 
+use super::input::{forward_slider_edits, position_distance, scratch_key_name};
+use super::list_io::handle_list_monitor_file_action;
+
 use crate::{
-    graphics::{GraphicsState, ListEditorInput, ListMonitorFileAction, RenderOutcome},
+    graphics::{GraphicsState, ListEditorInput, RenderOutcome},
     runtime::{ObservableEvent, PenCommand, RuntimeInputEvent, RuntimeSnapshot, ScratchValue},
 };
 
-pub(crate) enum RendererEvent {
+pub(super) enum RendererEvent {
     SnapshotUpdated,
     ExecutionFinished,
 }
 
-pub(crate) struct RendererApp {
+pub(super) struct RendererAppChannels {
+    pub(super) latest: Arc<RwLock<Arc<RuntimeSnapshot>>>,
+    pub(super) pending_pen_commands: Arc<RwLock<Vec<PenCommand>>>,
+    pub(super) notification_pending: Arc<AtomicBool>,
+    pub(super) observable_events: Option<mpsc::Receiver<ObservableEvent>>,
+    pub(super) stop_sender: mpsc::Sender<()>,
+    pub(super) execution_start_sender: mpsc::Sender<()>,
+    pub(super) acknowledgement_sender: mpsc::Sender<usize>,
+    pub(super) input_sender: mpsc::Sender<RuntimeInputEvent>,
+}
+
+pub(super) struct RendererAppConfig {
+    pub(super) project: Arc<ScratchProject>,
+    pub(super) assets_dir: PathBuf,
+    pub(super) window_title: String,
+    pub(super) channels: RendererAppChannels,
+    pub(super) requested_frame_interval: Duration,
+    pub(super) expected_variables: Vec<(String, ScratchValue)>,
+    pub(super) dev_mode: bool,
+    pub(super) test_mode: bool,
+    pub(super) hd_pen_mode: bool,
+}
+
+pub(super) struct RendererApp {
     graphics: Option<GraphicsState>,
     project: Arc<ScratchProject>,
     assets_dir: PathBuf,
@@ -55,24 +81,28 @@ pub(crate) struct RendererApp {
 }
 
 impl RendererApp {
-    pub(crate) fn new(
-        project: Arc<ScratchProject>,
-        assets_dir: PathBuf,
-        window_title: String,
-        latest: Arc<RwLock<Arc<RuntimeSnapshot>>>,
-        pending_pen_commands: Arc<RwLock<Vec<PenCommand>>>,
-        notification_pending: Arc<AtomicBool>,
-        observable_events: Option<mpsc::Receiver<ObservableEvent>>,
-        stop_sender: mpsc::Sender<()>,
-        execution_start_sender: mpsc::Sender<()>,
-        acknowledgement_sender: mpsc::Sender<usize>,
-        input_sender: mpsc::Sender<RuntimeInputEvent>,
-        requested_frame_interval: Duration,
-        expected_variables: Vec<(String, ScratchValue)>,
-        dev_mode: bool,
-        test_mode: bool,
-        hd_pen_mode: bool,
-    ) -> Self {
+    pub(super) fn new(config: RendererAppConfig) -> Self {
+        let RendererAppConfig {
+            project,
+            assets_dir,
+            window_title,
+            channels,
+            requested_frame_interval,
+            expected_variables,
+            dev_mode,
+            test_mode,
+            hd_pen_mode,
+        } = config;
+        let RendererAppChannels {
+            latest,
+            pending_pen_commands,
+            notification_pending,
+            observable_events,
+            stop_sender,
+            execution_start_sender,
+            acknowledgement_sender,
+            input_sender,
+        } = channels;
         Self {
             graphics: None,
             project,
@@ -245,17 +275,8 @@ impl RendererApp {
         Ok(())
     }
 
-    pub(crate) fn take_error(&mut self) -> Option<String> {
+    pub(super) fn take_error(&mut self) -> Option<String> {
         self.error.take()
-    }
-}
-
-fn forward_slider_edits(
-    input_sender: &mpsc::Sender<RuntimeInputEvent>,
-    graphics: &mut GraphicsState,
-) {
-    for event in graphics.read_changed_monitors() {
-        let _ = input_sender.send(event);
     }
 }
 
@@ -477,53 +498,51 @@ impl ApplicationHandler<RendererEvent> for RendererApp {
                             }
                         }
                     }
-                } else if !self.dragging_variable && !self.dragging_slider {
-                    if let Some((x, y)) = stage_pointer {
-                        let scrollbar_result = self
-                            .graphics
-                            .as_mut()
-                            .map(|graphics| graphics.update_list_scrollbar_hover(Some((x, y))));
-                        let slider_result = self
-                            .graphics
-                            .as_mut()
-                            .map(|graphics| graphics.update_variable_slider_hover(Some((x, y))));
-                        if let Some(result) = scrollbar_result {
-                            match result {
-                                Ok(true) => self.request_redraw(),
-                                Ok(false) => {}
-                                Err(error) => {
-                                    self.error = Some(format!(
-                                        "failed to update list scrollbar hover: {error}"
-                                    ));
-                                }
+                } else if !self.dragging_variable
+                    && !self.dragging_slider
+                    && let Some((x, y)) = stage_pointer
+                {
+                    let scrollbar_result = self
+                        .graphics
+                        .as_mut()
+                        .map(|graphics| graphics.update_list_scrollbar_hover(Some((x, y))));
+                    let slider_result = self
+                        .graphics
+                        .as_mut()
+                        .map(|graphics| graphics.update_variable_slider_hover(Some((x, y))));
+                    if let Some(result) = scrollbar_result {
+                        match result {
+                            Ok(true) => self.request_redraw(),
+                            Ok(false) => {}
+                            Err(error) => {
+                                self.error =
+                                    Some(format!("failed to update list scrollbar hover: {error}"));
                             }
                         }
-                        if let Some(result) = slider_result {
-                            match result {
-                                Ok(true) => self.request_redraw(),
-                                Ok(false) => {}
-                                Err(error) => {
-                                    self.error = Some(format!(
-                                        "failed to update variable slider hover: {error}"
-                                    ));
-                                }
+                    }
+                    if let Some(result) = slider_result {
+                        match result {
+                            Ok(true) => self.request_redraw(),
+                            Ok(false) => {}
+                            Err(error) => {
+                                self.error = Some(format!(
+                                    "failed to update variable slider hover: {error}"
+                                ));
                             }
                         }
                     }
                 }
 
-                if self.dragging_variable || self.dragging_slider {
-                    if let (Some((x, y)), Some(graphics)) = (stage_pointer, self.graphics.as_mut())
-                    {
-                        match graphics.drag_variable_to(x, y) {
-                            Ok(_) => {
-                                forward_slider_edits(&self.input_sender, graphics);
-                                self.request_redraw();
-                            }
-                            Err(error) => {
-                                self.error =
-                                    Some(format!("failed to move variable monitor: {error}"));
-                            }
+                if (self.dragging_variable || self.dragging_slider)
+                    && let (Some((x, y)), Some(graphics)) = (stage_pointer, self.graphics.as_mut())
+                {
+                    match graphics.drag_variable_to(x, y) {
+                        Ok(_) => {
+                            forward_slider_edits(&self.input_sender, graphics);
+                            self.request_redraw();
+                        }
+                        Err(error) => {
+                            self.error = Some(format!("failed to move variable monitor: {error}"));
                         }
                     }
                 }
@@ -601,12 +620,11 @@ impl ApplicationHandler<RendererEvent> for RendererApp {
                                         }
                                     }
                                 }
-                                if let Some(action) = list_action {
-                                    if let Err(error) =
+                                if let Some(action) = list_action
+                                    && let Err(error) =
                                         handle_list_monitor_file_action(action, &self.input_sender)
-                                    {
-                                        self.error = Some(error);
-                                    }
+                                {
+                                    self.error = Some(error.to_string());
                                 }
                                 return;
                             }
@@ -838,146 +856,5 @@ impl ApplicationHandler<RendererEvent> for RendererApp {
         } else {
             event_loop.set_control_flow(ControlFlow::Wait);
         }
-    }
-}
-
-fn handle_list_monitor_file_action(
-    action: ListMonitorFileAction,
-    input_sender: &mpsc::Sender<RuntimeInputEvent>,
-) -> Result<(), String> {
-    match action {
-        ListMonitorFileAction::Import { key } => {
-            let path = rfd::FileDialog::new()
-                .add_filter("list files", &["csv", "tsv", "txt"])
-                .pick_file();
-            let Some(path) = path else {
-                return Ok(());
-            };
-            let contents = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
-            let items = parse_scratch_list_import(&contents)?;
-            let _ = input_sender.send(RuntimeInputEvent::ListReplace { key, items });
-        }
-        ListMonitorFileAction::Export {
-            file_name,
-            contents,
-        } => {
-            let path = rfd::FileDialog::new()
-                .add_filter("text file", &["txt"])
-                .set_file_name(&file_name)
-                .save_file();
-            if let Some(path) = path {
-                std::fs::write(path, contents).map_err(|error| error.to_string())?;
-            }
-        }
-    }
-    Ok(())
-}
-
-fn parse_scratch_list_import(contents: &str) -> Result<Vec<String>, String> {
-    let contents = contents.trim_start_matches('\u{feff}');
-    let delimiter = detect_list_delimiter(contents);
-    let mut reader = csv::ReaderBuilder::new()
-        .has_headers(false)
-        .flexible(true)
-        .delimiter(delimiter)
-        .from_reader(contents.as_bytes());
-    reader
-        .records()
-        .map(|record| {
-            record
-                .map_err(|error| error.to_string())
-                .map(|row| row.get(0).map(str::to_owned))
-        })
-        .filter_map(|record| match record {
-            Ok(Some(value)) => Some(Ok(value)),
-            Ok(None) => None,
-            Err(error) => Some(Err(error)),
-        })
-        .collect()
-}
-
-fn detect_list_delimiter(contents: &str) -> u8 {
-    let mut counts = [(b',', 0usize), (b'\t', 0), (b';', 0), (b'|', 0)];
-    for line in contents.lines().take(10) {
-        let mut quoted = false;
-        let mut chars = line.bytes().peekable();
-        while let Some(character) = chars.next() {
-            if character == b'"' {
-                if quoted && chars.peek() == Some(&b'"') {
-                    chars.next();
-                } else {
-                    quoted = !quoted;
-                }
-            } else if !quoted {
-                for (delimiter, count) in &mut counts {
-                    if character == *delimiter {
-                        *count += 1;
-                    }
-                }
-            }
-        }
-    }
-    counts
-        .into_iter()
-        .max_by_key(|(_, count)| *count)
-        .filter(|(_, count)| *count > 0)
-        .map_or(b',', |(delimiter, _)| delimiter)
-}
-
-fn scratch_key_name(key: &winit::keyboard::Key) -> Option<String> {
-    use winit::keyboard::{Key, NamedKey};
-    match key {
-        Key::Character(value) => Some(value.to_string()),
-        Key::Named(NamedKey::Space) => Some(" ".to_owned()),
-        Key::Named(NamedKey::ArrowUp) => Some("ArrowUp".to_owned()),
-        Key::Named(NamedKey::ArrowDown) => Some("ArrowDown".to_owned()),
-        Key::Named(NamedKey::ArrowLeft) => Some("ArrowLeft".to_owned()),
-        Key::Named(NamedKey::ArrowRight) => Some("ArrowRight".to_owned()),
-        Key::Named(NamedKey::Enter) => Some("Enter".to_owned()),
-        _ => None,
-    }
-}
-
-fn position_distance(a: PhysicalPosition<f64>, b: PhysicalPosition<f64>) -> f64 {
-    let dx = a.x - b.x;
-    let dy = a.y - b.y;
-    (dx * dx + dy * dy).sqrt()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{parse_scratch_list_import, scratch_key_name};
-    use winit::keyboard::{Key, NamedKey};
-
-    #[test]
-    fn translates_winit_keyboard_keys_to_scratch_names() {
-        assert_eq!(
-            scratch_key_name(&Key::Character("A".into())),
-            Some("A".into())
-        );
-        assert_eq!(
-            scratch_key_name(&Key::Named(NamedKey::Space)),
-            Some(" ".into())
-        );
-        assert_eq!(
-            scratch_key_name(&Key::Named(NamedKey::ArrowLeft)),
-            Some("ArrowLeft".into())
-        );
-        assert_eq!(
-            scratch_key_name(&Key::Named(NamedKey::Enter)),
-            Some("Enter".into())
-        );
-    }
-
-    #[test]
-    fn list_import_reads_first_csv_or_tsv_column_and_keeps_quoted_values() {
-        assert_eq!(
-            parse_scratch_list_import("title,value\r\n\"a,b\",2\r\nempty,\r\n").unwrap(),
-            vec!["title", "a,b", "empty"]
-        );
-        assert_eq!(
-            parse_scratch_list_import("one\tignored\ntwo\tignored\n").unwrap(),
-            vec!["one", "two"]
-        );
     }
 }

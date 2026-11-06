@@ -37,6 +37,12 @@ impl SystemPacingMechanism {
     }
 }
 
+impl Default for SystemPacingMechanism {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PacingMechanism for SystemPacingMechanism {
     fn now(&self) -> Duration {
         self.started.elapsed()

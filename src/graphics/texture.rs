@@ -2,6 +2,14 @@ use wgpu::{Device, Queue, Texture, TextureView};
 
 pub(crate) const LAYER_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 
+#[derive(Clone, Copy)]
+pub(crate) struct TextureRegion {
+    pub(crate) x: u32,
+    pub(crate) y: u32,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+}
+
 pub(crate) struct RenderTexture {
     _texture: Texture,
     pub(crate) view: TextureView,
@@ -64,10 +72,12 @@ impl RenderTexture {
         let pixels = vec![0; (self.width * self.height * 4) as usize];
         self.write_straight_rgba_region(
             queue,
-            0,
-            0,
-            self.width,
-            self.height,
+            TextureRegion {
+                x: 0,
+                y: 0,
+                width: self.width,
+                height: self.height,
+            },
             &pixels,
             self.width * 4,
         );
@@ -75,35 +85,40 @@ impl RenderTexture {
 
     pub(crate) fn clear_region(&self, queue: &Queue, x: u32, y: u32, width: u32, height: u32) {
         let pixels = vec![0; (width * height * 4) as usize];
-        self.write_straight_rgba_region(queue, x, y, width, height, &pixels, width * 4);
+        self.write_straight_rgba_region(
+            queue,
+            TextureRegion {
+                x,
+                y,
+                width,
+                height,
+            },
+            &pixels,
+            width * 4,
+        );
     }
 
-    pub(crate) fn write_rgba_region(
-        &self,
-        queue: &Queue,
-        x: u32,
-        y: u32,
-        width: u32,
-        height: u32,
-        pixels: &[u8],
-    ) {
-        assert!(x + width <= self.width);
-        assert!(y + height <= self.height);
-        assert_eq!(pixels.len(), (width * height * 4) as usize);
+    pub(crate) fn write_rgba_region(&self, queue: &Queue, region: TextureRegion, pixels: &[u8]) {
+        assert!(region.x + region.width <= self.width);
+        assert!(region.y + region.height <= self.height);
+        assert_eq!(pixels.len(), (region.width * region.height * 4) as usize);
         let pixels = unpremultiply_rgba(pixels);
-        self.write_straight_rgba_region(queue, x, y, width, height, &pixels, width * 4);
+        self.write_straight_rgba_region(queue, region, &pixels, region.width * 4);
     }
 
     pub(crate) fn write_straight_rgba_region(
         &self,
         queue: &Queue,
-        x: u32,
-        y: u32,
-        width: u32,
-        height: u32,
+        region: TextureRegion,
         pixels: &[u8],
         bytes_per_row: u32,
     ) {
+        let TextureRegion {
+            x,
+            y,
+            width,
+            height,
+        } = region;
         if width == 0 || height == 0 {
             return;
         }

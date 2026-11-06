@@ -325,8 +325,6 @@ impl<S: ResumableScript> ScriptScheduler<S> {
             SchedulerStatus::Complete
         } else if let Some(deadline) = self.wake_at.iter().flatten().copied().min() {
             SchedulerStatus::WaitingUntil(deadline)
-        } else if self.waiting_for.iter().any(Option::is_some) {
-            SchedulerStatus::WaitingForSignal
         } else {
             SchedulerStatus::WaitingForSignal
         }
@@ -350,14 +348,10 @@ impl<S: ResumableScript> ScriptScheduler<S> {
     }
 
     fn run_script_at(&mut self, mut index: usize, state: &mut ScratchState) -> SchedulerStatus {
-        if let Some(signal) = self.waiting_for[index].take() {
-            if !self
-                .waiting_for
-                .iter()
-                .any(|waiting| *waiting == Some(signal))
-            {
-                self.completed_signals.remove(&signal);
-            }
+        if let Some(signal) = self.waiting_for[index].take()
+            && !self.waiting_for.contains(&Some(signal))
+        {
+            self.completed_signals.remove(&signal);
         }
         self.wake_at[index] = None;
         self.next = index;
@@ -604,11 +598,13 @@ impl<S: ResumableScript> ScriptScheduler<S> {
             };
             receiver_ids.push(id);
         }
-        if wait && !receiver_ids.is_empty() && !receiver_ids.contains(&sender) {
-            if let Some(index) = self.script_ids.iter().position(|id| *id == sender) {
-                self.joins[index] = Some(receiver_ids);
-                self.has_waiting_senders = true;
-            }
+        if wait
+            && !receiver_ids.is_empty()
+            && !receiver_ids.contains(&sender)
+            && let Some(index) = self.script_ids.iter().position(|id| *id == sender)
+        {
+            self.joins[index] = Some(receiver_ids);
+            self.has_waiting_senders = true;
         }
         self.has_waiting_senders = self.joins.iter().any(Option::is_some);
     }
@@ -627,5 +623,4 @@ impl<S: ResumableScript> ScriptScheduler<S> {
 }
 
 #[cfg(test)]
-#[path = "scheduler-tests/tests.rs"]
 mod tests;

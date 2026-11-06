@@ -106,16 +106,14 @@ impl GraphicsState {
                 0,
                 bytemuck::cast_slice(&transforms),
             );
-        } else {
-            if transforms_changed {
-                for id in transform_ids {
-                    let transform = self.variable_layer.gpu_monitor_transform(id);
-                    self.queue.write_buffer(
-                        &self.monitor_transforms,
-                        id as u64 * 16,
-                        bytemuck::cast_slice(&transform),
-                    );
-                }
+        } else if transforms_changed {
+            for id in transform_ids {
+                let transform = self.variable_layer.gpu_monitor_transform(id);
+                self.queue.write_buffer(
+                    &self.monitor_transforms,
+                    id as u64 * 16,
+                    bytemuck::cast_slice(&transform),
+                );
             }
         }
         let atlas_revision = self.variable_layer.glyph_atlas_revision();

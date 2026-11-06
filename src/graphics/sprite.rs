@@ -1,4 +1,5 @@
 use resvg::{tiny_skia, usvg};
+use std::fmt;
 use wgpu::Queue;
 
 use super::texture::RenderTexture;
@@ -9,6 +10,23 @@ const SPRITE_CENTER_X_STAGE_PX: f32 = 0.0;
 const SCRATCH_MAX_TEXTURE_DIMENSION: u32 = 2048;
 const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
 
+#[derive(Debug)]
+pub(crate) enum SpriteDecodeError {
+    Png(String),
+    Svg(String),
+}
+
+impl fmt::Display for SpriteDecodeError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Png(error) => write!(formatter, "failed to decode sprite PNG: {error}"),
+            Self::Svg(error) => write!(formatter, "failed to parse sprite SVG: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for SpriteDecodeError {}
+
 #[derive(Clone)]
 pub(crate) struct Sprite {
     source: SpriteSource,
@@ -16,16 +34,16 @@ pub(crate) struct Sprite {
 
 #[derive(Clone)]
 enum SpriteSource {
-    Svg(usvg::Tree),
+    Svg(Box<usvg::Tree>),
     Png(tiny_skia::Pixmap),
     Empty,
 }
 
 impl Sprite {
-    pub(crate) fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
+    pub(crate) fn from_bytes(bytes: &[u8]) -> Result<Self, SpriteDecodeError> {
         if bytes.starts_with(PNG_SIGNATURE) {
             let pixmap = tiny_skia::Pixmap::decode_png(bytes)
-                .map_err(|error| format!("failed to decode sprite PNG: {error}"))?;
+                .map_err(|error| SpriteDecodeError::Png(error.to_string()))?;
             return Ok(Self {
                 source: SpriteSource::Png(pixmap),
             });
@@ -38,10 +56,10 @@ impl Sprite {
                     source: SpriteSource::Empty,
                 });
             }
-            Err(error) => return Err(format!("failed to parse sprite SVG: {error}")),
+            Err(error) => return Err(SpriteDecodeError::Svg(error.to_string())),
         };
         Ok(Self {
-            source: SpriteSource::Svg(tree),
+            source: SpriteSource::Svg(Box::new(tree)),
         })
     }
 

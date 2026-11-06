@@ -1,15 +1,19 @@
+mod bubbles;
+mod color;
+mod monitors;
 mod pipelines;
 pub(crate) mod sprite;
 mod state;
+mod text;
 mod texture;
-mod variables;
 mod viewport;
 
 pub(crate) const SCRATCH_WIDTH: u32 = 480;
 pub(crate) const SCRATCH_HEIGHT: u32 = 360;
 
+pub(crate) use bubbles::BubbleRenderInput;
+pub(crate) use monitors::{ListEditorInput, ListMonitorFileAction, SliderRangeEditorInput};
 pub(crate) use state::{GraphicsState, RenderOutcome};
-pub(crate) use variables::{ListEditorInput, ListMonitorFileAction, SliderRangeEditorInput};
 
 pub(crate) fn fence_geometries(
     project: &aida_ast::parser::ScratchProject,

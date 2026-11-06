@@ -1,16 +1,17 @@
 use std::{cell::Cell, rc::Rc, time::Duration};
 
 use crate::{
-    apply_input_batch, assert_expected_variables, enqueue_pen_commands, parse_run_options,
+    app::{
+        apply_input_batch, assert_expected_variables, enqueue_pen_commands, parse_run_options,
+        project_window_title, run_headless, wait_for_renderer,
+    },
     program::GeneratedProgram,
-    project_window_title, run_headless,
     runtime::{
         Clock, PacingMechanism, PacingMode, PenCommand, PenStroke, ResumableScript,
         RuntimeInputEvent, RuntimeSnapshot, SchedulerStatus, ScratchState, ScratchValue,
         ScratchVariableMetadata, ScriptScheduler, ScriptStatus, VariableSnapshot,
         variable_snapshot_key,
     },
-    wait_for_renderer,
 };
 
 #[test]

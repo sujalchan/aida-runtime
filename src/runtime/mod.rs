@@ -6,12 +6,20 @@ mod pen;
 mod random;
 mod scheduler;
 mod sound;
+mod state;
 mod tick;
 mod value;
 
 pub use list::{SCRATCH_LIST_LIMIT, ScratchList};
 pub use motion::GlideState;
-pub use operators::*;
+pub use operators::{
+    fast_acos_degrees, fast_asin_degrees, fast_atan_degrees, fast_cos, fast_sin, fast_tan,
+    scratch_acos_degrees, scratch_add, scratch_and, scratch_asin_degrees, scratch_atan_degrees,
+    scratch_bool, scratch_compare, scratch_contains, scratch_cos, scratch_divide, scratch_equals,
+    scratch_greater_than, scratch_join, scratch_length, scratch_less_than, scratch_letter,
+    scratch_mod, scratch_multiply, scratch_not, scratch_number_operand, scratch_or, scratch_round,
+    scratch_sin, scratch_string, scratch_subtract, scratch_tan, scratch_to_number,
+};
 pub use pacing::{PacingMechanism, PacingMode, SystemPacingMechanism, TickPacer};
 pub use pen::PenColorState;
 pub use random::{ScratchRandom, scratch_random, scratch_random_constant, with_scratch_random};
@@ -19,18 +27,17 @@ pub use scheduler::EdgeHatState;
 pub use scheduler::{
     Clock, ResumableScript, SchedulerStatus, ScriptScheduler, ScriptStatus, WarpBudget,
 };
-pub use sound::{AudioEvent, RealtimeAudio, SoundLibrary};
+pub use sound::{AudioEvent, RealtimeAudio, SoundAssetError, SoundLibrary};
 pub(crate) use sound::{SoundParameters, SoundRuntime};
-pub use tick::run_tick;
-pub use value::pointer_click_activates;
-pub use value::scratch_motion_coordinate;
-pub use value::{
-    BubbleKind, BubbleSnapshot, CachedListIndex, LayerSnapshot, ListSnapshot, ObservableEvent,
-    ReporterSnapshot, RuntimeInputEvent, RuntimeSnapshot, ScratchInput, ScratchListMetadata,
-    ScratchRotationStyle, ScratchSoundEffect, ScratchState, ScratchValue, ScratchValueView,
-    ScratchVariableMetadata, SpriteFenceGeometry, VariableSnapshot, list_snapshot_key,
+pub use state::{
+    BubbleKind, BubbleSnapshot, LayerSnapshot, ListSnapshot, ObservableEvent, ReporterSnapshot,
+    RuntimeInputEvent, RuntimeSnapshot, ScratchListMetadata, ScratchRotationStyle,
+    ScratchSoundEffect, ScratchState, ScratchVariableMetadata, SpriteFenceGeometry,
+    VariableSnapshot, list_snapshot_key, pointer_click_activates, scratch_motion_coordinate,
     variable_snapshot_key,
 };
+pub use tick::run_tick;
+pub use value::{CachedListIndex, ScratchInput, ScratchValue, ScratchValueView};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum PenCommand {

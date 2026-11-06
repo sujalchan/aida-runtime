@@ -28,7 +28,10 @@ impl GlideState {
 
     /// return the interpolated position while the glide is in progress.
     pub fn position_at(&self, now_millis: u64) -> Option<(f64, f64)> {
-        if !(self.duration_millis > 0.0) {
+        if !matches!(
+            self.duration_millis.partial_cmp(&0.0),
+            Some(std::cmp::Ordering::Greater)
+        ) {
             return None;
         }
         let elapsed_millis = now_millis.saturating_sub(self.started_at_millis) as f64;

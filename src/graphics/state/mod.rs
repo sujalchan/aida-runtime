@@ -3,7 +3,10 @@ mod init;
 mod input;
 mod pen;
 mod profiling;
+mod project;
 mod render;
+mod sync;
+mod textures;
 mod variable_gpu;
 
 use std::collections::HashMap;
@@ -20,6 +23,7 @@ use winit::{
     window::Window,
 };
 
+use super::monitors::{ListEditorInput, ListPointerResponse, MonitorBounds, VariableLayer};
 use super::pipelines::{
     GlyphInstance, GlyphMetadata, MonitorInstance, composite_pipeline, glyph_instance_pipeline,
     layer_bind_group, monitor_instance_pipeline, pen_dot_pipeline, pen_pipeline,
@@ -27,10 +31,6 @@ use super::pipelines::{
 };
 use super::sprite::Sprite;
 use super::texture::{LAYER_FORMAT, RenderTexture};
-use super::variables::{
-    ListEditorInput, ListPointerResponse, MonitorBounds, MonitorCategory, MonitorDisplayMode,
-    MonitorKind, VariableLayer, VariableMonitor,
-};
 use super::viewport::StageViewport;
 use super::{SCRATCH_HEIGHT, SCRATCH_WIDTH};
 use crate::runtime::PenCommand;
@@ -270,10 +270,10 @@ fn changed_glyph_ranges(old: &[GlyphInstance], new: &[GlyphInstance]) -> Vec<(us
 fn changed_instance_ranges<T: bytemuck::Pod>(old: &[T], new: &[T]) -> Vec<(usize, usize)> {
     let mut ranges = Vec::new();
     let mut start = None;
-    for index in 0..new.len() {
-        let unchanged = old.get(index).is_some_and(|previous| {
-            bytemuck::bytes_of(previous) == bytemuck::bytes_of(&new[index])
-        });
+    for (index, current) in new.iter().enumerate() {
+        let unchanged = old
+            .get(index)
+            .is_some_and(|previous| bytemuck::bytes_of(previous) == bytemuck::bytes_of(current));
         if !unchanged && start.is_none() {
             start = Some(index);
         }

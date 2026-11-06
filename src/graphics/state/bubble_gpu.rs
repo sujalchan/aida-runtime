@@ -1,5 +1,5 @@
 use super::*;
-use crate::graphics::variables::BubbleRenderInput;
+use crate::graphics::BubbleRenderInput;
 use crate::runtime::RuntimeSnapshot;
 
 impl GraphicsState {

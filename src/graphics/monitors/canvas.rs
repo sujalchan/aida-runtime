@@ -1,5 +1,10 @@
 use std::collections::HashMap;
 
+use super::menu::{
+    CONTEXT_MENU_ROW_HEIGHT, CONTEXT_MENU_WIDTH, MonitorContextAction, MonitorContextMenu,
+    SLIDER_RANGE_EDITOR_HEIGHT, SLIDER_RANGE_EDITOR_WIDTH,
+};
+use super::{SliderRangeEditor, Triangle, VariableMonitor};
 use ab_glyph::{Font, FontArc, ScaleFont};
 use lyon::{
     math::{Point, point},
@@ -8,15 +13,30 @@ use lyon::{
         BuffersBuilder, FillOptions, FillRule, FillTessellator, FillVertex, VertexBuffers,
     },
 };
-use tiny_skia;
-
-use super::menu::{
-    CONTEXT_MENU_ROW_HEIGHT, CONTEXT_MENU_WIDTH, MonitorContextAction, MonitorContextMenu,
-    SLIDER_RANGE_EDITOR_HEIGHT, SLIDER_RANGE_EDITOR_WIDTH,
-};
-use super::{SliderRangeEditor, Triangle, VariableMonitor};
 
 const SHADOW_COLOR: [u8; 3] = [8, 12, 20];
+
+#[derive(Clone, Copy)]
+pub(super) struct CanvasTransform {
+    pub(super) origin: [f32; 2],
+    pub(super) monitor_scale: f32,
+    pub(super) scale: [f32; 2],
+    pub(super) offset: [f32; 2],
+}
+
+#[derive(Clone, Copy)]
+struct RoundedRect {
+    rect: [f32; 4],
+    radius: f32,
+    color: [u8; 4],
+}
+
+#[derive(Clone, Copy)]
+struct TextPlacement {
+    start: [f32; 2],
+    color: [u8; 4],
+}
+
 pub(super) fn tessellate_path(path: &Path, fill_rule: FillRule) -> Result<Vec<Triangle>, String> {
     let mut buffers: VertexBuffers<Point, u32> = VertexBuffers::new();
     let mut tessellator = FillTessellator::new();
@@ -46,42 +66,35 @@ pub(super) fn draw_context_menu(
     menu: &MonitorContextMenu,
     glyph_meshes: &HashMap<(char, bool), Vec<Triangle>>,
     bold_font: &FontArc,
-    scale_x: f32,
-    scale_y: f32,
-    offset_x: f32,
-    offset_y: f32,
+    transform: CanvasTransform,
 ) -> Result<(), String> {
     fill_rounded_rect(
         pixmap,
-        menu.left,
-        menu.top,
-        CONTEXT_MENU_WIDTH,
-        CONTEXT_MENU_ROW_HEIGHT * menu.options.len() as f32,
-        1.0,
-        [67, 67, 67, 255],
-        0.0,
-        0.0,
-        1.0,
-        scale_x,
-        scale_y,
-        offset_x,
-        offset_y,
+        RoundedRect {
+            rect: [
+                menu.left,
+                menu.top,
+                CONTEXT_MENU_WIDTH,
+                CONTEXT_MENU_ROW_HEIGHT * menu.options.len() as f32,
+            ],
+            radius: 1.0,
+            color: [67, 67, 67, 255],
+        },
+        transform,
     )?;
     fill_rounded_rect(
         pixmap,
-        menu.left + 0.25,
-        menu.top + 0.25,
-        CONTEXT_MENU_WIDTH - 0.5,
-        CONTEXT_MENU_ROW_HEIGHT * menu.options.len() as f32 - 0.5,
-        0.25,
-        [17, 17, 17, 255],
-        0.0,
-        0.0,
-        1.0,
-        scale_x,
-        scale_y,
-        offset_x,
-        offset_y,
+        RoundedRect {
+            rect: [
+                menu.left + 0.25,
+                menu.top + 0.25,
+                CONTEXT_MENU_WIDTH - 0.5,
+                CONTEXT_MENU_ROW_HEIGHT * menu.options.len() as f32 - 0.5,
+            ],
+            radius: 0.25,
+            color: [17, 17, 17, 255],
+        },
+        transform,
     )?;
 
     for (index, option) in menu.options.iter().enumerate() {
@@ -99,53 +112,47 @@ pub(super) fn draw_context_menu(
         if menu.hovered_item == Some(index) {
             fill_rounded_rect(
                 pixmap,
-                menu.left + 1.0,
-                row_top + 1.0,
-                CONTEXT_MENU_WIDTH - 2.0,
-                CONTEXT_MENU_ROW_HEIGHT - 2.0,
-                0.0,
-                [76, 151, 255, 255],
-                0.0,
-                0.0,
-                1.0,
-                scale_x,
-                scale_y,
-                offset_x,
-                offset_y,
+                RoundedRect {
+                    rect: [
+                        menu.left + 1.0,
+                        row_top + 1.0,
+                        CONTEXT_MENU_WIDTH - 2.0,
+                        CONTEXT_MENU_ROW_HEIGHT - 2.0,
+                    ],
+                    radius: 0.0,
+                    color: [76, 151, 255, 255],
+                },
+                transform,
             )?;
         }
         let path = build_text_path(label, true, glyph_meshes, bold_font);
         draw_text(
             pixmap,
             path.as_ref(),
-            0.0,
-            0.0,
-            [255, 255, 255, 255],
-            menu.left + 6.0,
-            row_top + 11.0,
-            0.46,
-            scale_x,
-            scale_y,
-            offset_x,
-            offset_y,
+            TextPlacement {
+                start: [menu.left + 6.0, row_top + 11.0],
+                color: [255, 255, 255, 255],
+            },
+            CanvasTransform {
+                monitor_scale: 0.46,
+                ..transform
+            },
         )?;
     }
     // the only row divider belongs above the final option.
     fill_rounded_rect(
         pixmap,
-        menu.left + 1.0,
-        menu.top + CONTEXT_MENU_ROW_HEIGHT * (menu.options.len() - 1) as f32,
-        CONTEXT_MENU_WIDTH - 2.0,
-        0.75,
-        0.0,
-        [58, 58, 58, 255],
-        0.0,
-        0.0,
-        1.0,
-        scale_x,
-        scale_y,
-        offset_x,
-        offset_y,
+        RoundedRect {
+            rect: [
+                menu.left + 1.0,
+                menu.top + CONTEXT_MENU_ROW_HEIGHT * (menu.options.len() - 1) as f32,
+                CONTEXT_MENU_WIDTH - 2.0,
+                0.75,
+            ],
+            radius: 0.0,
+            color: [58, 58, 58, 255],
+        },
+        transform,
     )?;
     Ok(())
 }
@@ -155,42 +162,35 @@ pub(super) fn draw_slider_range_editor(
     editor: &SliderRangeEditor,
     glyph_meshes: &HashMap<(char, bool), Vec<Triangle>>,
     bold_font: &FontArc,
-    scale_x: f32,
-    scale_y: f32,
-    offset_x: f32,
-    offset_y: f32,
+    transform: CanvasTransform,
 ) -> Result<(), String> {
     fill_rounded_rect(
         pixmap,
-        editor.left,
-        editor.top,
-        SLIDER_RANGE_EDITOR_WIDTH,
-        SLIDER_RANGE_EDITOR_HEIGHT,
-        4.0,
-        [67, 67, 67, 255],
-        0.0,
-        0.0,
-        1.0,
-        scale_x,
-        scale_y,
-        offset_x,
-        offset_y,
+        RoundedRect {
+            rect: [
+                editor.left,
+                editor.top,
+                SLIDER_RANGE_EDITOR_WIDTH,
+                SLIDER_RANGE_EDITOR_HEIGHT,
+            ],
+            radius: 4.0,
+            color: [67, 67, 67, 255],
+        },
+        transform,
     )?;
     fill_rounded_rect(
         pixmap,
-        editor.left + 0.5,
-        editor.top + 0.5,
-        SLIDER_RANGE_EDITOR_WIDTH - 1.0,
-        SLIDER_RANGE_EDITOR_HEIGHT - 1.0,
-        3.5,
-        [24, 24, 24, 255],
-        0.0,
-        0.0,
-        1.0,
-        scale_x,
-        scale_y,
-        offset_x,
-        offset_y,
+        RoundedRect {
+            rect: [
+                editor.left + 0.5,
+                editor.top + 0.5,
+                SLIDER_RANGE_EDITOR_WIDTH - 1.0,
+                SLIDER_RANGE_EDITOR_HEIGHT - 1.0,
+            ],
+            radius: 3.5,
+            color: [24, 24, 24, 255],
+        },
+        transform,
     )?;
     let fields = [
         ("min", editor.min_text.as_str(), editor.editing_min, 22.0),
@@ -200,35 +200,31 @@ pub(super) fn draw_slider_range_editor(
         if selected {
             fill_rounded_rect(
                 pixmap,
-                editor.left + 5.0,
-                editor.top + y - 13.0,
-                SLIDER_RANGE_EDITOR_WIDTH - 10.0,
-                17.0,
-                2.0,
-                [55, 103, 177, 255],
-                0.0,
-                0.0,
-                1.0,
-                scale_x,
-                scale_y,
-                offset_x,
-                offset_y,
+                RoundedRect {
+                    rect: [
+                        editor.left + 5.0,
+                        editor.top + y - 13.0,
+                        SLIDER_RANGE_EDITOR_WIDTH - 10.0,
+                        17.0,
+                    ],
+                    radius: 2.0,
+                    color: [55, 103, 177, 255],
+                },
+                transform,
             )?;
         }
         let path = build_text_path(&format!("{label}: {value}"), true, glyph_meshes, bold_font);
         draw_text(
             pixmap,
             path.as_ref(),
-            0.0,
-            0.0,
-            [255, 255, 255, 255],
-            editor.left + 10.0,
-            editor.top + y,
-            0.46,
-            scale_x,
-            scale_y,
-            offset_x,
-            offset_y,
+            TextPlacement {
+                start: [editor.left + 10.0, editor.top + y],
+                color: [255, 255, 255, 255],
+            },
+            CanvasTransform {
+                monitor_scale: 0.46,
+                ..transform
+            },
         )?;
     }
     let help = build_text_path(
@@ -240,16 +236,14 @@ pub(super) fn draw_slider_range_editor(
     draw_text(
         pixmap,
         help.as_ref(),
-        0.0,
-        0.0,
-        [205, 205, 205, 255],
-        editor.left + 7.0,
-        editor.top + 63.0,
-        0.34,
-        scale_x,
-        scale_y,
-        offset_x,
-        offset_y,
+        TextPlacement {
+            start: [editor.left + 7.0, editor.top + 63.0],
+            color: [205, 205, 205, 255],
+        },
+        CanvasTransform {
+            monitor_scale: 0.34,
+            ..transform
+        },
     )?;
     Ok(())
 }
@@ -257,28 +251,19 @@ pub(super) fn draw_slider_range_editor(
 pub(super) fn draw_monitor_shadow(
     pixmap: &mut tiny_skia::Pixmap,
     monitor: &VariableMonitor,
-    draw_x: f32,
-    draw_y: f32,
-    scale_x: f32,
-    scale_y: f32,
-    offset_x: f32,
-    offset_y: f32,
+    transform: CanvasTransform,
 ) -> Result<(), String> {
     fill_rounded_rect(
         pixmap,
-        5.0,
-        6.0,
-        monitor.width,
-        monitor.height,
-        7.0,
-        [SHADOW_COLOR[0], SHADOW_COLOR[1], SHADOW_COLOR[2], 255],
-        draw_x,
-        draw_y,
-        monitor.scale,
-        scale_x,
-        scale_y,
-        offset_x,
-        offset_y,
+        RoundedRect {
+            rect: [5.0, 6.0, monitor.width, monitor.height],
+            radius: 7.0,
+            color: [SHADOW_COLOR[0], SHADOW_COLOR[1], SHADOW_COLOR[2], 255],
+        },
+        CanvasTransform {
+            monitor_scale: monitor.scale,
+            ..transform
+        },
     )
 }
 
@@ -375,40 +360,38 @@ pub(super) fn build_text_path(
     builder.finish()
 }
 
-#[allow(clippy::too_many_arguments)]
 fn draw_text(
     pixmap: &mut tiny_skia::Pixmap,
     path: Option<&tiny_skia::Path>,
-    start_x: f32,
-    baseline_y: f32,
-    color: [u8; 4],
-    draw_x: f32,
-    draw_y: f32,
-    monitor_scale: f32,
-    scale_x: f32,
-    scale_y: f32,
-    offset_x: f32,
-    offset_y: f32,
+    placement: TextPlacement,
+    transform: CanvasTransform,
 ) -> Result<(), String> {
     let Some(path) = path else {
         return Ok(());
     };
     let mut paint = tiny_skia::Paint::default();
     paint.set_color(tiny_skia::Color::from_rgba8(
-        color[0], color[1], color[2], color[3],
+        placement.color[0],
+        placement.color[1],
+        placement.color[2],
+        placement.color[3],
     ));
     paint.anti_alias = true;
     pixmap.fill_path(
-        &path,
+        path,
         &paint,
         tiny_skia::FillRule::Winding,
         tiny_skia::Transform::from_row(
-            monitor_scale * scale_x,
+            transform.monitor_scale * transform.scale[0],
             0.0,
             0.0,
-            monitor_scale * scale_y,
-            (draw_x + start_x * monitor_scale) * scale_x + offset_x,
-            (draw_y + baseline_y * monitor_scale) * scale_y + offset_y,
+            transform.monitor_scale * transform.scale[1],
+            (transform.origin[0] + placement.start[0] * transform.monitor_scale)
+                * transform.scale[0]
+                + transform.offset[0],
+            (transform.origin[1] + placement.start[1] * transform.monitor_scale)
+                * transform.scale[1]
+                + transform.offset[1],
         ),
         None,
     );
@@ -422,24 +405,14 @@ pub(super) fn centered_baseline(font: &FontArc, size: f32, center_y: f32) -> f32
 
 fn fill_rounded_rect(
     pixmap: &mut tiny_skia::Pixmap,
-    x: f32,
-    y: f32,
-    width: f32,
-    height: f32,
-    radius: f32,
-    color: [u8; 4],
-    draw_x: f32,
-    draw_y: f32,
-    monitor_scale: f32,
-    scale_x: f32,
-    scale_y: f32,
-    offset_x: f32,
-    offset_y: f32,
+    shape: RoundedRect,
+    transform: CanvasTransform,
 ) -> Result<(), String> {
+    let [x, y, width, height] = shape.rect;
     if width <= 0.0 || height <= 0.0 {
         return Ok(());
     }
-    let radius = radius.min(width * 0.5).min(height * 0.5).max(0.0);
+    let radius = shape.radius.min(width * 0.5).min(height * 0.5).max(0.0);
     let k = 0.552_284_8 * radius;
     let mut builder = tiny_skia::PathBuilder::new();
     builder.move_to(x + radius, y);
@@ -476,32 +449,14 @@ fn fill_rounded_rect(
     let path = builder
         .finish()
         .ok_or_else(|| "failed to build rounded variable monitor path".to_owned())?;
-    fill_local_path(
-        pixmap,
-        &path,
-        color,
-        draw_x,
-        draw_y,
-        monitor_scale,
-        scale_x,
-        scale_y,
-        offset_x,
-        offset_y,
-    )
+    fill_local_path(pixmap, &path, shape.color, transform)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn fill_local_path(
     pixmap: &mut tiny_skia::Pixmap,
     path: &tiny_skia::Path,
     color: [u8; 4],
-    draw_x: f32,
-    draw_y: f32,
-    monitor_scale: f32,
-    scale_x: f32,
-    scale_y: f32,
-    offset_x: f32,
-    offset_y: f32,
+    transform: CanvasTransform,
 ) -> Result<(), String> {
     let mut paint = tiny_skia::Paint::default();
     paint.set_color(tiny_skia::Color::from_rgba8(
@@ -513,12 +468,12 @@ fn fill_local_path(
         &paint,
         tiny_skia::FillRule::Winding,
         tiny_skia::Transform::from_row(
-            monitor_scale * scale_x,
+            transform.monitor_scale * transform.scale[0],
             0.0,
             0.0,
-            monitor_scale * scale_y,
-            draw_x * scale_x + offset_x,
-            draw_y * scale_y + offset_y,
+            transform.monitor_scale * transform.scale[1],
+            transform.origin[0] * transform.scale[0] + transform.offset[0],
+            transform.origin[1] * transform.scale[1] + transform.offset[1],
         ),
         None,
     );
