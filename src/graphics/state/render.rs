@@ -17,10 +17,6 @@ impl GraphicsState {
         self.recreate_stage_textures();
     }
 
-    pub(crate) fn rebuild_viewport_textures(&mut self) {
-        self.recreate_stage_textures();
-    }
-
     pub(crate) fn render_with_present_ack(&mut self, presented: impl FnOnce()) -> RenderOutcome {
         let Some(viewport) = self.viewport else {
             return RenderOutcome::Unavailable;

@@ -34,7 +34,6 @@ impl ScratchRandom {
         (bits >> 11) as f64 * (1.0 / ((1_u64 << 53) as f64))
     }
 
-    #[allow(dead_code)]
     pub fn between(&mut self, from: f64, to: f64) -> f64 {
         self.between_with_integer_bounds(from, to, from.fract() == 0.0 && to.fract() == 0.0)
     }

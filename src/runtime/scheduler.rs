@@ -254,17 +254,6 @@ impl<S: ResumableScript> ScriptScheduler<S> {
         self.idle_status()
     }
 
-    /// return script ids in the order the scheduler would consider them.
-    #[allow(dead_code)]
-    pub fn script_ids_in_order(&self) -> Vec<u64> {
-        if self.scripts.is_empty() {
-            return Vec::new();
-        }
-        (0..self.scripts.len())
-            .map(|offset| self.script_ids[(self.next + offset) % self.scripts.len()])
-            .collect()
-    }
-
     /// return active scripts before sleeping scripts at a frame boundary.
     pub fn script_ids_in_frame_order(&self) -> Vec<u64> {
         let mut ids = Vec::with_capacity(self.scripts.len());

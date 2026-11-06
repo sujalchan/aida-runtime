@@ -9,7 +9,6 @@ pub(crate) const SCRATCH_WIDTH: u32 = 480;
 pub(crate) const SCRATCH_HEIGHT: u32 = 360;
 
 pub(crate) use state::{GraphicsState, RenderOutcome};
-#[allow(unused_imports)]
 pub(crate) use variables::{ListEditorInput, ListMonitorFileAction, SliderRangeEditorInput};
 
 pub(crate) fn fence_geometries(

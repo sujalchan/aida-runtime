@@ -561,19 +561,6 @@ pub struct RuntimeSnapshot {
     pub layers: Vec<LayerSnapshot>,
 }
 
-impl RuntimeSnapshot {
-    // release hidden list storage before a graphical snapshot crosses threads.
-    pub(crate) fn release_hidden_list_items(&mut self) {
-        static EMPTY_ITEMS: std::sync::LazyLock<Arc<Vec<ScratchValue>>> =
-            std::sync::LazyLock::new(|| Arc::new(Vec::new()));
-        for list in &mut self.lists {
-            if !list.visible {
-                list.items = Arc::clone(&EMPTY_ITEMS);
-            }
-        }
-    }
-}
-
 pub fn variable_snapshot_key(
     target: &str,
     name: &str,
@@ -3753,9 +3740,9 @@ mod tests {
         assert_eq!(state.list(0).contents(), "local");
     }
 
-    // releasing hidden snapshots lets clear and refill reuse all 172,800 slots.
+    // renderer snapshots omit hidden list items so their shared storage stays reusable.
     #[test]
-    fn graphical_hidden_list_snapshots_release_storage_for_capacity_reuse() {
+    fn renderer_snapshots_do_not_retain_hidden_list_storage() {
         let capacity = 172_800;
         let mut state = ScratchState::with_project_data(
             Vec::new(),
@@ -3775,10 +3762,7 @@ mod tests {
             vec![false],
         );
         let original_capacity = state.list(0).shared_items().capacity();
-        let mut snapshot = state.observable_snapshot(1);
-        assert_eq!(Arc::strong_count(&state.list(0).shared_items()), 3);
-
-        snapshot.release_hidden_list_items();
+        let snapshot = state.observable_snapshot_filtered(1, false);
         assert!(snapshot.lists[0].items.is_empty());
         assert_eq!(Arc::strong_count(&state.list(0).shared_items()), 2);
         assert!(state.list_mut(0).delete_all());

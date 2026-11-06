@@ -1,9 +1,9 @@
 #[rustfmt::skip]
 mod program;
-#[allow(dead_code)]
 mod graphics;
 mod renderer;
-mod runtime;
+// Generated project code uses the runtime library API through this crate alias.
+pub use aida_runtime::runtime;
 
 use std::{
     collections::HashMap,

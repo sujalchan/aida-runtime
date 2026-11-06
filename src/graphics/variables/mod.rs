@@ -244,6 +244,7 @@ impl VariableMonitor {
         self
     }
 
+    #[cfg(test)]
     pub(crate) fn with_list_items(mut self, items: Vec<String>, width: f32, height: f32) -> Self {
         self.list_items = Arc::new(items.into_iter().map(ScratchValue::Text).collect());
         self.with_list_size(width, height)

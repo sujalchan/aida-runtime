@@ -1,6 +1,5 @@
 use super::*;
 use crate::graphics::variables::SliderRangeEditorInput;
-use crate::runtime::SpriteSensingCostume;
 use crate::runtime::{RuntimeInputEvent, RuntimeSnapshot, ScratchValue};
 use std::sync::Arc;
 
@@ -391,60 +390,6 @@ impl GraphicsState {
             self.sprite_instance_indices
                 .insert((sprite.target_index, sprite.instance_id), index);
         }
-    }
-
-    pub(crate) fn set_monitor_visibility(&mut self, name: &str, visible: bool) -> bool {
-        self.variable_layer
-            .set_monitor_visibility(name, visible)
-            .is_some()
-    }
-
-    pub(crate) fn scratch_sensing_costumes(&self) -> HashMap<String, Vec<SpriteSensingCostume>> {
-        self.sprites
-            .iter()
-            .map(|sprite| {
-                let costumes = sprite
-                    .costumes
-                    .iter()
-                    .map(|costume| {
-                        let mip = &costume.mips[&costume.selected_mip];
-                        SpriteSensingCostume {
-                            texture_size: (mip.texture.width, mip.texture.height),
-                            logical_size: costume.logical_size,
-                            rotation_center: costume.rotation_center,
-                            opaque_pixels: Arc::from(mip.opaque_pixels.clone()),
-                        }
-                    })
-                    .collect();
-                (sprite.target_name.clone(), costumes)
-            })
-            .collect()
-    }
-
-    pub(crate) fn scratch_mouse_sprite_updates(
-        &self,
-        stage_pointer: Option<(f32, f32)>,
-    ) -> Vec<(String, String)> {
-        self.sprites
-            .iter()
-            .map(|sprite| {
-                let touching = stage_pointer.is_some_and(|(mouse_x, mouse_y)| {
-                    let costume = &sprite.costumes[sprite.current_costume];
-                    let mip = &costume.mips[&costume.selected_mip];
-                    costume_contains_point(
-                        &sprite.transform,
-                        costume.logical_size,
-                        (mip.texture.width, mip.texture.height),
-                        &mip.opaque_pixels,
-                        (mouse_x, mouse_y),
-                    )
-                });
-                (
-                    format!("__sprite/{}/touching_mouse", sprite.target_name),
-                    if touching { "1" } else { "0" }.to_owned(),
-                )
-            })
-            .collect()
     }
 
     // pick the topmost visible sprite or clone from its current costume alpha mask.

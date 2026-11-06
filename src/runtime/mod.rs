@@ -9,17 +9,12 @@ mod sound;
 mod tick;
 mod value;
 
-#[allow(unused_imports)]
 pub use list::{SCRATCH_LIST_LIMIT, ScratchList};
-#[allow(unused_imports)]
 pub use motion::GlideState;
 pub use operators::*;
-#[allow(unused_imports)]
 pub use pacing::{PacingMechanism, PacingMode, SystemPacingMechanism, TickPacer};
 pub use pen::PenColorState;
-#[allow(unused_imports)]
 pub use random::{ScratchRandom, scratch_random, scratch_random_constant, with_scratch_random};
-#[allow(unused_imports)]
 pub use scheduler::EdgeHatState;
 pub use scheduler::{
     Clock, ResumableScript, SchedulerStatus, ScriptScheduler, ScriptStatus, WarpBudget,
@@ -27,10 +22,8 @@ pub use scheduler::{
 pub use sound::{AudioEvent, RealtimeAudio, SoundLibrary};
 pub(crate) use sound::{SoundParameters, SoundRuntime};
 pub use tick::run_tick;
-#[allow(unused_imports)]
 pub use value::pointer_click_activates;
 pub use value::scratch_motion_coordinate;
-#[allow(unused_imports)]
 pub use value::{
     BubbleKind, BubbleSnapshot, CachedListIndex, LayerSnapshot, ListSnapshot, ObservableEvent,
     ReporterSnapshot, RuntimeInputEvent, RuntimeSnapshot, ScratchInput, ScratchListMetadata,
@@ -68,7 +61,7 @@ pub struct PenDot {
 }
 
 impl PenDot {
-    pub(crate) fn as_stroke(self) -> PenStroke {
+    pub fn as_stroke(self) -> PenStroke {
         PenStroke {
             start: self.position,
             end: self.position,
@@ -123,12 +116,4 @@ pub struct PenStroke {
     pub diameter: f32,
     // offset thin marks by half a physical pen-texture pixel at upload time.
     pub pixel_offset: f32,
-}
-
-#[allow(dead_code)]
-pub struct SpriteSensingCostume {
-    pub texture_size: (u32, u32),
-    pub logical_size: [f32; 2],
-    pub rotation_center: [f32; 2],
-    pub opaque_pixels: std::sync::Arc<[u8]>,
 }
