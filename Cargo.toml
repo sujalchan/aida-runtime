@@ -25,4 +25,4 @@ winit = "0.30.13"
 rfd = { version = "0.15", default-features = false }
 
 [target.'cfg(unix)'.dependencies]
-rfd = { version = "0.15", default-features = false, features = ["xdg-portal"] }
+rfd = { version = "0.15", default-features = false, features = ["async-std", "xdg-portal"] }
